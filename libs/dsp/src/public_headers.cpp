@@ -18,3 +18,5 @@
 #include <anoesis/dsp/math/fast_math.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
 #include <anoesis/dsp/math/random.hpp>
+#include <anoesis/dsp/resampling/halfband.hpp>
+#include <anoesis/dsp/resampling/oversampler.hpp>

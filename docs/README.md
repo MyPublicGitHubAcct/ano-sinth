@@ -37,6 +37,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 5. [Denormals: why they hurt and how we keep them out](dsp/denormals.md)
 6. [White noise and reproducible randomness](dsp/white-noise.md)
 7. [How we measure DSP quality](dsp/measuring-dsp.md): FFT, windows, coherent sampling, THD, aliasing, frequency response, and golden files. Read this before writing any spectral test.
+8. [Oversampling: 2× and 4× with polyphase IIR halfbands](dsp/oversampling.md)
 
 ### 3. Reference material
 

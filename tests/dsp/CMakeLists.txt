@@ -9,7 +9,8 @@ add_executable(anoesis_dsp_tests
     math/decibels_test.cpp
     math/fast_math_test.cpp
     math/pitch_test.cpp
-    math/random_test.cpp)
+    math/random_test.cpp
+    resampling/oversampler_test.cpp)
 
 # anoesis::dsp comes in through anoesis::test_support. Naming it here as well
 # makes Apple's linker warn about a duplicate library.

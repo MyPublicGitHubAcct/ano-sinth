@@ -8,6 +8,7 @@
 add_library(anoesis_dsp STATIC
     src/denormals.cpp
     src/library.cpp
+    src/oversampler.cpp
     src/public_headers.cpp)
 add_library(anoesis::dsp ALIAS anoesis_dsp)
 
