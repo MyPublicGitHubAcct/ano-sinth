@@ -74,6 +74,7 @@ cmake --workflow --preset debug         # configure + build + run all tests
 cmake --build --preset debug            # rebuild only
 ctest --preset debug -R "<test name>"   # run matching tests
 ctest --preset debug -L pluginval       # validate the built VST3 with pluginval (strictness 10)
+ctest --preset debug -L auval           # validate the built AU with auval -strict (installs it temporarily)
 tools/format.sh                         # clang-format 23 (--check to verify only)
 tools/tidy.sh build/debug               # clang-tidy 23 (after a build)
 tools/check-identity-leak.sh            # no private codes in tracked files/commits

@@ -24,6 +24,7 @@ option(BRUTALIS_BUILD_PLUGIN         "Build the plugin target (needs JUCE)" ON)
 option(BRUTALIS_REQUIRE_REAL_IDENTITY "Fail configure if any placeholder identity value is in use (release builds)" OFF)
 option(BRUTALIS_ALLOW_ANY_COMPILER   "Allow a compiler other than the platform's standard one" OFF)
 option(BRUTALIS_PLUGINVAL            "Validate the built plugin with pluginval as a CTest test" ON)
+option(BRUTALIS_AUVAL               "Validate the built AU with auval as a CTest test (macOS; installs it temporarily)" ON)
 set(BRUTALIS_PLUGINVAL_EXECUTABLE "" CACHE FILEPATH "Use this pluginval binary instead of downloading the pinned release")
 
 # --- Language standard --------------------------------------------------------

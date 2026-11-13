@@ -20,9 +20,9 @@ The jobs run as a chain. Each needs the one before it, so a failure skips everyt
 | # | Job | Runner | What it does |
 |---|---|---|---|
 | 1 | Version, format, and identity checks | ubuntu-latest | Checks that the tag equals `v` + `project(VERSION …)` in [CMakeLists.txt](../../CMakeLists.txt). Then runs the clang-format 23.1.5 check and the identity-leak check over tracked files and every commit message, with values from secrets. These need no compiler, so they use the cheapest runner. |
-| 2 | macOS tests (`debug`, `asan`) | macos-latest | `cmake --workflow --preset <preset>`, which includes pluginval at strictness 10 on the VST3 (not in `asan`; see [plugin-validation.md](plugin-validation.md)). The debug leg also runs clang-tidy 23.1.4. The matrix has `fail-fast: true`, so if one leg fails the other is cancelled. Uses the placeholder identity. |
+| 2 | macOS tests (`debug`, `asan`) | macos-latest | `cmake --workflow --preset <preset>`, which includes pluginval at strictness 10 on the VST3 and `auval -strict` on the AU (neither in `asan`; see [plugin-validation.md](plugin-validation.md)). The debug leg also runs clang-tidy 23.1.4. The matrix has `fail-fast: true`, so if one leg fails the other is cancelled. Uses the placeholder identity. |
 | 3 | Linux and Windows tests | ubuntu-22.04, windows-latest | Starts only after both macOS legs pass. The `debug` legs include pluginval. Three legs in one fail-fast matrix: Linux GCC 12 `debug` and `asan` (under `xvfb-run`), and Windows MSVC `debug` (inside `vcvars64.bat`, located with `vswhere`). ASan isn't run on Windows. Uses the placeholder identity. |
-| 4 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds, tests (pluginval validates the release VST3), and uploads the VST3, AU, and Standalone outputs as artifacts. |
+| 4 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds, tests (pluginval and auval validate the release VST3 and AU), and uploads the VST3, AU, and Standalone outputs as artifacts. |
 
 Within each job, steps stop at the first failure (the GitHub default). `concurrency` cancels an older run of the same ref if a newer one starts.
 
@@ -65,7 +65,6 @@ The first CI run (run 43498239659, from commit `2b5476c`) ran on every push and 
 
 | Item | Planned in |
 |---|---|
-| AU validation (`auval`; needs an installed AU) | M0.6 follow-up / M1.12 |
 | Linux and Windows release artifacts | The Linux and Windows milestone (PLAN.md) |
 | Code signing and notarization (macOS), installers | Before the first public release |
 | Build caching (ccache) | When CI time becomes a problem |

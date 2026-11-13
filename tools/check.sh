@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The local gate: run this before every commit (macOS, for now).
 # It configures, builds, and runs all tests (including pluginval on the built
-# VST3), then runs clang-tidy, the format check, and the identity-leak check.
+# VST3 and auval on the AU, which is installed temporarily), then runs clang-tidy, the format check, and the identity-leak check.
 # It stops at the first failure.
 #
 #   tools/check.sh          debug build + tests, tidy, format, leak check

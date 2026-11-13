@@ -84,6 +84,7 @@ Plugins are not copied into the system plugin folders automatically (`COPY_PLUGI
 | `BRUTALIS_ALLOW_ANY_COMPILER` | OFF | Turns the standard-compiler check into a warning. |
 | `BRUTALIS_PLUGINVAL` | ON | Validates the built VST3 with pluginval as a CTest test. The pinned binary is downloaded on the first configure; see [plugin-validation.md](plugin-validation.md). |
 | `BRUTALIS_PLUGINVAL_EXECUTABLE` | empty | Uses a local pluginval binary instead of downloading one (offline builds). |
+| `BRUTALIS_AUVAL` | ON | macOS: validates the AU with `auval -strict` as a CTest test. The AU is installed into `~/Library/Audio/Plug-Ins/Components` for the duration of the test, then removed. |
 
 ## Language standard
 
