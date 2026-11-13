@@ -6,10 +6,11 @@
 # ARM, so it only uses the C++ standard library.
 
 add_library(anoesis_dsp STATIC
-    src/library.cpp)
+    src/library.cpp
+    src/public_headers.cpp)
 add_library(anoesis::dsp ALIAS anoesis_dsp)
 
 target_include_directories(anoesis_dsp PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_compile_features(anoesis_dsp PUBLIC cxx_std_23)
-anoesis_set_warnings(anoesis_dsp)
+anoesis_set_dsp_warnings(anoesis_dsp)

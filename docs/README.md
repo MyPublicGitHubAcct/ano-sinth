@@ -26,7 +26,11 @@ Read these first, in this order.
 
 ### 2. DSP theory and its implementation
 
-This section fills up during Phase 1 (oscillators, filters, envelopes, effects, and so on).
+This section fills up during Phase 1 (oscillators, filters, envelopes, effects, and so on). Read the foundations in this order; later topics build on them.
+
+**Foundations (M1.0)**
+
+1. [The processor lifecycle: prepare, reset, process](dsp/processor-lifecycle.md): real-time rules, `ProcessSpec`, `AudioBlock`, and the contract every processor is tested against.
 
 ### 3. Reference material
 

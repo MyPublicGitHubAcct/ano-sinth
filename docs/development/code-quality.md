@@ -8,10 +8,13 @@ Three tools enforce the rules automatically. All three must be clean before a ta
 
 | Compiler | Flags |
 |---|---|
-| Apple Clang and GCC | `-Wall -Wextra -Wpedantic -Werror` |
-| MSVC | `/W4 /WX /permissive-` |
+| Apple Clang and GCC | `-Wall -Wextra -Wpedantic -Wfloat-equal -Wconversion -Wsign-conversion -Wshadow -Werror` |
+| MSVC | `/W4 /WX /permissive-` (`/W4` already covers the conversion and shadowing warnings) |
+| `libs/dsp` only (Clang and GCC) | `-Wdouble-promotion` as well |
 
-Targets that compile JUCE also get `juce::juce_recommended_warning_flags`. These add, among others, `-Wshadow-all`, `-Wconversion`, `-Wsign-conversion`, and `-Wfloat-equal`.
+The numeric warnings (`-Wfloat-equal`, `-Wconversion`, `-Wsign-conversion`) matter most in DSP code, where a silent `double` → `float` or `float` → `int` narrowing is a real bug. `-Wdouble-promotion` applies to `libs/dsp` alone: on a Cortex-M4F, which has a single-precision FPU, every implicit `float` → `double` promotion becomes a slow software operation. Tests are exempt because Catch2's matchers take `double`. [libs/dsp/src/public_headers.cpp](../../libs/dsp/src/public_headers.cpp) includes every public header, so header-only code is compiled under the library's flags too. Add each new public header there.
+
+Targets that compile JUCE also get `juce::juce_recommended_warning_flags`. These add, among others, `-Wshadow-all` and further checks on top of the list above.
 
 The flags are set **per target, never globally**, so JUCE's and Catch2's own internal targets keep their own settings. JUCE module *sources* compiled into our targets do get our flags, and as of JUCE 9.0.5 they compile cleanly under them with Apple Clang. If a JUCE upgrade breaks this, report it upstream and contain the problem. Don't weaken the flags for our own code.
 

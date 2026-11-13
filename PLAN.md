@@ -31,7 +31,7 @@ Still open:
 - **M0.6:** Version CI hasn't run in its current form yet; that happens on the first `v0.1.0` tag. Plugin validation is complete locally: pluginval passes on the VST3 (strictness 10), and `auval -strict` passes on the AU.
 - **Linux and Windows:** tested in Version CI after macOS. Not built locally, and no release artifacts for them yet. See the section below.
 
-**Next:** M1.0.
+**Phase 1 started.** Working on M1.0 (DSP foundations and test harness).
 
 ---
 
@@ -41,7 +41,6 @@ Settle these before or during Phase 0. Each one affects the work that follows.
 
 | # | Decision | Why it matters | Needed by |
 |---|---|---|---|
-| D5 | **FFT for tests** (for example pocketfft as a test-only dependency, or a small hand-written FFT) | Spectral tests for aliasing and filter response need one, and `libs/dsp` tests cannot use JUCE's FFT. | M1.0 |
 | D6 | **Oscillator anti-aliasing method** (PolyBLEP/PolyBLAMP, minBLEP, or mipmapped wavetables) | Affects quality, CPU cost, and how well it ports to STM32. Prototype and measure in M1.1. | M1.1 |
 | D7 | **Preset and bank file format** (for example JSON or XML with a version field) | A long-term compatibility commitment. | M1.10 |
 | D9 | **Visual design direction for the GUI** | Must be original (clean-room). Affects `libs/gui`. | M1.11 |
@@ -110,7 +109,7 @@ Goal: match every feature in the inventory, including the v3.x additions in §15
 Each milestone lives mostly in `libs/dsp` and is tested in isolation before integration. **Extensibility rule:** waveforms, filter types, effects, and mod sources and destinations are registered behind interfaces, so Phase 2 adds entries rather than editing switches.
 
 ### M1.0 DSP foundations and test harness
-- [ ] Sample-rate and block-size handling (`prepare`/`reset`/`process` lifecycle shared by all processors).
+- [x] Sample-rate and block-size handling (`prepare`/`reset`/`process` lifecycle shared by all processors). *`ProcessSpec`, `AudioBlock`, the `Preparable`/`BlockProcessor` concepts, and `processInChunks` in `libs/dsp/include/anoesis/dsp/core/`. The `anoesis_test_support` library (`tests/support/`) provides `checkLifecycleContract()`, which every stateful processor is tested with. Doc: [processor lifecycle](docs/dsp/processor-lifecycle.md).*
 - [ ] Parameter smoothing, linear and exponential.
 - [ ] Math utilities: dB/gain, note/frequency (with **master tune**, a v3 feature), fast approximations (tanh, exp2) with accuracy tests.
 - [ ] Denormal protection strategy.
@@ -304,4 +303,7 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | Linux and Windows: no local builds. Every major or minor version is tested on both in Version CI, after macOS passes. Release artifacts for them are deferred. | Decided by the project owner (this refines an earlier same-day deferral of Linux and Windows builds). See **Linux and Windows**. |
 | 2026-11-13 | pluginval v1.0.4 (latest stable) added as a CTest test at strictness 10 on the VST3. Downloaded at configure time with pinned SHA-256 hashes and cached in `.cache/`. Skipped in sanitizer builds. | Running as a CTest test means `tools/check.sh` and every CI test leg run it with no extra wiring. Verified both ways: the plugin passes, and NaN output fails. See docs/development/plugin-validation.md. |
 | 2026-11-13 | auval added as a CTest test (`auval -strict`, macOS, skipped under ASan). [tools/auval-test.sh](tools/auval-test.sh) installs the AU into `~/Library/Audio/Plug-Ins/Components` for the duration of the test. It always removes it afterwards and restores any previously installed copy. The codes go in through environment variables and are masked in the output. | auval only sees installed AUs, and installing per-user avoids `sudo`. Verified: the AU passes, wrong codes fail, a pre-existing component is restored, and the codes are absent from the output. |
+| 2026-11-13 | D5: the test FFT is a **hand-written radix-2 FFT in double precision**, in `tests/support/` only. | Chosen by the project owner over vendoring pocketfft or KissFFT (both BSD-3-Clause). No new dependency, MIT throughout. Power-of-2 sizes are enough because the harness picks its own analysis lengths. Double-precision round-off (about 1e-15·log₂N) is far below float's noise floor, so the FFT never limits a measurement. It is checked against a naive DFT. |
+| 2026-11-13 | The processor lifecycle is expressed as C++20 **concepts** (`Preparable`, `BlockProcessor`) over a non-owning `AudioBlock` view, with a float sample rate in `ProcessSpec`. | Zero-cost and inlinable in voice loops. Run-time polymorphism for Phase 2 registries will wrap conforming processors in a thin virtual interface, dispatched once per block. See docs/dsp/processor-lifecycle.md. |
+| 2026-11-13 | Clang and GCC builds of project code add `-Wfloat-equal -Wconversion -Wsign-conversion -Wshadow`, and `libs/dsp` also gets `-Wdouble-promotion`. | JUCE targets already had these through JUCE's recommended flags. The JUCE-free `libs/dsp` and its tests did not, although CLAUDE.md relies on `-Wfloat-equal` being on. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |

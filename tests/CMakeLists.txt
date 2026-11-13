@@ -15,6 +15,7 @@ function(anoesis_register_tests target)
         PROPERTIES TIMEOUT 120)
 endfunction()
 
+add_subdirectory(support)
 add_subdirectory(dsp)
 
 if(BRUTALIS_BUILD_PLUGIN)

@@ -16,6 +16,7 @@ Checks: >
   -readability-magic-numbers,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
   -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
   -cppcoreguidelines-non-private-member-variables-in-classes,
   -misc-non-private-member-variables-in-classes,
   -misc-include-cleaner,
@@ -32,7 +33,9 @@ Checks: >
 #   magic-numbers: DSP formulas are full of literal coefficients; named
 #     constants would hide them rather than explain them.
 #   pro-bounds-*: audio buffers are raw pointer + length by nature (JUCE and
-#     host APIs). Bounds are checked by tests and sanitizers instead.
+#     host APIs). Bounds are checked by tests and sanitizers instead. This
+#     includes avoid-unchecked-container-access, which flags every span[i] in
+#     a sample loop; its suggested .at() throws, which libs/dsp must not.
 #   non-private-member-variables: plain parameter/state structs are idiomatic.
 #   include-cleaner: misfires on JUCE's single-header modules.
 #   trailing-return-type: style preference; we use leading return types.

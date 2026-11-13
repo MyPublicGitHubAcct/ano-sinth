@@ -16,7 +16,8 @@ Why it matters here: DSP bugs are often *quiet*. A filter that is 3 dB off, an e
 
 | Executable | Tests | Links |
 |---|---|---|
-| `anoesis_dsp_tests` | `libs/dsp` | Catch2 only (no JUCE, like the library) |
+| `anoesis_dsp_tests` | `libs/dsp` | Catch2 and `anoesis_test_support` (no JUCE, like the library) |
+| `anoesis_test_support_tests` | `tests/support` (the measurement code itself) | Catch2 and `anoesis_test_support` |
 | `anoesis_gui_tests` | `libs/gui` | JUCE console app + the `anoesis_gui` module |
 | `anoesis_interop_tests` | `libs/interop` | JUCE console app + the `anoesis_interop` module |
 | `brutalis_plugin_tests` | `plugin/` | JUCE console app + the plugin's own sources (see [project-structure.md](project-structure.md#how-the-plugin-and-its-tests-share-code)) |
@@ -24,6 +25,17 @@ Why it matters here: DSP bugs are often *quiet*. A filter that is 3 dB off, an e
 | `auval:AU` (CTest only, macOS) | the built AU, installed temporarily | `auval -strict` ([plugin-validation.md](plugin-validation.md#auval-audio-units-macos)). Skipped in `asan`. |
 
 Name test files `<unit>_test.cpp`. Tag test cases with the library (`[dsp]`) plus a category, such as `[smoke]`, and later `[spectral]`, `[timing]`, or `[!benchmark]`.
+
+## The test support library
+
+[tests/support/](../../tests/support/) builds `anoesis_test_support`: the measurement code and fixtures the DSP tests share. It lives under `tests/` and never in `libs/dsp`, because it may allocate, use `double` freely, and touch files. Like `libs/dsp`, it has no JUCE dependency. Include it as `#include <anoesis/test/...>`, namespace `anoesis::test`.
+
+| Header | What it gives you |
+|---|---|
+| `buffer.hpp` | `Buffer`, an owning multichannel buffer that hands out an `AudioBlock`; `bitIdentical()` for determinism checks |
+| `lifecycle.hpp` | `checkLifecycleContract()`: proves `reset()` and a repeated `prepare()` restore the freshly prepared state ([processor lifecycle](../dsp/processor-lifecycle.md#tests)) |
+
+A wrong measurement makes every test built on it meaningless, so the support code has its own tests in `tests/support/test/`.
 
 ## Adding a test
 

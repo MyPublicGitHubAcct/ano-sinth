@@ -31,6 +31,16 @@ endfunction()
 # Strict warnings for project code. Applied per target, never globally, so
 # third-party code (JUCE, Catch2) keeps its own settings.
 #
+# Beyond -Wall -Wextra -Wpedantic, GCC and Clang get the numeric warnings that
+# matter most in DSP code. JUCE targets also get these through
+# juce_recommended_warning_flags, but targets without JUCE (libs/dsp and its
+# tests) need them spelled out here:
+#   -Wfloat-equal       `x == 0.0f` must be written as an explicit comparison
+#   -Wconversion        no silent double -> float or float -> int narrowing
+#   -Wsign-conversion   no silent signed <-> unsigned (index arithmetic)
+#   -Wshadow            no local that hides a member or outer variable
+# MSVC's /W4 already covers the conversion warnings (C4244, C4267, C4456-8).
+#
 # Targets that compile JUCE module sources (the plugin and the JUCE-based test
 # runners) also compile those sources with these flags. JUCE headers are
 # included as ordinary (non-system) headers, so they are held to the same
@@ -42,10 +52,23 @@ function(anoesis_set_warnings target)
             target_compile_options(${target} PRIVATE /WX)
         endif()
     else()
-        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(${target} PRIVATE
+            -Wall -Wextra -Wpedantic
+            -Wfloat-equal -Wconversion -Wsign-conversion -Wshadow)
         if(BRUTALIS_WARNINGS_AS_ERRORS)
             target_compile_options(${target} PRIVATE -Werror)
         endif()
+    endif()
+endfunction()
+
+# Extra warnings for libs/dsp only. -Wdouble-promotion flags every implicit
+# float -> double promotion: on a Cortex-M4F (single-precision FPU only) each
+# one becomes a slow software double operation. Test code is exempt, because
+# Catch2's matchers take double arguments.
+function(anoesis_set_dsp_warnings target)
+    anoesis_set_warnings(${target})
+    if(NOT MSVC)
+        target_compile_options(${target} PRIVATE -Wdouble-promotion)
     endif()
 endfunction()
 
