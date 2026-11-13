@@ -12,7 +12,9 @@
 #include <anoesis/dsp/core/denormals.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
 #include <anoesis/dsp/core/processor.hpp>
+#include <anoesis/dsp/generators/white_noise.hpp>
 #include <anoesis/dsp/library.hpp>
 #include <anoesis/dsp/math/decibels.hpp>
 #include <anoesis/dsp/math/fast_math.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
+#include <anoesis/dsp/math/random.hpp>

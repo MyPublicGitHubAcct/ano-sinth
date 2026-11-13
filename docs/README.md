@@ -35,6 +35,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 3. [Fast approximations: exp2 and tanh](dsp/fast-math.md): range reduction, minimax polynomials, avoiding cancellation, and measured error.
 4. [Parameter smoothing and zipper noise](dsp/parameter-smoothing.md)
 5. [Denormals: why they hurt and how we keep them out](dsp/denormals.md)
+6. [White noise and reproducible randomness](dsp/white-noise.md)
 
 ### 3. Reference material
 
