@@ -53,7 +53,16 @@ include(BrutalisIdentity)
 add_subdirectory(libs/dsp)
 
 if(BRUTALIS_BUILD_PLUGIN)
-    add_subdirectory(external/JUCE EXCLUDE_FROM_ALL)
+    # On GCC, JUCE's include directories are system directories, so GCC skips
+    # warnings located in JUCE headers: JUCE 9.0.5 is not clean under GCC's
+    # -Wconversion, which our targets add. Elsewhere they stay ordinary, so
+    # Apple Clang still holds JUCE headers to our full warning set. See
+    # docs/development/code-quality.md.
+    set(juce_system "")
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(juce_system SYSTEM)
+    endif()
+    add_subdirectory(external/JUCE EXCLUDE_FROM_ALL ${juce_system})
     add_subdirectory(libs/gui)
     add_subdirectory(libs/interop)
     add_subdirectory(plugin)
