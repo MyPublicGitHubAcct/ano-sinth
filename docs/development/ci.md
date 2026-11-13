@@ -1,45 +1,68 @@
 # Continuous integration
 
-CI runs on GitHub Actions (decision D4). The workflows are in [.github/workflows/](../../.github/workflows/).
+## Policy
 
-> Status (2026-11-13): CI runs on GitHub. It is **macOS-only** for now, because Linux and Windows builds are deferred to a later phase (see PLAN.md). Draft jobs for both platforms are in commit `2b5476c`, and the reasoning behind them is kept below so they can be restored.
+- **Local first.** Every commit is tested locally on macOS before it is made. Run [tools/check.sh](../../tools/check.sh), which:
+  1. configures, builds, and runs all tests (`debug` preset);
+  2. runs clang-tidy;
+  3. runs the format check;
+  4. runs the identity-leak check;
 
-## `ci.yml`: every push to `main` and every pull request
+  and stops at the first failure. Add `--asan` to also run the sanitizer build. The git hooks also check formatting and identity leaks on each commit.
+- **GitHub Actions runs only for major and minor versions.** The trigger is a pushed tag `vX.Y.0`, or a manual dispatch. Patch versions (`vX.Y.Z` with Z > 0), ordinary pushes, and pull requests run nothing. This keeps hosted CI time for the points where a version is cut.
+- **macOS only**, for now. Linux and Windows builds are deferred to a later phase (see PLAN.md).
+- **Fail fast.** One failure stops the run, so no minutes are spent after something has already broken.
 
-| Job | Runner | What it does |
-|---|---|---|
-| Format check | ubuntu-latest | `pip install clang-format==23.1.5`, then `tools/format.sh --check`. This needs no compiler, so it runs on Linux even while Linux builds are deferred. |
-| Identity leak check | ubuntu-latest | `tools/check-identity-leak.sh` over tracked files and the full commit history, with values from secrets. If the secrets are absent (as on forks, or before they are set), it skips. |
-| macOS | macos-latest | Apple Clang: `cmake --workflow --preset debug` and `asan`. Then clang-tidy 23.1.4 on the debug build. |
+## The workflow: [version-ci.yml](../../.github/workflows/version-ci.yml)
 
-All builds use the **placeholder** identity.
+The jobs run as a chain. Each needs the one before it, so a failure skips everything downstream:
 
-### When Linux and Windows return
+| # | Job | Runner | What it does |
+|---|---|---|---|
+| 1 | Version, format, and identity checks | ubuntu-latest | Checks that the tag equals `v` + `project(VERSION …)` in [CMakeLists.txt](../../CMakeLists.txt). Then runs the clang-format 23.1.5 check and the identity-leak check over tracked files and every commit message, with values from secrets. These need no compiler, so they use the cheapest runner. |
+| 2 | macOS tests (`debug`, `asan`) | macos-latest | `cmake --workflow --preset <preset>`. The debug leg also runs clang-tidy 23.1.4. The matrix has `fail-fast: true`, so if one leg fails the other is cancelled. Uses the placeholder identity. |
+| 3 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds, tests, and uploads the VST3, AU, and Standalone outputs as artifacts. |
 
-On the one run that included them (before the deferral), Linux passed. Windows failed on MSVC warning C4459. A test constant shadowed a JUCE template parameter. That has been fixed in the test, but MSVC hasn't verified the fix yet.
+Within each job, steps stop at the first failure (the GitHub default). `concurrency` cancels an older run of the same ref if a newer one starts.
 
-- **Linux:** run on `ubuntu-22.04` with GCC 12. 22.04 is the minimum supported Linux (decision D8). Building there links against its libstdc++ (from GCC 12), so the binaries run on 22.04 and newer. Run the tests under `xvfb-run`, because the editor test creates JUCE components.
-- **Windows:** run inside `vcvars64.bat`, located with `vswhere`, so that Ninja finds `cl.exe`. Doing this ourselves avoids depending on a third-party action.
+### Cutting a major or minor version
 
-## `release.yml`: version tags (`v*`) and manual runs
+```sh
+# 1. Bump project(VERSION X.Y.0) in CMakeLists.txt.
+tools/check.sh --asan             # 2. Local gate.
+git commit -am "Version X.Y.0"    # 3. Commit.
+git tag vX.Y.0                    # 4. Tag.
+git push origin main vX.Y.0       # 5. Push the commit and the tag. The tag starts CI.
+```
 
-1. Runs the identity leak check first.
-2. Configures with the `release` preset, passing the real identity from secrets as `-D` values. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails the build.
-3. Builds and tests on macOS as a universal binary. Linux and Windows are deferred.
-4. Uploads the VST3, AU, and Standalone outputs as workflow artifacts.
+If the tag doesn't match the version in CMakeLists.txt, job 1 fails and nothing else runs.
 
-These secrets must be set in the repository settings before the first release:
+## Secrets
+
+These are set in the repository's Actions secrets (done on 2026-11-13):
 
 - `BRUTALIS_MANUFACTURER_CODE`
 - `BRUTALIS_PLUGIN_CODE`
 - `BRUTALIS_BUNDLE_ID`
 
-The ordinary CI leak check uses the same three secrets.
+The leak check and the release build use them. To change one, run `printf %s "<value>" | gh secret set <NAME>`. Never echo a value in a log.
+
+## History and deferred platforms
+
+The first CI run (run 43498239659, from commit `2b5476c`) ran on every push and covered all three platforms:
+
+- **Linux, GCC 12:** passed as-is, for both `debug` and `asan`.
+- **Windows, MSVC:** failed on warning C4459. A test constant was hidden by a JUCE template parameter with the same name. That has been fixed in the test, but MSVC hasn't checked the fix yet.
+
+Drafts of the Linux and Windows jobs are in commit `2b5476c`. When they return:
+
+- **Linux:** run on `ubuntu-22.04` with GCC 12. 22.04 is the minimum supported Linux (decision D8). Building there links against its libstdc++ (from GCC 12), so the binaries run on 22.04 and newer. Run the tests under `xvfb-run`, because the editor test creates JUCE components.
+- **Windows:** run inside `vcvars64.bat`, located with `vswhere`, so that Ninja finds `cl.exe`. Doing this ourselves avoids depending on a third-party action.
 
 ## Not done yet
 
 | Item | Planned in |
 |---|---|
 | Plugin validation with pluginval, plus `auval` on macOS | M0.6 follow-up / M1.12 |
-| Code signing and notarization (macOS), signing (Windows), installers | Before the first public release |
-| Build caching (ccache / sccache) | When CI time becomes a problem |
+| Code signing and notarization (macOS), installers | Before the first public release |
+| Build caching (ccache) | When CI time becomes a problem |

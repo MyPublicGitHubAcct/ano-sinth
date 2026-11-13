@@ -44,6 +44,6 @@ All of this was checked on 2026-11-13 with a scratch project:
 
 - The 4-character codes are matched as **whole words**. The product and company names start with the same letters, and a substring match would flag every mention of them.
 - In CI it prints only the names of the files that leak, never the matching lines.
-- It runs in CI (`identity-leak` job), in the release workflow before any build, and locally through the pre-commit and commit-msg hooks.
+- It runs locally through `tools/check.sh` and the pre-commit and commit-msg hooks. In CI it runs as the first job of the version workflow, before any build.
 
 Both directions were tested: a staged file containing the real plugin code is caught, and the product and company names are not flagged.

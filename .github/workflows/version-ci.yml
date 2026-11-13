@@ -1,0 +1,98 @@
+# Version CI: runs only for major and minor versions. It runs when a tag
+# vX.Y.0 is pushed, and on manual dispatch. Patch versions (vX.Y.Z, Z > 0) and
+# ordinary pushes run nothing: day-to-day testing happens locally, on macOS,
+# before each commit (tools/check.sh). Details: docs/development/ci.md
+#
+# Fail fast: the jobs run as a chain (checks -> test -> release). Any failure
+# stops everything after it, and a failing matrix leg cancels its sibling.
+
+name: Version CI
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.0']
+  workflow_dispatch:
+
+concurrency:
+  group: version-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Version, format, and identity checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # the leak check reads every commit message
+      - name: Tag matches the project version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -nE 's/^[[:space:]]*VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt | head -n1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match project(VERSION $version) in CMakeLists.txt"
+            exit 1
+          fi
+      - run: pip install clang-format==23.1.5
+      - run: tools/format.sh --check
+      - name: Identity leak check
+        env:
+          BRUTALIS_MANUFACTURER_CODE: ${{ secrets.BRUTALIS_MANUFACTURER_CODE }}
+          BRUTALIS_PLUGIN_CODE: ${{ secrets.BRUTALIS_PLUGIN_CODE }}
+          BRUTALIS_BUNDLE_ID: ${{ secrets.BRUTALIS_BUNDLE_ID }}
+        run: tools/check-identity-leak.sh
+
+  test:
+    name: macOS tests (${{ matrix.preset }})
+    needs: checks
+    runs-on: macos-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        preset: [debug, asan]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: brew install ninja
+      - run: cmake --workflow --preset ${{ matrix.preset }}
+      - name: clang-tidy
+        if: matrix.preset == 'debug'
+        run: |
+          pip install clang-tidy==23.1.4
+          CLANG_TIDY="$(python3 -c 'import shutil; print(shutil.which("clang-tidy"))')" tools/tidy.sh build/debug
+
+  release:
+    name: macOS release build (universal)
+    needs: test
+    runs-on: macos-latest
+    env:
+      BRUTALIS_MANUFACTURER_CODE: ${{ secrets.BRUTALIS_MANUFACTURER_CODE }}
+      BRUTALIS_PLUGIN_CODE: ${{ secrets.BRUTALIS_PLUGIN_CODE }}
+      BRUTALIS_BUNDLE_ID: ${{ secrets.BRUTALIS_BUNDLE_ID }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: brew install ninja
+      # The release preset sets BRUTALIS_REQUIRE_REAL_IDENTITY=ON, so a missing
+      # secret fails configure instead of producing a placeholder build.
+      - name: Configure, build, and test
+        run: |
+          cmake --preset release \
+            -DBRUTALIS_MANUFACTURER_CODE="$BRUTALIS_MANUFACTURER_CODE" \
+            -DBRUTALIS_PLUGIN_CODE="$BRUTALIS_PLUGIN_CODE" \
+            -DBRUTALIS_BUNDLE_ID="$BRUTALIS_BUNDLE_ID"
+          cmake --build --preset release
+          ctest --preset release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Brutalis-${{ github.ref_name }}-macOS
+          path: |
+            build/release/plugin/brutalis_artefacts/Release/VST3
+            build/release/plugin/brutalis_artefacts/Release/AU
+            build/release/plugin/brutalis_artefacts/Release/Standalone
+          if-no-files-found: error

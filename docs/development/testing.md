@@ -6,7 +6,7 @@ No production code goes in without a test that covers it, and the test comes fir
 
 1. **Red.** Write a Catch2 test for the behavior you want. Build it and watch it **fail for the right reason**. A failed assertion is the best evidence: it proves the test can detect the missing behavior. A compile error is weaker, but acceptable when the API doesn't exist yet.
 2. **Green.** Write the least code that makes the test pass.
-3. **Refactor.** Clean up the code and the test with the test still passing. Format, then run clang-tidy.
+3. **Refactor.** Clean up the code and the test with the test still passing. Then run `tools/check.sh`, which builds, runs every test, tidies, and checks formatting and identity leaks. It must pass before you commit. Hosted CI runs only for version tags ([ci.md](ci.md)).
 
 Why it matters here: DSP bugs are often *quiet*. A filter that is 3 dB off, an envelope with a 1-sample glitch, or aliasing at −60 dB all still make sound. Tests that measure behavior numerically are the only reliable way to keep such bugs out. They also become the regression net for Phase 3, when code is rewritten for speed.
 

@@ -36,5 +36,7 @@ Test-driven development is required, and warnings are errors. Read
 
 ## License
 
-`libs/dsp` is MIT. The rest is not yet licensed (all rights reserved) pending a
-decision between AGPLv3 and a commercial JUCE license. See [LICENSE](LICENSE).
+MIT; see [LICENSE](LICENSE). The JUCE and Catch2 submodules keep their own
+licenses. Plugin binaries contain JUCE, so distributing them also requires
+complying with JUCE's terms: the AGPLv3 for the combined work, or a commercial
+JUCE license.

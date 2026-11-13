@@ -51,4 +51,4 @@ Run `tools/install-hooks.sh` once per clone. It points `core.hooksPath` at [tool
 - **pre-commit:** blocks staged changes that contain a private identity value, and staged C++ files that aren't formatted.
 - **commit-msg:** blocks commit messages that contain a private identity value.
 
-CI runs the same checks, so the hooks only catch problems earlier.
+The hooks are fast and cover only formatting and identity leaks. Before committing, run `tools/check.sh`: it builds, tests, and tidies too. Version CI repeats the same checks on `vX.Y.0` tags.

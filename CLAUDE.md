@@ -49,8 +49,9 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
 - **Framework:** [JUCE](https://github.com/juce-framework/JUCE) 9, as a git submodule at `external/JUCE`, pinned to the latest 9.x release tag (9.0.5 as of 2026-11-13). Upgrade deliberately, never by tracking a branch.
 - **Testing:** [Catch2](https://github.com/catchorg/Catch2) v3, as a git submodule at `external/Catch2`, pinned to a release tag (v3.16.1 as of 2026-11-13). Tests run through CTest.
 - **Licensing:**
-  - `libs/dsp` is **MIT** and carries its own `LICENSE` file. Nothing JUCE-licensed or copyleft may enter it.
-  - Everything that links JUCE (`libs/gui`, `libs/interop`, `plugin/`) is bound by JUCE's terms: AGPLv3 unless a commercial JUCE license is held. Still open; see D1 in PLAN.md.
+  - All project code is **MIT** (root `LICENSE`, decision D1). `libs/dsp` also carries its own copy, so it can be reused on its own. Nothing JUCE-licensed or copyleft may enter `libs/dsp`.
+  - Submodules keep their own licenses: JUCE is AGPLv3 or commercial, and Catch2 is BSL-1.0.
+  - Plugin *binaries* contain JUCE, so distributing them must also satisfy JUCE: either the AGPLv3 for the combined work (offer the source, add no extra restrictions) or a commercial JUCE license. The MIT code itself stays MIT.
 - **Build:** CMake + Ninja on every platform. Use `CMakePresets.json` for the configurations. Development happens on macOS.
 - **Compilers:** each platform's standard compiler:
   - macOS: Apple Clang (Xcode command-line tools)
@@ -75,7 +76,10 @@ ctest --preset debug -R "<test name>"   # run matching tests
 tools/format.sh                         # clang-format 23 (--check to verify only)
 tools/tidy.sh build/debug               # clang-tidy 23 (after a build)
 tools/check-identity-leak.sh            # no private codes in tracked files/commits
+tools/check.sh [--asan]                 # the local gate: all of the above, run before every commit
 ```
+
+**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is macOS-only and fail-fast. Do not add per-push or per-PR CI. Details: [docs/development/ci.md](docs/development/ci.md).
 
 On Windows, run these from a Visual Studio developer prompt (so Ninja finds `cl.exe`).
 

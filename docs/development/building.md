@@ -11,7 +11,7 @@
 | Extra | — | JUCE's system packages (see below) | Run from a **Developer** prompt, so Ninja can find `cl.exe` |
 | Optional | clang-format and clang-tidy 23 (`brew install llvm`) | `pip install clang-format==23.1.5 clang-tidy==23.1.4` | same as Linux |
 
-Each platform builds with its standard compiler only. Configure fails if CMake picks anything else (for example Homebrew Clang on macOS). You can override this with `-DBRUTALIS_ALLOW_ANY_COMPILER=ON` for an experiment, but never in CI. Logic: [cmake/AnoesisCompiler.cmake](../../cmake/AnoesisCompiler.cmake).
+Each platform builds with its standard compiler only. Configure fails if CMake picks anything else (for example Homebrew Clang on macOS). You can override this with `-DBRUTALIS_ALLOW_ANY_COMPILER=ON` for an experiment, but never for a commit or in CI. Logic: [cmake/AnoesisCompiler.cmake](../../cmake/AnoesisCompiler.cmake).
 
 Linux packages, on Ubuntu 22.04 or 24.04 (JUCE's list is in `external/JUCE/docs/Linux Dependencies.md`):
 
@@ -104,6 +104,6 @@ Until Linux and Windows CI returns, "compiles on my Mac" proves nothing about GC
 |---|---|---|
 | macOS | 12.0 (Monterey); arm64 + x86_64 in release | `CMAKE_OSX_DEPLOYMENT_TARGET` in [CMakeLists.txt](../../CMakeLists.txt); architectures in the `release` preset |
 | Windows | 10 (x64) | JUCE's default target; MSVC x64 developer environment |
-| Linux | Ubuntu 22.04 (glibc 2.35, libstdc++ from GCC 12) | CI builds on `ubuntu-22.04` with GCC 12 |
+| Linux | Ubuntu 22.04 (glibc 2.35, libstdc++ from GCC 12) | Build on `ubuntu-22.04` with GCC 12 (deferred; see PLAN.md) |
 
 Trade-off: macOS 12 still covers older Intel Macs that are common in studios, and it adds no availability workarounds for the language features we use. Raising the baseline later is easy. Lowering it after release is not.

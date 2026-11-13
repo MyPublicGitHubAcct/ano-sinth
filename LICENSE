@@ -1,14 +1,34 @@
-Copyright (c) 2026 Anoesis Audio. All rights reserved.
+MIT License
 
-This repository is not yet licensed for use, copying, modification, or
-distribution, except as stated below. The license for the code that links JUCE
-(libs/gui, libs/interop, plugin/, and the tests that build them) is an open
-decision (D1 in PLAN.md). It will be either the GNU AGPLv3 or a proprietary
-license backed by a commercial JUCE license.
+Copyright (c) 2026 Anoesis Audio
 
-Exceptions:
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-  - libs/dsp/ is licensed under the MIT License. See libs/dsp/LICENSE.
-  - external/JUCE and external/Catch2 are third-party code under their own
-    licenses (JUCE: AGPLv3 or the commercial JUCE license; Catch2: Boost
-    Software License 1.0). See the LICENSE files in those directories.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+Third-party code
+
+This license covers the code in this repository written for Brutalis. It does
+not cover the submodules under external/, which keep their own licenses:
+
+  - external/JUCE: AGPLv3, or the commercial JUCE licence.
+  - external/Catch2: Boost Software License 1.0 (used only in tests).
+
+Plugin binaries are built with JUCE, so whoever distributes them must also meet
+JUCE's terms: either the AGPLv3 for the combined work, or a commercial JUCE
+licence. See external/JUCE/LICENSE.md.
