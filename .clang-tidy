@@ -1,0 +1,69 @@
+# Static analysis for project code, based on the C++ Core Guidelines.
+# Run with tools/tidy.sh. Every disabled check below says why.
+---
+Checks: >
+  -*,
+  bugprone-*,
+  cppcoreguidelines-*,
+  clang-analyzer-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -misc-non-private-member-variables-in-classes,
+  -misc-include-cleaner,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -readability-convert-member-functions-to-static,
+  -readability-avoid-const-params-in-decls,
+  -readability-const-return-type,
+  -portability-avoid-pragma-once,
+  -clang-analyzer-optin.core.EnumCastOutOfRange
+# Why these are off:
+#   easily-swappable-parameters: DSP APIs take many same-typed float arguments.
+#   magic-numbers: DSP formulas are full of literal coefficients; named
+#     constants would hide them rather than explain them.
+#   pro-bounds-*: audio buffers are raw pointer + length by nature (JUCE and
+#     host APIs). Bounds are checked by tests and sanitizers instead.
+#   non-private-member-variables: plain parameter/state structs are idiomatic.
+#   include-cleaner: misfires on JUCE's single-header modules.
+#   trailing-return-type: style preference; we use leading return types.
+#   identifier-length: i, n, x, y, z are standard DSP notation.
+#   cognitive-complexity: per-sample DSP loops are long but linear.
+#   convert-member-functions-to-static: JUCE overrides are virtual by contract.
+#   avoid-const-params-in-decls, const-return-type: JUCE's API declares
+#     `const String getName()` and we must match the overridden signature.
+#   avoid-pragma-once: supported by every compiler we target (including
+#     arm-none-eabi GCC for STM32), and JUCE uses it.
+#   EnumCastOutOfRange: misreports bit-flag enums (values OR-ed together),
+#     e.g. inside Catch2's CHECK macros.
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*/(libs|plugin|tests)/.*'
+FormatStyle: file
+
+CheckOptions:
+  - { key: readability-identifier-naming.NamespaceCase,        value: lower_case }
+  - { key: readability-identifier-naming.ClassCase,            value: CamelCase  }
+  - { key: readability-identifier-naming.StructCase,           value: CamelCase  }
+  - { key: readability-identifier-naming.EnumCase,             value: CamelCase  }
+  - { key: readability-identifier-naming.FunctionCase,         value: camelBack  }
+  - { key: readability-identifier-naming.MethodCase,           value: camelBack  }
+  - { key: readability-identifier-naming.VariableCase,         value: camelBack  }
+  - { key: readability-identifier-naming.ParameterCase,        value: camelBack  }
+  - { key: readability-identifier-naming.MemberCase,           value: camelBack  }
+  - { key: readability-identifier-naming.TemplateParameterCase, value: CamelCase }
+  - { key: cppcoreguidelines-special-member-functions.AllowSoleDefaultDtor, value: true }
+  - { key: cppcoreguidelines-special-member-functions.AllowMissingMoveFunctionsWhenCopyIsDeleted, value: true }
+  # Only suffixes that can be misread (l vs 1) must be uppercase; 0.5f stays.
+  - { key: readability-uppercase-literal-suffix.NewSuffixes, value: 'L;LL;LU;LLU;UL;ULL' }
+  - { key: performance-unnecessary-value-param.AllowedTypes, value: 'juce::String' }
+...

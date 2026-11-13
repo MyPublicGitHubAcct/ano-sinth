@@ -1,0 +1,107 @@
+# Continuous integration: every push and pull request.
+# Builds and tests on macOS, Linux, and Windows with each platform's standard
+# compiler, checks formatting and clang-tidy, and checks that no private
+# identity value has entered the repository. Ordinary CI builds use the
+# placeholder identity. Details: docs/development/ci.md
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: Format check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: pip install clang-format==23.1.5
+      - run: tools/format.sh --check
+
+  identity-leak:
+    name: Identity leak check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # commit messages are checked too
+      - name: Check tracked files and commit messages
+        env:
+          BRUTALIS_MANUFACTURER_CODE: ${{ secrets.BRUTALIS_MANUFACTURER_CODE }}
+          BRUTALIS_PLUGIN_CODE: ${{ secrets.BRUTALIS_PLUGIN_CODE }}
+          BRUTALIS_BUNDLE_ID: ${{ secrets.BRUTALIS_BUNDLE_ID }}
+        run: tools/check-identity-leak.sh
+
+  macos:
+    name: macOS (Apple Clang, ${{ matrix.preset }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, asan]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: brew install ninja
+      - run: cmake --workflow --preset ${{ matrix.preset }}
+      - name: clang-tidy
+        if: matrix.preset == 'debug'
+        run: |
+          pip install clang-tidy==23.1.4
+          CLANG_TIDY="$(python3 -c 'import shutil; print(shutil.which("clang-tidy"))')" tools/tidy.sh build/debug
+
+  linux:
+    name: Linux (GCC 12, ${{ matrix.preset }})
+    # Ubuntu 22.04 is the minimum supported Linux (decision D8). Building on it
+    # with its own GCC 12 keeps the binaries compatible with its libstdc++.
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, asan]
+    env:
+      CC: gcc-12
+      CXX: g++-12
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Install JUCE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-12 ninja-build xvfb \
+            libasound2-dev libjack-jackd2-dev \
+            libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev libxi-dev \
+            libegl-dev libglu1-mesa-dev mesa-common-dev
+      # xvfb: the editor test creates JUCE components.
+      - run: xvfb-run -a cmake --workflow --preset ${{ matrix.preset }}
+
+  windows:
+    name: Windows (MSVC, debug)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      # Ninja needs cl.exe on PATH, so everything runs inside the Visual Studio
+      # developer environment (vcvars64.bat), which also provides Ninja.
+      - name: Configure, build, and test
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake --workflow --preset debug

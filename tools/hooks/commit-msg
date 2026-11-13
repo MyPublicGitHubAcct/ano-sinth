@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Rejects commit messages that contain a private identity value (whole-word
+# match, so "Brutalis" and "Anoesis" are fine). Install with tools/install-hooks.sh.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+msg_file="$1"
+local_file="$root/cmake/Identity.local.cmake"
+[[ -f "$local_file" ]] || exit 0
+
+while IFS= read -r v; do
+    [[ -z "$v" ]] && continue
+    if grep -qwF -e "$v" "$msg_file"; then
+        echo "commit-msg: the message contains a private identity value. Edit it and try again." >&2
+        exit 1
+    fi
+done < <(sed -nE 's/^[[:space:]]*set\(BRUTALIS_[A-Z_]+[[:space:]]+"([^"]*)".*/\1/p' "$local_file")

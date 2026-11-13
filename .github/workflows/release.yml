@@ -1,0 +1,93 @@
+# Release builds: manual, or on a version tag (v*).
+# Uses the real identity from GitHub Actions secrets, and the release preset
+# sets BRUTALIS_REQUIRE_REAL_IDENTITY=ON, so a missing secret fails configure
+# instead of shipping a placeholder build.
+#
+# Required secrets: BRUTALIS_MANUFACTURER_CODE, BRUTALIS_PLUGIN_CODE,
+# BRUTALIS_BUNDLE_ID. Not yet done: code signing, notarization, installers,
+# plugin validation (pluginval/auval). See PLAN.md (M0.6, M1.12).
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BRUTALIS_MANUFACTURER_CODE: ${{ secrets.BRUTALIS_MANUFACTURER_CODE }}
+  BRUTALIS_PLUGIN_CODE: ${{ secrets.BRUTALIS_PLUGIN_CODE }}
+  BRUTALIS_BUNDLE_ID: ${{ secrets.BRUTALIS_BUNDLE_ID }}
+
+jobs:
+  identity-leak:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: tools/check-identity-leak.sh
+
+  build:
+    needs: identity-leak
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: macOS (universal), os: macos-latest }
+          - { name: Linux, os: ubuntu-22.04 }
+          - { name: Windows, os: windows-latest }
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - if: runner.os == 'macOS'
+        run: brew install ninja
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++-12 ninja-build xvfb \
+            libasound2-dev libjack-jackd2-dev \
+            libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev libxi-dev \
+            libegl-dev libglu1-mesa-dev mesa-common-dev
+
+      - name: Configure, build, and test (macOS/Linux)
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ runner.os == 'Linux' && 'gcc-12' || '' }}
+          CXX: ${{ runner.os == 'Linux' && 'g++-12' || '' }}
+        run: |
+          cmake --preset release \
+            -DBRUTALIS_MANUFACTURER_CODE="$BRUTALIS_MANUFACTURER_CODE" \
+            -DBRUTALIS_PLUGIN_CODE="$BRUTALIS_PLUGIN_CODE" \
+            -DBRUTALIS_BUNDLE_ID="$BRUTALIS_BUNDLE_ID"
+          cmake --build --preset release
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a ctest --preset release; else ctest --preset release; fi
+
+      - name: Configure, build, and test (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+          call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          cmake --preset release -DBRUTALIS_MANUFACTURER_CODE="%BRUTALIS_MANUFACTURER_CODE%" -DBRUTALIS_PLUGIN_CODE="%BRUTALIS_PLUGIN_CODE%" -DBRUTALIS_BUNDLE_ID="%BRUTALIS_BUNDLE_ID%" || exit /b 1
+          cmake --build --preset release || exit /b 1
+          ctest --preset release || exit /b 1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Brutalis-${{ runner.os }}
+          path: |
+            build/release/plugin/brutalis_artefacts/Release/VST3
+            build/release/plugin/brutalis_artefacts/Release/AU
+            build/release/plugin/brutalis_artefacts/Release/Standalone
+          if-no-files-found: error

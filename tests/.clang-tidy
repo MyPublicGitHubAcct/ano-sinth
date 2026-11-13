@@ -1,0 +1,9 @@
+# Test code inherits the project checks, minus two that only fire inside
+# Catch2's macros (TEST_CASE expands to a static function; CHECK/REQUIRE expand
+# to do-while loops).
+---
+InheritParentConfig: true
+Checks: >
+  -misc-use-anonymous-namespace,
+  -cppcoreguidelines-avoid-do-while
+...

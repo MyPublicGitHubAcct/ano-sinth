@@ -45,7 +45,7 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
 
 ## Tech stack
 
-- **Language:** the highest C++ standard that both JUCE and Catch2 support on every target compiler, with compiler extensions off. Currently C++23; confirm this when setting up the build. When either library or any of the target compilers moves up, raise `CMAKE_CXX_STANDARD`.
+- **Language:** the highest C++ standard that both JUCE and Catch2 support on every target compiler, with compiler extensions off. Currently C++23 (confirmed 2026-11-13 with JUCE 9.0.5 and Catch2 v3.16.1). When either library or any of the target compilers moves up, raise `CMAKE_CXX_STANDARD`.
 - **Framework:** [JUCE](https://github.com/juce-framework/JUCE) 9, as a git submodule at `external/JUCE`, pinned to the latest 9.x release tag (9.0.5 as of 2026-11-13). Upgrade deliberately, never by tracking a branch.
 - **Testing:** [Catch2](https://github.com/catchorg/Catch2) v3, as a git submodule at `external/Catch2`, pinned to a release tag (v3.16.1 as of 2026-11-13). Tests run through CTest.
 - **Licensing:**
@@ -63,14 +63,20 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
 
 ## Commands
 
-Planned. Update this section once `CMakePresets.json` exists.
+Presets: `debug`, `relwithdebinfo`, `release` (needs the real identity; universal on macOS), `asan` (not Windows). Details: [docs/development/building.md](docs/development/building.md).
 
 ```sh
 git submodule update --init --recursive
-cmake --preset debug            # Ninja + the platform's standard compiler
-cmake --build --preset debug
-ctest --preset debug            # all Catch2 tests
+tools/install-hooks.sh                  # once per clone: pre-commit + commit-msg hooks
+cmake --workflow --preset debug         # configure + build + run all tests
+cmake --build --preset debug            # rebuild only
+ctest --preset debug -R "<test name>"   # run matching tests
+tools/format.sh                         # clang-format 23 (--check to verify only)
+tools/tidy.sh build/debug               # clang-tidy 23 (after a build)
+tools/check-identity-leak.sh            # no private codes in tracked files/commits
 ```
+
+On Windows, run these from a Visual Studio developer prompt (so Ninja finds `cl.exe`).
 
 ## Architecture and modularity
 
@@ -78,13 +84,16 @@ Everything except the plugin target itself must be reusable in other projects. T
 
 ```
 external/          JUCE, Catch2 (submodules)
-libs/dsp/          DSP library: oscillators, filters, envelopes, LFOs, effects, voice management
-libs/gui/          Reusable JUCE UI components (knobs, LCD panel, meters, look-and-feel)
-libs/interop/      Reusable glue: parameter binding, preset/bank I/O, MIDI learn, host sync
-plugin/            Thin synth target that wires the libs together. The only product-specific code.
-tests/             Catch2 tests, mirroring libs/ and plugin/
+libs/dsp/          anoesis::dsp: oscillators, filters, envelopes, LFOs, effects, voice management
+libs/gui/          anoesis_gui JUCE module (namespace anoesis::gui): knobs, LCD panel, meters, look-and-feel
+libs/interop/      anoesis_interop JUCE module (namespace anoesis::interop): parameter binding, preset/bank I/O, MIDI learn, host sync
+plugin/            Thin synth target (namespace brutalis) that wires the libs together. The only product-specific code.
+tests/             Catch2 tests, one executable per lib, mirroring libs/ and plugin/
+tools/             format.sh, tidy.sh, check-identity-leak.sh, git hooks
 docs/              Part 4 documentation
 ```
+
+Full rationale: [docs/development/project-structure.md](docs/development/project-structure.md).
 
 - **`libs/dsp` has no JUCE dependency and no dependency on the other libs.** It is pure, portable C++, so it builds for desktop and, later, STM32 (ARM Cortex-M). Concretely:
   - no heap allocation after `prepare()`/initialization;
@@ -94,12 +103,16 @@ docs/              Part 4 documentation
   - platform-specific SIMD sits behind an abstraction with a scalar fallback.
 - **`libs/gui` and `libs/interop`** may depend on JUCE but must know nothing about this synth's parameter set. They receive what they need through configuration or interfaces.
 - Each lib is its own CMake target with its own namespace, public headers, and test target. Dependencies point only toward `dsp`. Never create cycles.
+- **`libs/gui` and `libs/interop` are JUCE modules** (`juce_add_module`), not static libraries. Each final binary must compile JUCE exactly once, and the plugin target always compiles it. Link modules `PRIVATE` only. Put new implementation files in a module subfolder and `#include` them from the module's root `.cpp`.
+- The plugin's sources live in the `brutalis_plugin_common` INTERFACE target, which both the plugin and `brutalis_plugin_tests` link. Shared JUCE config flags go in `anoesis_configure_juce_target()` ([cmake/AnoesisJuce.cmake](cmake/AnoesisJuce.cmake)).
 
 ## Conventions
 
-- **Standards:** idiomatic modern C++ at the project's language level, following the [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/). Use clang-format and clang-tidy (configs at the repo root once added). Treat warnings as errors on every compiler:
+- **Standards:** idiomatic modern C++ at the project's language level, following the [C++ Core Guidelines](https://isocpp.github.io/CppCoreGuidelines/). Use clang-format and clang-tidy, both pinned to major version 23 ([.clang-format](.clang-format), [.clang-tidy](.clang-tidy)). Treat warnings as errors on every compiler:
   - Clang and GCC: `-Wall -Wextra -Wpedantic -Werror`
   - MSVC: `/W4 /WX /permissive-`
+- **Naming:** types `CamelCase`; functions, variables, and members `camelBack`; namespaces `lower_case`; files `snake_case.hpp/.cpp`. Enforced by clang-tidy.
+- **Float comparisons in tests:** `-Wfloat-equal` is on. Use Catch2 matchers (`WithinULP(x, 0)` for exact, `WithinAbs`/`WithinRel` with a justified tolerance).
 - **Test-driven development is required.** Write a failing Catch2 test first, make it pass, then refactor. No production code goes in without a test that covers it.
   - DSP tests check behavior numerically: frequency and phase response, aliasing levels, envelope timing, stability at extreme settings, and denormals.
   - Add offline-render regression tests for whole patches once the voice path exists.

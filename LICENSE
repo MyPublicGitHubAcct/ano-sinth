@@ -1,0 +1,14 @@
+Copyright (c) 2026 Anoesis Audio. All rights reserved.
+
+This repository is not yet licensed for use, copying, modification, or
+distribution, except as stated below. The license for the code that links JUCE
+(libs/gui, libs/interop, plugin/, and the tests that build them) is an open
+decision (D1 in PLAN.md). It will be either the GNU AGPLv3 or a proprietary
+license backed by a commercial JUCE license.
+
+Exceptions:
+
+  - libs/dsp/ is licensed under the MIT License. See libs/dsp/LICENSE.
+  - external/JUCE and external/Catch2 are third-party code under their own
+    licenses (JUCE: AGPLv3 or the commercial JUCE license; Catch2: Boost
+    Software License 1.0). See the LICENSE files in those directories.

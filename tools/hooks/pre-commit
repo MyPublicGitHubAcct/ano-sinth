@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Pre-commit checks. Install with tools/install-hooks.sh.
+#   1. No private identity value in the staged changes.
+#   2. Staged C++ files are clang-formatted.
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+
+"$root/tools/check-identity-leak.sh" --staged
+
+staged=()
+while IFS= read -r f; do staged+=("$f"); done < <(
+    git diff --cached --name-only --diff-filter=ACMR -- \
+        'libs/*.cpp' 'libs/*.hpp' 'libs/*.h' \
+        'plugin/*.cpp' 'plugin/*.hpp' 'plugin/*.h' \
+        'tests/*.cpp' 'tests/*.hpp' 'tests/*.h')
+
+if [[ ${#staged[@]} -gt 0 ]]; then
+    if ! "$root/tools/format.sh" --check "${staged[@]}"; then
+        echo "pre-commit: run tools/format.sh, re-stage, and commit again." >&2
+        exit 1
+    fi
+fi

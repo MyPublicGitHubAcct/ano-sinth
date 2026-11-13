@@ -1,0 +1,8 @@
+# JUCE modules compile as one translation unit: the module's root .cpp
+# #includes the implementation .cpp files from its subfolders. That is the
+# JUCE module format, not a mistake.
+---
+InheritParentConfig: true
+Checks: >
+  -bugprone-suspicious-include
+...

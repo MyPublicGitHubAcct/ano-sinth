@@ -1,0 +1,21 @@
+# Normalize line endings: LF in the repository and in working trees on every
+# platform, so clang-format and diffs behave the same on Windows.
+* text=auto eol=lf
+
+# Windows scripts need CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binary assets.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.icns binary
+*.wav  binary
+*.aif  binary
+*.aiff binary
+*.flac binary
+*.ttf  binary
+*.otf  binary
+*.pdf  binary

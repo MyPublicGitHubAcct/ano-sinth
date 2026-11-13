@@ -23,7 +23,13 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 ## Current status
 
-**Phase 0: Foundation.** The repo is initialized and has no commits yet.
+**Phase 0: Foundation, nearly done.** The skeleton builds and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. Still open:
+
+- **M0.6:** CI is written but has not run yet, because there is no GitHub remote. The Linux and Windows builds are therefore unverified.
+- **M0.6:** plugin validation (pluginval/auval) is not done.
+- **D1:** deferred, so the root LICENSE is all rights reserved.
+
+**Next:** push to GitHub, add the three identity secrets, and fix whatever the first CI run finds. Then M1.0.
 
 ---
 
@@ -33,12 +39,10 @@ Settle these before or during Phase 0. Each one affects the work that follows.
 
 | # | Decision | Why it matters | Needed by |
 |---|---|---|---|
-| D1 | **License for the code that uses JUCE** (`libs/gui`, `libs/interop`, `plugin/`). `libs/dsp` is decided: MIT. | JUCE 9 is AGPLv3 or commercial. Publishing under AGPLv3 means releasing the source of everything that links JUCE. Closed-source needs a JUCE commercial license. | M0.1 (root `LICENSE`) |
-| D4 | **CI provider** (GitHub Actions is assumed) | Needed to prove the 3-platform build on every change. | M0.6 |
+| D1 | **License for the code that uses JUCE** (`libs/gui`, `libs/interop`, `plugin/`). `libs/dsp` is decided: MIT. *Deferred on 2026-11-13: the root LICENSE says all rights reserved until this is decided.* | JUCE 9 is AGPLv3 or commercial. Publishing under AGPLv3 means releasing the source of everything that links JUCE. Closed-source needs a JUCE commercial license. | Before any public release or source publication |
 | D5 | **FFT for tests** (for example pocketfft as a test-only dependency, or a small hand-written FFT) | Spectral tests for aliasing and filter response need one, and `libs/dsp` tests cannot use JUCE's FFT. | M1.0 |
 | D6 | **Oscillator anti-aliasing method** (PolyBLEP/PolyBLAMP, minBLEP, or mipmapped wavetables) | Affects quality, CPU cost, and how well it ports to STM32. Prototype and measure in M1.1. | M1.1 |
 | D7 | **Preset and bank file format** (for example JSON or XML with a version field) | A long-term compatibility commitment. | M1.10 |
-| D8 | **Minimum OS versions** | Sets the toolchain and SDK settings. | M0.3 |
 | D9 | **Visual design direction for the GUI** | Must be original (clean-room). Affects `libs/gui`. | M1.11 |
 
 Note: AU is a macOS-only format, so Linux and Windows ship VST3 and Standalone.
@@ -49,9 +53,9 @@ Note: AU is a macOS-only format, so Linux and Windows ship VST3 and Standalone.
 
 Goal: an empty but complete skeleton. It builds on all three platforms, runs one test, enforces the conventions, and publishes its first docs.
 
-- [ ] **M0.1 Repo hygiene.** Add `.gitignore` (build dirs, IDE files, `.DS_Store`), `.gitattributes` (line endings), and `README.md`. Add licensing: `libs/dsp/LICENSE` (MIT, Anoesis Audio) and a root `LICENSE` per D1.
-- [ ] **M0.2 Dependencies.** Add the JUCE submodule at `external/JUCE`, checked out at tag `9.0.5` (or the latest 9.x at setup time). Add the Catch2 submodule at `external/Catch2`, at tag `v3.16.1` (or the latest v3).
-- [ ] **M0.3 CMake skeleton.**
+- [x] **M0.1 Repo hygiene.** Add `.gitignore` (build dirs, IDE files, `.DS_Store`), `.gitattributes` (line endings), and `README.md`. Add licensing: `libs/dsp/LICENSE` (MIT, Anoesis Audio) and a root `LICENSE` per D1.
+- [x] **M0.2 Dependencies.** Add the JUCE submodule at `external/JUCE`, checked out at tag `9.0.5` (or the latest 9.x at setup time). Add the Catch2 submodule at `external/Catch2`, at tag `v3.16.1` (or the latest v3).
+- [~] **M0.3 CMake skeleton.** *macOS verified; Linux and Windows wait on the first CI run.*
   - Add a top-level `CMakeLists.txt`.
   - Add targets for `libs/dsp`, `libs/gui`, `libs/interop`, `plugin/`, and `tests/`. Each lib is a separate target with its own namespace.
   - Enforce the dependency direction: `dsp` has no dependencies, and `gui`/`interop` → JUCE.
@@ -60,20 +64,21 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
   - Load `cmake/Identity.example.cmake`, then `cmake/Identity.local.cmake` if it exists (`include(... OPTIONAL)`).
   - Add a `BRUTALIS_REQUIRE_REAL_IDENTITY` option that fails configure if any placeholder value is still in use. Release presets and CI turn it on.
   - Validate both codes: 4 characters, at least one uppercase letter.
-- [ ] **M0.4 Presets and toolchains.** Add a `CMakePresets.json` with Debug, Release, and RelWithDebInfo for each platform: Apple Clang, GCC, and MSVC, all with Ninja. Turn on warnings-as-errors with the per-compiler flags.
-- [ ] **M0.5 Tooling.**
+- [~] **M0.4 Presets and toolchains.** *macOS verified; Linux and Windows wait on the first CI run.* Add a `CMakePresets.json` with Debug, Release, and RelWithDebInfo for each platform: Apple Clang, GCC, and MSVC, all with Ninja. Turn on warnings-as-errors with the per-compiler flags.
+- [x] **M0.5 Tooling.**
   - Add `.clang-format` and `.clang-tidy` (Core Guidelines checks).
   - Add an optional sanitizer preset (ASan/UBSan) for Clang and GCC.
   - Add a pre-commit format check or a script that does the same.
-- [ ] **M0.6 CI.** A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
+- [~] **M0.6 CI.** *Workflows written ([ci.yml](.github/workflows/ci.yml), [release.yml](.github/workflows/release.yml)), but not yet run (no remote). pluginval/auval still to do.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
   - Ordinary CI builds use the placeholder identity.
   - Release jobs read `BRUTALIS_MANUFACTURER_CODE`, `BRUTALIS_PLUGIN_CODE`, and `BRUTALIS_BUNDLE_ID` from GitHub Actions secrets and set `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`.
   - Add a CI check that fails if the real values appear in tracked files. Keep the values for this check in a secret too.
-- [ ] **M0.7 First test.** A Catch2 smoke test in each lib's test target, run by `ctest`. Proves the TDD loop works end to end.
-- [ ] **M0.8 Docs skeleton.** Add `docs/README.md` (index and reading order) and `docs/development/building.md`. Fill in the **Commands** section of CLAUDE.md with the real commands.
-- [ ] **M0.9 Initial commit(s).**
+- [~] **M0.7 First test.** *macOS verified; Linux and Windows wait on the first CI run.* A Catch2 smoke test in each lib's test target, run by `ctest`. Proves the TDD loop works end to end.
+- [x] **M0.8 Docs skeleton.** Add `docs/README.md` (index and reading order) and `docs/development/building.md`. Fill in the **Commands** section of CLAUDE.md with the real commands.
+- [x] **M0.9 Initial commit(s).** On branch `phase-0-foundation`.
 
 **Docs:** building and toolchains; project structure and dependency rules; how TDD works in this repo.
+Written: [building](docs/development/building.md), [project structure](docs/development/project-structure.md), [testing](docs/development/testing.md), [code quality](docs/development/code-quality.md), [product identity](docs/development/product-identity.md), [CI](docs/development/ci.md).
 
 ---
 
@@ -267,3 +272,11 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | Product: **Brutalis** by Anoesis Audio. The manufacturer code, plugin code, and bundle ID are chosen and kept private. | D2. No product named Brutalis was found online. The codes were checked for clashes with installed AUs. |
 | 2026-11-13 | The private identifiers are kept out of the repo and injected at build time from a gitignored `cmake/Identity.local.cmake`, or from CI secrets. The repo holds only the placeholders in `cmake/Identity.example.cmake`. | The codes still become visible in shipped binaries. This keeps them out of the repo and its history only. |
 | 2026-11-13 | JUCE 9, pinned to release tag 9.0.5 (the latest 9.x on 2026-11-13). Catch2 pinned to v3.16.1. | D3 |
+| 2026-11-13 | D1 deferred. The root LICENSE says all rights reserved; `libs/dsp` stays MIT. | Nothing is distributed yet, so both AGPLv3 and a JUCE commercial license remain possible. Decide before any public release or source publication. |
+| 2026-11-13 | D4: GitHub Actions. | The MSVC environment is set up with `vswhere` + `vcvars64.bat` rather than a third-party action. |
+| 2026-11-13 | D8: macOS 12.0 (universal arm64 + x86_64 in release), Windows 10 x64, Ubuntu 22.04 (built with GCC 12). | Linux CI builds on 22.04 with its own GCC 12, so the binaries match that libstdc++. |
+| 2026-11-13 | C++23 confirmed. JUCE 9.0.5 and Catch2 v3.16.1 build cleanly as C++23 under `-Wall -Wextra -Wpedantic -Werror` plus JUCE's recommended warnings (Apple Clang 21). | GCC 12 and MSVC still to be confirmed by CI. |
+| 2026-11-13 | `libs/gui` and `libs/interop` are **JUCE modules** (`juce_add_module`), not static libraries. | The plugin target always compiles JUCE, so a static lib linking JUCE would put a second copy in the binary (duplicate symbols or ODR violations). See docs/development/project-structure.md. |
+| 2026-11-13 | Namespaces: `anoesis::dsp`, `anoesis::gui`, `anoesis::interop`, `brutalis`. CMake targets: `anoesis_dsp`, `anoesis_gui`, `anoesis_interop`, `brutalis`. | The reusable libs carry the company name because they are meant for reuse beyond this product. |
+| 2026-11-13 | Plugin tests compile the plugin's own sources (the `brutalis_plugin_common` INTERFACE target) into a JUCE console app, rather than linking the plugin's shared-code library. | The tests exercise the shipped code without the format wrappers. |
+| 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |
