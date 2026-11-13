@@ -1,0 +1,21 @@
+# --- Private product identity (see cmake/Identity.example.cmake) ---
+cmake/Identity.local.cmake
+CLAUDE.local.md
+
+# --- Build output ---
+/build/
+/out/
+/cmake-build-*/
+CMakeUserPresets.json
+
+# --- IDE / editor ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+.cache/
+compile_commands.json
+
+# --- OS ---
+.DS_Store
+Thumbs.db
