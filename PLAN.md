@@ -28,7 +28,7 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 Still open:
 
-- **M0.6:** Version CI hasn't run in its current form yet; that happens on the first `v0.1.0` tag. Plugin validation is complete locally: pluginval passes on the VST3 (strictness 10), and `auval -strict` passes on the AU.
+- **M0.6:** Version CI passes on all three platforms (run 43524447930, on `main`). The `v0.1.0` tag still marks an earlier commit that fails on Linux (see **Linux and Windows**). Plugin validation is complete locally: pluginval passes on the VST3 (strictness 10), and `auval -strict` passes on the AU.
 - **Linux and Windows:** tested in Version CI after macOS. Not built locally. See the section below.
 - **Distribution:** GitHub never hosts compiled builds. See **Distribution** below.
 
@@ -72,7 +72,7 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
   - Add `.clang-format` and `.clang-tidy` (Core Guidelines checks).
   - Add an optional sanitizer preset (ASan/UBSan) for Clang and GCC.
   - Add a pre-commit format check or a script that does the same.
-- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Not yet run in this form. **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. **auval** runs as a CTest test on macOS: it installs the AU temporarily, runs `auval -strict`, then always uninstalls and restores. Waiting on the first version run.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
+- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Passed in full on run 43524447930, after four Linux fixes found by the first version runs (see docs/development/ci.md, History). **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. **auval** runs as a CTest test on macOS: it installs the AU temporarily, runs `auval -strict`, then always uninstalls and restores. Still open: the `v0.1.0` tag must mark a passing commit.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
   - The test jobs use the placeholder identity.
   - Release jobs read `BRUTALIS_MANUFACTURER_CODE`, `BRUTALIS_PLUGIN_CODE`, and `BRUTALIS_BUNDLE_ID` from GitHub Actions secrets and set `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`.
   - Add a CI check that fails if the real values appear in tracked files. Keep the values for this check in a secret too.
@@ -106,7 +106,8 @@ The first version run (`v0.1.0`, run 43516389668):
 
 Still to do:
 
-- [ ] A green version run for `v0.1.0`: confirm that Linux and Windows pass, including the C4459 fix.
+- [x] A green Version CI run with Linux and Windows. *Run 43524447930 (manual dispatch on `main` at `6cdada5`) passed every job: macOS `debug` and `asan`, Linux GCC 12 `debug` and `asan`, Windows MSVC `debug` (95/95, which confirms the C4459 fix), and the macOS release build.*
+- [ ] Point the `v0.1.0` tag at a commit that passes. It currently marks `407e966`, which fails on Linux. This is the owner's call: move the tag, or cut `v0.2.0` instead.
 
 ## Distribution
 
