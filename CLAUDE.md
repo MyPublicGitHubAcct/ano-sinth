@@ -81,6 +81,8 @@ tools/check-identity-leak.sh            # no private codes in tracked files/comm
 tools/check.sh [--asan]                 # the local gate: all of the above, run before every commit
 ```
 
+**Git workflow.** Commit directly to `main`. Do not create feature or work branches, in this repo or on GitHub. Run `tools/check.sh` and make sure it passes before every commit.
+
 **Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is fail-fast: macOS tests first, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Do not add per-push or per-PR CI. Details: [docs/development/ci.md](docs/development/ci.md).
 
 On Windows, run these from a Visual Studio developer prompt (so Ninja finds `cl.exe`).
