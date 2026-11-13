@@ -14,7 +14,7 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 1. A Catch2 test was written first and failed, then the code made it pass (TDD).
    Before committing, `tools/check.sh` passes locally (macOS).
-2. Builds without warnings and all tests pass on macOS, Linux, and Windows. *Until the Linux and Windows milestone (see **Deferred: Linux and Windows builds**), this means macOS only, but code must still avoid compiler- and platform-specific constructs.*
+2. Builds without warnings and all tests pass on macOS, Linux, and Windows. *macOS is checked locally before every commit. Linux and Windows are checked by Version CI, after macOS, on every major or minor version (`vX.Y.0`). A task counts as done once it passes macOS. Linux or Windows failures found in a version run must be fixed before that version ships.*
 3. Code is formatted with clang-format, and clang-tidy reports nothing.
 4. Audio-thread code is real-time safe. `libs/dsp` code meets the portability rules in CLAUDE.md (no JUCE, no allocation after prepare, and so on).
 5. Part 4 docs are written or updated for the technique (see the doc column of each milestone).
@@ -24,12 +24,12 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 ## Current status
 
-**Phase 0: Foundation, done except M0.6's plugin validation.** The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, macOS only, fail-fast.
+**Phase 0: Foundation, done except M0.6's plugin validation.** The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: macOS first, then Linux and Windows, then the macOS release build.
 
 Still open:
 
 - **M0.6:** plugin validation (pluginval/auval).
-- **Linux and Windows builds:** deferred to a later phase; see the section below.
+- **Linux and Windows:** tested in Version CI after macOS. Not built locally, and no release artifacts for them yet. See the section below.
 
 **Next:** M1.0.
 
@@ -56,7 +56,7 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
 
 - [x] **M0.1 Repo hygiene.** Add `.gitignore` (build dirs, IDE files, `.DS_Store`), `.gitattributes` (line endings), and `README.md`. Add licensing: `libs/dsp/LICENSE` (MIT, Anoesis Audio) and a root `LICENSE` per D1.
 - [x] **M0.2 Dependencies.** Add the JUCE submodule at `external/JUCE`, checked out at tag `9.0.5` (or the latest 9.x at setup time). Add the Catch2 submodule at `external/Catch2`, at tag `v3.16.1` (or the latest v3).
-- [x] **M0.3 CMake skeleton.** *Verified on macOS. Linux and Windows are deferred (see below).*
+- [x] **M0.3 CMake skeleton.** *Verified on macOS. Linux and Windows are checked in the first version run (see **Linux and Windows** below).*
   - Add a top-level `CMakeLists.txt`.
   - Add targets for `libs/dsp`, `libs/gui`, `libs/interop`, `plugin/`, and `tests/`. Each lib is a separate target with its own namespace.
   - Enforce the dependency direction: `dsp` has no dependencies, and `gui`/`interop` → JUCE.
@@ -65,42 +65,41 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
   - Load `cmake/Identity.example.cmake`, then `cmake/Identity.local.cmake` if it exists (`include(... OPTIONAL)`).
   - Add a `BRUTALIS_REQUIRE_REAL_IDENTITY` option that fails configure if any placeholder value is still in use. Release presets and CI turn it on.
   - Validate both codes: 4 characters, at least one uppercase letter.
-- [x] **M0.4 Presets and toolchains.** *Verified on macOS. Linux and Windows are deferred (see below).* Add a `CMakePresets.json` with Debug, Release, and RelWithDebInfo for each platform: Apple Clang, GCC, and MSVC, all with Ninja. Turn on warnings-as-errors with the per-compiler flags.
+- [x] **M0.4 Presets and toolchains.** *Verified on macOS. Linux and Windows are checked in the first version run (see **Linux and Windows** below).* Add a `CMakePresets.json` with Debug, Release, and RelWithDebInfo for each platform: Apple Clang, GCC, and MSVC, all with Ninja. Turn on warnings-as-errors with the per-compiler flags.
 - [x] **M0.5 Tooling.**
   - Add `.clang-format` and `.clang-tidy` (Core Guidelines checks).
   - Add an optional sanitizer preset (ASan/UBSan) for Clang and GCC.
   - Add a pre-commit format check or a script that does the same.
-- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml): macOS only. Runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Not yet run in this form. pluginval/auval still to do.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
+- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Not yet run in this form. pluginval/auval still to do.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
   - The test jobs use the placeholder identity.
   - Release jobs read `BRUTALIS_MANUFACTURER_CODE`, `BRUTALIS_PLUGIN_CODE`, and `BRUTALIS_BUNDLE_ID` from GitHub Actions secrets and set `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`.
   - Add a CI check that fails if the real values appear in tracked files. Keep the values for this check in a secret too.
-- [x] **M0.7 First test.** *Verified on macOS. Linux and Windows are deferred (see below).* A Catch2 smoke test in each lib's test target, run by `ctest`. Proves the TDD loop works end to end.
+- [x] **M0.7 First test.** *Verified on macOS. Linux and Windows are checked in the first version run (see **Linux and Windows** below).* A Catch2 smoke test in each lib's test target, run by `ctest`. Proves the TDD loop works end to end.
 - [x] **M0.8 Docs skeleton.** Add `docs/README.md` (index and reading order) and `docs/development/building.md`. Fill in the **Commands** section of CLAUDE.md with the real commands.
 - [x] **M0.9 Initial commit(s).** Merged to `main` and pushed.
 
 **Docs:** building and toolchains; project structure and dependency rules; how TDD works in this repo.
 Written: [building](docs/development/building.md), [project structure](docs/development/project-structure.md), [testing](docs/development/testing.md), [code quality](docs/development/code-quality.md), [product identity](docs/development/product-identity.md), [CI](docs/development/ci.md).
 
-## Deferred: Linux and Windows builds
+## Linux and Windows
 
-Decided on 2026-11-13: Phase 0 and the work after it target **macOS only**. Linux (GCC) and Windows (MSVC) builds move to a later phase. Which phase is not yet decided; choose it before Phase 2 at the latest, so that platform-specific problems don't build up.
+Decided on 2026-11-13:
 
-What carries over unchanged:
+- Development and pre-commit testing happen **on macOS only**.
+- **Every major or minor version is tested on Linux and Windows after macOS**, in Version CI ([docs/development/ci.md](docs/development/ci.md)).
+- Shipping Linux and Windows builds (release artifacts, installers) is deferred to a later phase. Which phase is not yet decided; choose it before Phase 2 at the latest.
 
-- Code stays standard C++23 with no compiler extensions, and the warning flags for GCC and MSVC stay in [cmake/AnoesisCompiler.cmake](cmake/AnoesisCompiler.cmake).
-- The D8 baselines (Windows 10, Ubuntu 22.04 with GCC 12) still stand.
-- `CMakePresets.json` has no macOS-only presets apart from `asan`, which already excludes Windows.
+The D8 baselines (Windows 10, Ubuntu 22.04 with GCC 12) still stand, and code stays standard C++23 with no compiler extensions.
 
-What the one CI run with all three platforms showed (run 43498239659, before the deferral):
+What the one CI run with all three platforms showed (run 43498239659, on every push, before this policy):
 
 - **Linux, GCC 12:** `debug` and `asan` both **passed** as-is.
 - **Windows, MSVC:** failed on warning C4459, "declaration of 'sampleRate' hides global declaration". A namespace-scope test constant was hidden by a JUCE template parameter with the same name. The constant has been renamed, but MSVC hasn't checked that fix yet.
 
-When the work is picked up:
+Still to do:
 
-- [ ] Add Linux (ubuntu-22.04, GCC 12, `debug` + `asan` under xvfb) and Windows (MSVC through `vswhere` + `vcvars64.bat`) legs to the test and release jobs in `version-ci.yml`. Drafts are in commit `2b5476c`. Also add both platforms to the local or pre-tag testing routine.
-- [ ] Fix whatever GCC 12 and MSVC report. Confirm C++23 library support against GCC 12's libstdc++.
-- [ ] Re-verify M0.3, M0.4, and M0.7 on both platforms. Then remove the macOS-only note from the Definition of done.
+- [ ] First version run (`v0.1.0`): confirm that Linux and Windows pass, including the C4459 fix.
+- [ ] When shipping on Linux and Windows: add both to the release job (artifacts), then signing and installers.
 
 ---
 
@@ -295,12 +294,12 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | The private identifiers are kept out of the repo and injected at build time from a gitignored `cmake/Identity.local.cmake`, or from CI secrets. The repo holds only the placeholders in `cmake/Identity.example.cmake`. | The codes still become visible in shipped binaries. This keeps them out of the repo and its history only. |
 | 2026-11-13 | JUCE 9, pinned to release tag 9.0.5 (the latest 9.x on 2026-11-13). Catch2 pinned to v3.16.1. | D3 |
 | 2026-11-13 | D1 (first deferred, then decided the same day): **all project code is MIT**. Root `LICENSE`; `libs/dsp` keeps its own copy. | JUCE stays AGPLv3 or commercial. Distributing plugin binaries (which contain JUCE) also requires either AGPLv3 compliance for the combined work or a commercial JUCE license. The MIT code itself is unaffected. |
-| 2026-11-13 | CI policy: test locally on macOS before every commit (`tools/check.sh`). GitHub Actions runs only for major and minor versions (`vX.Y.0` tags, or manual dispatch), macOS only, as a fail-fast chain. The identity secrets are set in the repository. | Decided by the project owner to save hosted CI time. See docs/development/ci.md. |
+| 2026-11-13 | CI policy: test locally on macOS before every commit (`tools/check.sh`). GitHub Actions runs only for major and minor versions (`vX.Y.0` tags, or manual dispatch), as a fail-fast chain: macOS, then Linux and Windows. The identity secrets are set in the repository. | Decided by the project owner to save hosted CI time. See docs/development/ci.md. |
 | 2026-11-13 | D4: GitHub Actions. | The MSVC environment is set up with `vswhere` + `vcvars64.bat` rather than a third-party action. |
 | 2026-11-13 | D8: macOS 12.0 (universal arm64 + x86_64 in release), Windows 10 x64, Ubuntu 22.04 (built with GCC 12). | When Linux builds return, build on 22.04 with its own GCC 12 so the binaries match that libstdc++. |
 | 2026-11-13 | C++23 confirmed. JUCE 9.0.5 and Catch2 v3.16.1 build cleanly as C++23 under `-Wall -Wextra -Wpedantic -Werror` plus JUCE's recommended warnings (Apple Clang 21). | GCC 12 and MSVC still to be confirmed by CI. |
 | 2026-11-13 | `libs/gui` and `libs/interop` are **JUCE modules** (`juce_add_module`), not static libraries. | The plugin target always compiles JUCE, so a static lib linking JUCE would put a second copy in the binary (duplicate symbols or ODR violations). See docs/development/project-structure.md. |
 | 2026-11-13 | Namespaces: `anoesis::dsp`, `anoesis::gui`, `anoesis::interop`, `brutalis`. CMake targets: `anoesis_dsp`, `anoesis_gui`, `anoesis_interop`, `brutalis`. | The reusable libs carry the company name because they are meant for reuse beyond this product. |
 | 2026-11-13 | Plugin tests compile the plugin's own sources (the `brutalis_plugin_common` INTERFACE target) into a JUCE console app, rather than linking the plugin's shared-code library. | The tests exercise the shipped code without the format wrappers. |
-| 2026-11-13 | Linux and Windows builds deferred to a later phase. CI and the Definition of done cover macOS only until then. | Decided by the project owner. See **Deferred: Linux and Windows builds**. |
+| 2026-11-13 | Linux and Windows: no local builds. Every major or minor version is tested on both in Version CI, after macOS passes. Release artifacts for them are deferred. | Decided by the project owner (this refines an earlier same-day deferral of Linux and Windows builds). See **Linux and Windows**. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |

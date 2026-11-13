@@ -2,7 +2,7 @@
 
 ## Requirements
 
-> Only **macOS** is built and tested for now. Linux and Windows builds are deferred to a later phase (see PLAN.md). Their instructions below are kept for when that work starts, but they are unverified.
+> Only **macOS** is built locally. Linux and Windows are built and tested in Version CI, after macOS, on every major or minor version ([ci.md](ci.md)). The Linux and Windows instructions below match what CI does.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
@@ -96,7 +96,7 @@ The *language* level is C++23 everywhere. *Library* support differs by platform:
 - On Linux, the Ubuntu 22.04 baseline means GCC 12's libstdc++.
 - On macOS, a 12.0 deployment target means some newer libc++ features are unavailable at run time, and the compiler reports them as availability errors.
 
-Until Linux and Windows CI returns, "compiles on my Mac" proves nothing about GCC 12 or MSVC. Avoid newer library features unless you know libstdc++ 12 and MSVC support them. Raise the standard when JUCE, Catch2, and all three compilers support the next one.
+Linux and Windows are compiled only in Version CI, so "compiles on my Mac" proves nothing about GCC 12 or MSVC until then. Avoid newer library features unless you know libstdc++ 12 and MSVC support them. Raise the standard when JUCE, Catch2, and all three compilers support the next one.
 
 ## Platform baselines (decision D8)
 
@@ -104,6 +104,6 @@ Until Linux and Windows CI returns, "compiles on my Mac" proves nothing about GC
 |---|---|---|
 | macOS | 12.0 (Monterey); arm64 + x86_64 in release | `CMAKE_OSX_DEPLOYMENT_TARGET` in [CMakeLists.txt](../../CMakeLists.txt); architectures in the `release` preset |
 | Windows | 10 (x64) | JUCE's default target; MSVC x64 developer environment |
-| Linux | Ubuntu 22.04 (glibc 2.35, libstdc++ from GCC 12) | Build on `ubuntu-22.04` with GCC 12 (deferred; see PLAN.md) |
+| Linux | Ubuntu 22.04 (glibc 2.35, libstdc++ from GCC 12) | Version CI builds on `ubuntu-22.04` with GCC 12 |
 
 Trade-off: macOS 12 still covers older Intel Macs that are common in studios, and it adds no availability workarounds for the language features we use. Raising the baseline later is easy. Lowering it after release is not.

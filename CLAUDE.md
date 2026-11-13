@@ -59,7 +59,7 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
   - Windows: MSVC (Visual Studio), invoked from a developer environment so Ninja can find `cl.exe`
 
   Code must build cleanly on all three. Do not rely on extensions or behavior specific to one compiler.
-  **For now only macOS is built and tested** (CI included); Linux and Windows builds are deferred to a later phase (see PLAN.md). The portability rules still apply.
+  **Only macOS is built locally.** Linux and Windows are tested in Version CI, after macOS, on every major or minor version. Their release artifacts are deferred (see PLAN.md). Because GCC and MSVC see the code only at version time, the portability rules matter even more.
 - **Plugin formats:** VST3, AU, Standalone.
 - **Target platforms:** macOS, Linux, Windows. **STM32 may be added later**, which constrains the DSP library (see below).
 
@@ -79,7 +79,7 @@ tools/check-identity-leak.sh            # no private codes in tracked files/comm
 tools/check.sh [--asan]                 # the local gate: all of the above, run before every commit
 ```
 
-**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is macOS-only and fail-fast. Do not add per-push or per-PR CI. Details: [docs/development/ci.md](docs/development/ci.md).
+**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is fail-fast: macOS tests first, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Do not add per-push or per-PR CI. Details: [docs/development/ci.md](docs/development/ci.md).
 
 On Windows, run these from a Visual Studio developer prompt (so Ninja finds `cl.exe`).
 
