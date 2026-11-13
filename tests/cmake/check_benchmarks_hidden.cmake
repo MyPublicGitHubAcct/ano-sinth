@@ -7,6 +7,11 @@
 # are slow, and meaningless in Debug). This check fails if there are no
 # benchmarks at all, or if one leaks into the default test list.
 
+# Script mode (-P) starts with no policies set. Without this, CMake 3.x treats
+# if(... IN_LIST ...) as an error (CMP0057). CMake 4 always enables pre-3.5
+# policies, so the problem shows up only on older CMake, as on the CI runners.
+cmake_minimum_required(VERSION 3.25)
+
 execute_process(
     COMMAND "${TEST_EXECUTABLE}" --list-tests "[!benchmark]" --verbosity quiet
     OUTPUT_VARIABLE benchmark_list
