@@ -44,7 +44,9 @@ endfunction()
 # Targets that compile JUCE module sources (the plugin and the JUCE-based test
 # runners) also compile those sources with these flags. JUCE headers are
 # included as ordinary (non-system) headers, so they are held to the same
-# standard as our code.
+# standard as our code. One exception: on GCC, JUCE's own compilation units skip
+# -Wconversion (see _anoesis_exempt_juce_units_from_gcc_conversion in
+# AnoesisJuce.cmake).
 function(anoesis_set_warnings target)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /permissive-)

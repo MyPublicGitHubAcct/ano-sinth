@@ -98,9 +98,15 @@ What the one CI run with all three platforms showed (run 43498239659, on every p
 - **Linux, GCC 12:** `debug` and `asan` both **passed** as-is.
 - **Windows, MSVC:** failed on warning C4459, "declaration of 'sampleRate' hides global declaration". A namespace-scope test constant was hidden by a JUCE template parameter with the same name. The constant has been renamed, but MSVC hasn't checked that fix yet.
 
+The first version run (`v0.1.0`, run 43516389668):
+
+- **macOS:** `debug` and `asan` passed.
+- **Linux, GCC 12:** failed to compile JUCE's own module sources under our `-Wconversion` (added after run 43498239659). JUCE's GCC flag set leaves `-Wconversion` out, and GCC's version is stricter than Clang's. Fixed by compiling JUCE's units with `-Wno-conversion` on GCC only. Our own code keeps the flag (see [docs/development/code-quality.md](docs/development/code-quality.md)).
+- **Windows, MSVC:** cancelled by fail-fast before it finished, so the C4459 fix is still unchecked.
+
 Still to do:
 
-- [ ] First version run (`v0.1.0`): confirm that Linux and Windows pass, including the C4459 fix.
+- [ ] A green version run for `v0.1.0`: confirm that Linux and Windows pass, including the C4459 fix.
 
 ## Distribution
 
@@ -329,3 +335,4 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | **No downloadable builds on GitHub.** The release job's `actions/upload-artifact` step was removed, and `tools/check-no-published-builds.sh` fails on any workflow step that would publish files. | Decided by the project owner. The repo is public; binaries contain JUCE and the real identity, and distribution is decided separately. See **Distribution**. |
 | 2026-11-13 | The white-noise known-answer values are reproduced by an independent Python port, [tools/reference/xoshiro128plus.py](tools/reference/xoshiro128plus.py), written from the published reference C code rather than from `random.hpp`. | Expected values copied from the implementation's own output would pin its bugs too. See docs/dsp/white-noise.md. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |
+| 2026-11-13 | On GCC, JUCE's own compilation units (`external/JUCE/modules/*/*.cpp`) are compiled with `-Wno-conversion`. Every other warning still applies to them, and project code keeps `-Wconversion` on every compiler. | The first version run showed that JUCE 9.0.5 isn't `-Wconversion`-clean on GCC 12. JUCE's GCC flag set omits it, unlike its Clang set, so the earlier row's "JUCE targets already had these" held for Clang only. The exemption is kept to JUCE's units, as code-quality.md requires. |

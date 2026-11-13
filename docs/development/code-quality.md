@@ -16,7 +16,7 @@ The numeric warnings (`-Wfloat-equal`, `-Wconversion`, `-Wsign-conversion`) matt
 
 Targets that compile JUCE also get `juce::juce_recommended_warning_flags`. These add, among others, `-Wshadow-all` and further checks on top of the list above.
 
-The flags are set **per target, never globally**, so JUCE's and Catch2's own internal targets keep their own settings. JUCE module *sources* compiled into our targets do get our flags, and as of JUCE 9.0.5 they compile cleanly under them with Apple Clang. If a JUCE upgrade breaks this, report it upstream and contain the problem. Don't weaken the flags for our own code.
+The flags are set **per target, never globally**, so JUCE's and Catch2's own internal targets keep their own settings. JUCE module *sources* compiled into our targets do get our flags. As of JUCE 9.0.5 they compile cleanly under all of them with Apple Clang. With GCC they do not compile cleanly under `-Wconversion`, which JUCE's own GCC flag set leaves out: GCC's version also flags `int` → `char`/`uint8_t` in shifts and masks and `int` → `float` in arithmetic. So on GCC, JUCE's compilation units (`external/JUCE/modules/*/*.cpp`) get `-Wno-conversion` as a per-source option (`_anoesis_exempt_juce_units_from_gcc_conversion` in [cmake/AnoesisJuce.cmake](../../cmake/AnoesisJuce.cmake)). Every other flag still applies to them, and our own sources keep `-Wconversion`. This was found by the first Version CI run (v0.1.0). If a JUCE upgrade breaks something else, report it upstream and contain the problem the same way: narrowly, on JUCE's units only. Don't weaken the flags for our own code.
 
 ## Formatting: clang-format 23
 

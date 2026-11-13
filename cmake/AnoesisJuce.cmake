@@ -14,4 +14,28 @@ function(anoesis_configure_juce_target target)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     anoesis_set_warnings(${target})
+    _anoesis_exempt_juce_units_from_gcc_conversion(${target})
+endfunction()
+
+# GCC only: compile JUCE's own module units without -Wconversion.
+#
+# anoesis_set_warnings adds -Wconversion for our code. On Clang, JUCE's
+# recommended flags include it too, and JUCE compiles cleanly with it. On GCC,
+# JUCE's recommended flags leave it out, and JUCE does not compile cleanly with
+# it: GCC's -Wconversion also flags int -> char/uint8_t in shifts and masks and
+# int -> float in arithmetic, which Clang does not. Our own sources (the plugin,
+# the anoesis_* modules, tests) keep the full set. Every other warning applies
+# to JUCE as before. The per-source option comes after the target options on the
+# command line, so the -Wno- wins.
+#
+# JUCE's compilation units are the .cpp files at the root of each module
+# (modules/<module>/<module>[_N].cpp). Everything else is #included from those.
+function(_anoesis_exempt_juce_units_from_gcc_conversion target)
+    if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        return()
+    endif()
+    file(GLOB juce_units "${PROJECT_SOURCE_DIR}/external/JUCE/modules/*/*.cpp")
+    set_source_files_properties(${juce_units}
+        TARGET_DIRECTORY ${target}
+        PROPERTIES COMPILE_OPTIONS -Wno-conversion)
 endfunction()
