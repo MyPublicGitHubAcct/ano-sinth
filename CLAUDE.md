@@ -79,6 +79,7 @@ tools/format.sh                         # clang-format 23 (--check to verify onl
 tools/tidy.sh build/debug               # clang-tidy 23 (after a build)
 tools/check-identity-leak.sh            # no private codes in tracked files/commits
 tools/check.sh [--asan]                 # the local gate: all of the above, run before every commit
+tools/bench.sh ["[area]"]               # [!benchmark] tests in relwithdebinfo -> Markdown table (docs/performance/)
 ```
 
 **Git workflow.** Commit directly to `main`. Do not create feature or work branches, in this repo or on GitHub. Run `tools/check.sh` and make sure it passes before every commit.

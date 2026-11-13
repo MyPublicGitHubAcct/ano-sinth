@@ -68,6 +68,8 @@ Other details:
 
 Every tolerance has its derivation next to it in the test.
 
+Cost ([CPU baselines](../performance/baselines.md), Apple M1): 0.80 ns per sample for a linear ramp, 0.05 ns once settled, and 3.72 ns for an exponential ramp. The exponential figure is the first Phase 3 candidate: the likely cause is aliasing between the output span and the smoother's members, not the arithmetic.
+
 ## References
 
 - Will Pirkle, *Designing Software Synthesizer Plugins in C++* (2nd ed., 2021), "Parameter smoothing".

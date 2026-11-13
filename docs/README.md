@@ -39,6 +39,11 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 7. [How we measure DSP quality](dsp/measuring-dsp.md): FFT, windows, coherent sampling, THD, aliasing, frequency response, and golden files. Read this before writing any spectral test.
 8. [Oversampling: 2× and 4× with polyphase IIR halfbands](dsp/oversampling.md)
 
-### 3. Reference material
+### 3. Performance
+
+1. [Benchmarking: measuring CPU cost](performance/benchmarking.md): the harness, its pitfalls, and the real-time budget.
+2. [CPU baselines](performance/baselines.md): recorded results, newest first. Phase 3 starts from these.
+
+### 4. Reference material
 
 - [Sylenth1 feature inventory](reference/sylenth1-features.md): the Phase 1 feature target.

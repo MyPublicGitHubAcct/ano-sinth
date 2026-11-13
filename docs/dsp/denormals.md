@@ -74,7 +74,7 @@ In the plugin, `PluginProcessor::processBlock` already uses JUCE's `juce::Scoped
   - after the scope ends, IEEE behaviour is back;
 - nested guards restore the mode they found: the inner guard restores "flushing", not "off".
 
-The guard tests `SKIP` on targets without a flush-to-zero control. They run on macOS arm64 locally, and the x86-64 path is compiled as part of the universal release build. Linux (GCC) and Windows (MSVC) run them in Version CI. The CPU cost of denormals on this machine is measured by the M1.0 benchmarks.
+The guard tests `SKIP` on targets without a flush-to-zero control. They run on macOS arm64 locally, and the x86-64 path is compiled as part of the universal release build. Linux (GCC) and Windows (MSVC) run them in Version CI. The [CPU baselines](../performance/baselines.md) measure the cost: on Apple Silicon a denormal-bound loop runs exactly as fast as a normal one (about 2.0 ns per sample either way), as the theory predicts for ARM. The x86 penalty, the main reason for the guard, is still to be measured on an x86 machine.
 
 ## References
 

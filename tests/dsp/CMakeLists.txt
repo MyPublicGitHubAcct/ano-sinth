@@ -1,6 +1,7 @@
 # Tests for libs/dsp. No JUCE, mirroring the library.
 add_executable(anoesis_dsp_tests
     library_test.cpp
+    benchmarks/foundations_benchmark.cpp
     core/audio_block_test.cpp
     core/denormals_test.cpp
     core/processor_test.cpp
@@ -17,3 +18,9 @@ add_executable(anoesis_dsp_tests
 target_link_libraries(anoesis_dsp_tests PRIVATE anoesis::test_support Catch2::Catch2WithMain)
 anoesis_set_warnings(anoesis_dsp_tests)
 anoesis_register_tests(anoesis_dsp_tests)
+
+# The benchmark harness: benchmarks exist and are hidden from the default run.
+# Run them with tools/bench.sh (docs/performance/benchmarking.md).
+add_test(NAME "anoesis_dsp_tests:benchmarks exist and are hidden from the default run"
+    COMMAND ${CMAKE_COMMAND} -DTEST_EXECUTABLE=$<TARGET_FILE:anoesis_dsp_tests>
+            -P ${PROJECT_SOURCE_DIR}/tests/cmake/check_benchmarks_hidden.cmake)

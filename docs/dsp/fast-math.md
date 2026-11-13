@@ -70,7 +70,7 @@ The bounds are derived from the design error plus float rounding, with the deriv
 - `fastExp2`: monotonic on a dense grid, continuous just below each integer, and correct clamping for ±200, ±inf, and NaN;
 - `fastTanh`: bitwise odd symmetry, |y| ≤ 1, monotonic over [−12, 12], and exact ±1 saturation, including for ±inf and NaN.
 
-The speed side of the trade is measured by the M1.0 benchmark harness (PLAN.md, M1.0).
+The speed side of the trade, from the [CPU baselines](../performance/baselines.md): `fastExp2` is 0.34 ns/sample against 1.79 for `std::exp2` (5.2×), and `fastTanh` is 0.45 against 2.48 for `std::tanh` (5.6×), on Apple M1 (arm64).
 
 ## Trade-offs and alternatives
 

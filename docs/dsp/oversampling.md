@@ -119,6 +119,8 @@ Also tested:
 - channel independence;
 - stability on a full-scale square wave (peak < 1.5).
 
+Cost ([CPU baselines](../performance/baselines.md), Apple M1): about 17 ns per sample per channel for a 2× round trip and 27 ns for 4×. That is 0.08% and 0.13% of one core at 48 kHz.
+
 During TDD, an unfiltered stub (zero-stuffing up, plain decimation down) failed the image and alias tests with only 6 dB of rejection. This confirmed that the tests detect a missing filter.
 
 ## References

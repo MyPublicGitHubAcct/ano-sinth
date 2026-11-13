@@ -71,11 +71,14 @@ The first tests in the repo were written red-first, and they show the loop end t
 
 Golden files are committed renders in [tests/golden/](../../tests/golden/). A test compares its output with one using `compareWithGolden()`. To create or update one, run the test with `ANOESIS_UPDATE_GOLDEN=1`, listen to the result, and commit it with an explanation of why the output changed. On a mismatch the actual render is written to `build/<preset>/test-output/`. Details: [How we measure DSP quality](../dsp/measuring-dsp.md#golden-files).
 
+## Benchmarks
+
+Benchmarks are Catch2 `BENCHMARK`s in `tests/<lib>/benchmarks/`, in `TEST_CASE`s tagged `[!benchmark]`. That tag hides them from the default run and from `ctest`, and a CTest check fails if one leaks in. Run them in an optimised build with `tools/bench.sh`, and record results in [docs/performance/baselines.md](../performance/baselines.md). Methodology: [benchmarking.md](../performance/benchmarking.md).
+
 ## Planned (Phase 1)
 
 - Envelope timing and stability checks at extreme settings, as the components arrive.
 - Golden-file regression tests for whole patches (M1.8).
-- Catch2 `BENCHMARK`s that record CPU baselines for Phase 3.
 
 ## References
 

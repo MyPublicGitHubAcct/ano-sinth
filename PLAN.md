@@ -31,7 +31,9 @@ Still open:
 - **M0.6:** Version CI hasn't run in its current form yet; that happens on the first `v0.1.0` tag. Plugin validation is complete locally: pluginval passes on the VST3 (strictness 10), and `auval -strict` passes on the AU.
 - **Linux and Windows:** tested in Version CI after macOS. Not built locally, and no release artifacts for them yet. See the section below.
 
-**Phase 1 started.** Working on M1.0 (DSP foundations and test harness).
+**Phase 1: M1.0 done** (2026-11-13). `libs/dsp` has the processor lifecycle, math utilities, smoothing, denormal protection, seedable noise, and 2×/4× oversampling. `tests/support` holds the measurement harness (FFT, THD, aliasing, frequency response, golden files), and the first CPU baselines are recorded. 96 tests pass on macOS (debug and ASan/UBSan).
+
+**Next:** M1.1 (oscillators). D6, the anti-aliasing method, is decided there by prototyping and measuring with the harness.
 
 ---
 
@@ -108,7 +110,7 @@ Goal: match every feature in the inventory, including the v3.x additions in §15
 
 Each milestone lives mostly in `libs/dsp` and is tested in isolation before integration. **Extensibility rule:** waveforms, filter types, effects, and mod sources and destinations are registered behind interfaces, so Phase 2 adds entries rather than editing switches.
 
-### M1.0 DSP foundations and test harness
+### M1.0 DSP foundations and test harness: done
 - [x] Sample-rate and block-size handling (`prepare`/`reset`/`process` lifecycle shared by all processors). *`ProcessSpec`, `AudioBlock`, the `Preparable`/`BlockProcessor` concepts, and `processInChunks` in `libs/dsp/include/anoesis/dsp/core/`. The `anoesis_test_support` library (`tests/support/`) provides `checkLifecycleContract()`, which every stateful processor is tested with. Doc: [processor lifecycle](docs/dsp/processor-lifecycle.md).*
 - [x] Parameter smoothing, linear and exponential. *`Smoother<SmoothingShape>` (`LinearSmoother`, `ExponentialSmoother`) in `libs/dsp/include/anoesis/dsp/control/smoother.hpp`. Every ramp lands exactly on its target after round(seconds × rate) samples; the exponential shape decays to −80 dB of the step by then. Doc: [parameter smoothing](docs/dsp/parameter-smoothing.md).*
 - [x] Math utilities: dB/gain, note/frequency (with **master tune**, a v3 feature), fast approximations (tanh, exp2) with accuracy tests. *`libs/dsp/include/anoesis/dsp/math/`. Measured: `fastExp2` 3.1e-7 max relative error (exact at integers); `fastTanh` 1.6e-7 absolute, 7.6e-7 relative. Docs: [levels and pitch](docs/dsp/levels-and-pitch.md), [fast approximations](docs/dsp/fast-math.md).*
@@ -120,7 +122,7 @@ Each milestone lives mostly in `libs/dsp` and is tested in isolation before inte
   - FFT analysis (D5) *(radix-2 in double; rectangular, Hann, Blackman–Harris, and Kaiser windows; power spectra normalised so lobe sums give tone power; Welch averaging)*
   - helpers that measure THD, aliasing, and frequency response *(each checked against a known answer: a naive saw's worst alias measures −20.00 dB at 22,980 Hz, exactly its folded 10th harmonic)*
   - golden-file comparison for offline renders *(32-bit float WAV in `tests/golden/`, `ANOESIS_UPDATE_GOLDEN=1` to record, actual output saved on mismatch. First golden: white noise, bit-exact.)*
-- [ ] **Benchmark harness** (Catch2 `BENCHMARK`). Record CPU baselines from now on for Phase 3.
+- [x] **Benchmark harness** (Catch2 `BENCHMARK`). Record CPU baselines from now on for Phase 3. *`[!benchmark]` test cases (hidden from ctest, enforced by a CTest check) and `tools/bench.sh`, which prints a Markdown table. First baseline: [docs/performance/baselines.md](docs/performance/baselines.md). Docs: [benchmarking](docs/performance/benchmarking.md).*
 
 **Docs:** the processor lifecycle; smoothing and why zipper noise happens; denormals; oversampling theory; how we measure DSP quality.
 
@@ -259,6 +261,8 @@ Candidates. Choose and order them once Phase 1 is complete.
 The baselines come from M1.0 and M1.8 benchmarks.
 
 - [ ] Profile representative patches on each platform. Rank the hotspots.
+- [ ] First measured candidate (M1.0 baseline): `ExponentialSmoother::fill` is 4.7× slower than `LinearSmoother`, likely from the output span aliasing its `float` members. Measure, fix (local copies of the state), and measure again.
+- [ ] Measure the denormal penalty on x86 (none on Apple Silicon: [baselines](docs/performance/baselines.md)).
 - [ ] SIMD: vectorize across unison voices first (the manual suggests Sylenth1 does this), then across polyphonic voices. Keep the scalar fallbacks.
 - [ ] Memory layout (SoA), block-based processing, control-rate decimation of modulation.
 - [ ] Cheaper nonlinearities and oversampling where it can't be heard (prove it with measurement tests).
@@ -313,4 +317,5 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | Random numbers: xoshiro128+ seeded through SplitMix64, with floats from the top 24 bits mapped to exact, symmetric, zero-mean values. `<random>` is not used. | Bit-identical on every platform (`<random>`'s float distributions are implementation-defined). 32-bit only, so cheap on Cortex-M. See docs/dsp/white-noise.md. |
 | 2026-11-13 | Golden files are 32-bit float WAVs in `tests/golden/`, compared per sample with an explicit tolerance (0 for integer-exact output). They are recorded with `ANOESIS_UPDATE_GOLDEN=1`, and failed renders go to `build/<preset>/test-output/`. | Inspectable in any audio tool. The tolerance absorbs FMA-contraction differences between compilers. See docs/dsp/measuring-dsp.md. |
 | 2026-11-13 | Oversampling uses **polyphase IIR elliptic halfbands**, not linear-phase FIR. Spec at a 44.1 kHz base: pass 0–20 kHz, reject ≥ 100 dB from 24.1 kHz. 4× is two cascaded 2× stages. | About 12 first-order sections instead of 70+ FIR taps. Latency is 3–4 samples rather than about 35, so the reported latency barely changes when oversampling is toggled. Ripple is about 1e-10 dB. The phase is non-linear only near 20 kHz, and dry/wet mixing happens inside the oversampled domain. See docs/dsp/oversampling.md. |
+| 2026-11-13 | Benchmarks are Catch2 `BENCHMARK`s in the test executables, tagged `[!benchmark]` (hidden from ctest, enforced by a CTest check), run with `tools/bench.sh` in `relwithdebinfo`. Results are recorded by hand in `docs/performance/baselines.md` with the machine and commit. Not run in CI. | No new dependency. Shared CI runners are too noisy for CPU numbers. See docs/performance/benchmarking.md. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |
