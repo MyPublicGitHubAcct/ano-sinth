@@ -2,6 +2,7 @@
 add_executable(anoesis_dsp_tests
     library_test.cpp
     core/audio_block_test.cpp
+    core/denormals_test.cpp
     core/processor_test.cpp
     control/smoother_test.cpp
     math/decibels_test.cpp

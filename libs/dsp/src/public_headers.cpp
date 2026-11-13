@@ -9,6 +9,7 @@
 
 #include <anoesis/dsp/control/smoother.hpp>
 #include <anoesis/dsp/core/audio_block.hpp>
+#include <anoesis/dsp/core/denormals.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
 #include <anoesis/dsp/core/processor.hpp>
 #include <anoesis/dsp/library.hpp>

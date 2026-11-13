@@ -6,6 +6,7 @@
 # ARM, so it only uses the C++ standard library.
 
 add_library(anoesis_dsp STATIC
+    src/denormals.cpp
     src/library.cpp
     src/public_headers.cpp)
 add_library(anoesis::dsp ALIAS anoesis_dsp)

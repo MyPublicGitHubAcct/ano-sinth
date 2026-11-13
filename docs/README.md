@@ -34,6 +34,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 2. [Levels and pitch: decibels, notes, and master tuning](dsp/levels-and-pitch.md)
 3. [Fast approximations: exp2 and tanh](dsp/fast-math.md): range reduction, minimax polynomials, avoiding cancellation, and measured error.
 4. [Parameter smoothing and zipper noise](dsp/parameter-smoothing.md)
+5. [Denormals: why they hurt and how we keep them out](dsp/denormals.md)
 
 ### 3. Reference material
 
