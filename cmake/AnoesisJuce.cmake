@@ -28,13 +28,16 @@ endfunction()
 # to JUCE as before. The per-source option comes after the target options on the
 # command line, so the -Wno- wins.
 #
-# JUCE's compilation units are the .cpp files at the root of each module
-# (modules/<module>/<module>[_N].cpp). Everything else is #included from those.
+# JUCE's compilation units are the .cpp and .c files at the root of each module
+# (modules/<module>/<module>[_N].cpp, plus .c units wrapping bundled C libraries
+# such as libjpeg, FLAC, and zlib). Everything else is #included from those.
 function(_anoesis_exempt_juce_units_from_gcc_conversion target)
     if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         return()
     endif()
-    file(GLOB juce_units "${PROJECT_SOURCE_DIR}/external/JUCE/modules/*/*.cpp")
+    file(GLOB juce_units
+        "${PROJECT_SOURCE_DIR}/external/JUCE/modules/*/*.cpp"
+        "${PROJECT_SOURCE_DIR}/external/JUCE/modules/*/*.c")
     set_source_files_properties(${juce_units}
         TARGET_DIRECTORY ${target}
         PROPERTIES COMPILE_OPTIONS -Wno-conversion)
