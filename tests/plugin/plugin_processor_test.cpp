@@ -12,8 +12,10 @@
 namespace
 {
 
-constexpr double sampleRate = 48000.0;
-constexpr int blockSize = 256;
+// Prefixed: MSVC warns (C4459) when JUCE template parameters named
+// sampleRate/blockSize would hide a namespace-scope name.
+constexpr double testSampleRate = 48000.0;
+constexpr int testBlockSize = 256;
 
 } // namespace
 
@@ -38,13 +40,13 @@ TEST_CASE("processor is a stereo-out instrument with no audio input", "[plugin][
 TEST_CASE("processor renders silence, overwriting whatever the host left in the buffer", "[plugin][smoke]")
 {
     brutalis::PluginProcessor processor;
-    processor.setRateAndBufferSizeDetails(sampleRate, blockSize);
-    processor.prepareToPlay(sampleRate, blockSize);
+    processor.setRateAndBufferSizeDetails(testSampleRate, testBlockSize);
+    processor.prepareToPlay(testSampleRate, testBlockSize);
 
-    juce::AudioBuffer<float> buffer(2, blockSize);
+    juce::AudioBuffer<float> buffer(2, testBlockSize);
     for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
     {
-        juce::FloatVectorOperations::fill(buffer.getWritePointer(channel), 0.5f, blockSize);
+        juce::FloatVectorOperations::fill(buffer.getWritePointer(channel), 0.5f, testBlockSize);
     }
 
     juce::MidiBuffer midi;
@@ -52,7 +54,7 @@ TEST_CASE("processor renders silence, overwriting whatever the host left in the 
 
     for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
     {
-        CHECK_THAT(buffer.getMagnitude(channel, 0, blockSize), Catch::Matchers::WithinULP(0.0f, 0)); // exactly zero
+        CHECK_THAT(buffer.getMagnitude(channel, 0, testBlockSize), Catch::Matchers::WithinULP(0.0f, 0)); // exactly zero
     }
 
     processor.releaseResources();

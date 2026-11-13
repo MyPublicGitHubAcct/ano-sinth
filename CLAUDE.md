@@ -58,6 +58,7 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
   - Windows: MSVC (Visual Studio), invoked from a developer environment so Ninja can find `cl.exe`
 
   Code must build cleanly on all three. Do not rely on extensions or behavior specific to one compiler.
+  **For now only macOS is built and tested** (CI included); Linux and Windows builds are deferred to a later phase (see PLAN.md). The portability rules still apply.
 - **Plugin formats:** VST3, AU, Standalone.
 - **Target platforms:** macOS, Linux, Windows. **STM32 may be added later**, which constrains the DSP library (see below).
 

@@ -2,6 +2,8 @@
 
 ## Requirements
 
+> Only **macOS** is built and tested for now. Linux and Windows builds are deferred to a later phase (see PLAN.md). Their instructions below are kept for when that work starts, but they are unverified.
+
 | | macOS | Linux | Windows |
 |---|---|---|---|
 | Compiler | Apple Clang (Xcode or its command-line tools) | GCC 12 or newer | MSVC (Visual Studio 2022 or newer) |
@@ -94,7 +96,7 @@ The *language* level is C++23 everywhere. *Library* support differs by platform:
 - On Linux, the Ubuntu 22.04 baseline means GCC 12's libstdc++.
 - On macOS, a 12.0 deployment target means some newer libc++ features are unavailable at run time, and the compiler reports them as availability errors.
 
-Treat "compiles on my Mac" as not enough: CI builds every platform. Raise the standard when JUCE, Catch2, and all three compilers support the next one.
+Until Linux and Windows CI returns, "compiles on my Mac" proves nothing about GCC 12 or MSVC. Avoid newer library features unless you know libstdc++ 12 and MSVC support them. Raise the standard when JUCE, Catch2, and all three compilers support the next one.
 
 ## Platform baselines (decision D8)
 
