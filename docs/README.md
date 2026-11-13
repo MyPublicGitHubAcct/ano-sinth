@@ -36,6 +36,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 4. [Parameter smoothing and zipper noise](dsp/parameter-smoothing.md)
 5. [Denormals: why they hurt and how we keep them out](dsp/denormals.md)
 6. [White noise and reproducible randomness](dsp/white-noise.md)
+7. [How we measure DSP quality](dsp/measuring-dsp.md): FFT, windows, coherent sampling, THD, aliasing, frequency response, and golden files. Read this before writing any spectral test.
 
 ### 3. Reference material
 

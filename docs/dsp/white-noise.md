@@ -71,7 +71,8 @@ Everything up to the float conversion is integer arithmetic, and the conversion 
     | χ² over 64 bins (63 d.o.f.) | 63 | 70.4 | 119 |
     | stereo cross-correlation (2¹⁸ samples, seed 3) | 0 | 9.3e-4 | 9.8e-3 |
 
-  - Spectral flatness is measured with the FFT harness once it exists (M1.0, test harness).
+  - the Welch spectrum is flat to within 0.043 dB across 15 bands (bound 0.25 dB), measured with the [harness](measuring-dsp.md);
+  - a stereo render matches its golden file, `tests/golden/dsp/white_noise_seed1_stereo.wav`, bit for bit.
 
 ## References
 

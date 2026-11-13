@@ -115,11 +115,11 @@ Each milestone lives mostly in `libs/dsp` and is tested in isolation before inte
 - [x] Denormal protection strategy. *Two layers: `ScopedFlushDenormals` (FTZ/DAZ on x86 MXCSR, FZ on AArch64 FPCR and ARMv7/Cortex-M FPSCR; a no-op elsewhere), plus `flushDenormal()` for recursive state. Tested on macOS arm64; the x86-64 path compiles (no Rosetta locally to run it), and Version CI runs it on Linux and Windows. Doc: [denormals](docs/dsp/denormals.md).*
 - [x] White noise generator: deterministic and seedable for tests. *`Random` (xoshiro128+, SplitMix64 seeding, 32-bit operations only) and `WhiteNoise` (a `BlockProcessor`, sample-major so chunking doesn't change output). Bit-identical across platforms, pinned by known-answer values cross-checked against a Python port. Spectral flatness is tested once the FFT harness exists. Doc: [white noise](docs/dsp/white-noise.md).*
 - [ ] Oversampling building blocks (2× and 4× up/down) with measured passband and stopband.
-- [ ] **Test harness:**
-  - signal generators
-  - FFT analysis (D5)
-  - helpers that measure THD, aliasing, and frequency response
-  - golden-file comparison for offline renders
+- [x] **Test harness:** *in `tests/support/` (`anoesis_test_support`, with its own self-test executable). Doc: [how we measure DSP quality](docs/dsp/measuring-dsp.md).*
+  - signal generators *(`sine`, `impulse`, `constant`, `coherentFrequency`)*
+  - FFT analysis (D5) *(radix-2 in double; rectangular, Hann, Blackman–Harris, and Kaiser windows; power spectra normalised so lobe sums give tone power; Welch averaging)*
+  - helpers that measure THD, aliasing, and frequency response *(each checked against a known answer: a naive saw's worst alias measures −20.00 dB at 22,980 Hz, exactly its folded 10th harmonic)*
+  - golden-file comparison for offline renders *(32-bit float WAV in `tests/golden/`, `ANOESIS_UPDATE_GOLDEN=1` to record, actual output saved on mismatch. First golden: white noise, bit-exact.)*
 - [ ] **Benchmark harness** (Catch2 `BENCHMARK`). Record CPU baselines from now on for Phase 3.
 
 **Docs:** the processor lifecycle; smoothing and why zipper noise happens; denormals; oversampling theory; how we measure DSP quality.
@@ -311,4 +311,5 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | Smoothers land exactly on the target after a fixed ramp length, for both shapes. The exponential shape decays to 10⁻⁴ (−80 dB) of the step over the ramp time, then snaps. Linear values are computed as start + step·k, not accumulated. | `isSmoothing()` becomes exact, so processors can switch to constant-parameter paths. No float stall, no denormal tail. See docs/dsp/parameter-smoothing.md. |
 | 2026-11-13 | Denormal strategy: an FTZ/DAZ RAII guard (`ScopedFlushDenormals`) at the top of every audio callback, plus `flushDenormal()` on recursive state. No offset or noise injection, no `-ffast-math`. | The guard costs nothing per sample. The explicit flush covers targets without FTZ control and code outside a guard. Injection would add signal that tests must tolerate. See docs/dsp/denormals.md. |
 | 2026-11-13 | Random numbers: xoshiro128+ seeded through SplitMix64, with floats from the top 24 bits mapped to exact, symmetric, zero-mean values. `<random>` is not used. | Bit-identical on every platform (`<random>`'s float distributions are implementation-defined). 32-bit only, so cheap on Cortex-M. See docs/dsp/white-noise.md. |
+| 2026-11-13 | Golden files are 32-bit float WAVs in `tests/golden/`, compared per sample with an explicit tolerance (0 for integer-exact output). They are recorded with `ANOESIS_UPDATE_GOLDEN=1`, and failed renders go to `build/<preset>/test-output/`. | Inspectable in any audio tool. The tolerance absorbs FMA-contraction differences between compilers. See docs/dsp/measuring-dsp.md. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |

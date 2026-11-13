@@ -34,6 +34,12 @@ Name test files `<unit>_test.cpp`. Tag test cases with the library (`[dsp]`) plu
 |---|---|
 | `buffer.hpp` | `Buffer`, an owning multichannel buffer that hands out an `AudioBlock`; `bitIdentical()` for determinism checks |
 | `lifecycle.hpp` | `checkLifecycleContract()`: proves `reset()` and a repeated `prepare()` restore the freshly prepared state ([processor lifecycle](../dsp/processor-lifecycle.md#tests)) |
+| `signals.hpp` | test signals, and `coherentFrequency()` for leakage-free spectral tests |
+| `fft.hpp`, `window.hpp`, `spectrum.hpp` | radix-2 FFT (D5), analysis windows, normalised power spectra |
+| `measure.hpp` | THD, aliasing, and frequency response (by sine or impulse) |
+| `golden.hpp` | float WAV I/O and golden-file comparison |
+
+How the measurements work and how to use them: [How we measure DSP quality](../dsp/measuring-dsp.md).
 
 A wrong measurement makes every test built on it meaningless, so the support code has its own tests in `tests/support/test/`.
 
@@ -61,10 +67,14 @@ The first tests in the repo were written red-first, and they show the loop end t
 - **`libs/dsp`.** [tests/dsp/library_test.cpp](../../tests/dsp/library_test.cpp) expects `anoesis::dsp::libraryName() == "anoesis_dsp"`. The first implementation returned an empty string. The test failed with `"" == "anoesis_dsp"`, and only then was the real value filled in. The test is trivial on purpose: it proves the build, link, and CTest wiring work.
 - **The plugin.** [tests/plugin/plugin_processor_test.cpp](../../tests/plugin/plugin_processor_test.cpp) fills a buffer with 0.5 (simulating garbage a host may pass in), calls `processBlock`, and requires exact silence. The first `processBlock` did nothing. The test failed (`0.5f is within 0 ULPs of 0.0f`), and adding `buffer.clear()` made it pass. This is a real requirement: an instrument must write every output sample.
 
+## Golden files
+
+Golden files are committed renders in [tests/golden/](../../tests/golden/). A test compares its output with one using `compareWithGolden()`. To create or update one, run the test with `ANOESIS_UPDATE_GOLDEN=1`, listen to the result, and commit it with an explanation of why the output changed. On a mismatch the actual render is written to `build/<preset>/test-output/`. Details: [How we measure DSP quality](../dsp/measuring-dsp.md#golden-files).
+
 ## Planned (Phase 1)
 
-- Numerical DSP checks: frequency and phase response, aliasing level, envelope timing, stability at extreme settings, denormals. FFT helpers come with decision D5 in M1.0.
-- Offline-render **golden-file** regression tests for whole patches (M1.8).
+- Envelope timing and stability checks at extreme settings, as the components arrive.
+- Golden-file regression tests for whole patches (M1.8).
 - Catch2 `BENCHMARK`s that record CPU baselines for Phase 3.
 
 ## References

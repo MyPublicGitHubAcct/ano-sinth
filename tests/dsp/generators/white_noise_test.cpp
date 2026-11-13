@@ -4,12 +4,17 @@
 #include <anoesis/dsp/generators/white_noise.hpp>
 
 #include <anoesis/test/buffer.hpp>
+#include <anoesis/test/golden.hpp>
 #include <anoesis/test/lifecycle.hpp>
+#include <anoesis/test/measure.hpp>
+#include <anoesis/test/spectrum.hpp>
+#include <anoesis/test/window.hpp>
 
 #include <anoesis/dsp/core/processor.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -127,4 +132,48 @@ TEST_CASE("WhiteNoise: stereo channels are independent", "[dsp][noise]")
     const auto correlation = cross / std::sqrt(left * right);
     CAPTURE(correlation);
     CHECK(std::abs(correlation) < 5.0 / std::sqrt(static_cast<double>(n))); // 5 sigma
+}
+
+TEST_CASE("WhiteNoise: the power spectrum is flat", "[dsp][noise][spectral]")
+{
+    // Welch average of 1024 Hann-windowed segments of 1024 samples. Uniform
+    // noise of variance 1/3 has an expected one-sided power of 2 * (1/3) / N
+    // per interior bin. Grouping 34 bins into a band and averaging 1024
+    // segments leaves an estimation error of about 1/sqrt(34 * 1024) = 0.5%
+    // (0.023 dB) per band; adjacent Hann bins are correlated, which roughly
+    // doubles that. 0.25 dB is about 5 of those standard deviations.
+    constexpr std::size_t segment = 1024;
+    std::vector<float> x(segment * 1024);
+    WhiteNoise noise{11};
+    noise.fill(x);
+    const auto spectrum = anoesis::test::averagedPowerSpectrum(x, 48000.0, anoesis::test::hannWindow(segment));
+
+    const auto expectedPerBin = 2.0 * (1.0 / 3.0) / static_cast<double>(segment);
+    double worstDeviationDb = 0.0;
+    for (std::size_t band = 0; band < 15; ++band)
+    {
+        double sum = 0.0;
+        for (std::size_t k = 1 + (band * 34); k < 1 + ((band + 1) * 34); ++k) // bins 1 .. 510: no DC, no Nyquist
+        {
+            sum += spectrum.power[k];
+        }
+        const auto deviation = anoesis::test::powerToDb((sum / 34.0) / expectedPerBin);
+        worstDeviationDb = std::max(worstDeviationDb, std::abs(deviation));
+    }
+    CAPTURE(worstDeviationDb);
+    CHECK(worstDeviationDb < 0.25);
+}
+
+TEST_CASE("WhiteNoise matches its golden render bit for bit", "[dsp][noise][golden]")
+{
+    // Integer arithmetic plus an exact float conversion: every platform must
+    // produce exactly these samples, so the tolerance is zero.
+    Buffer buffer{2, 2048};
+    WhiteNoise noise{1};
+    noise.prepare({.sampleRate = 48000.0f, .maxBlockSize = 2048, .numChannels = 2});
+    noise.process(buffer.block());
+
+    const auto result = anoesis::test::compareWithGolden("dsp/white_noise_seed1_stereo", buffer, 48000.0);
+    INFO(result.message);
+    CHECK(result.passed);
 }
