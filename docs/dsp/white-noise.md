@@ -56,7 +56,7 @@ Everything up to the float conversion is integer arithmetic, and the conversion 
 - [tests/dsp/math/random_test.cpp](../../tests/dsp/math/random_test.cpp):
   - the same seed gives the same 10,000 outputs, and a neighbouring seed differs almost everywhere;
   - `reset()` and `setSeed()` restart the sequence;
-  - **known-answer values** for seeds 0 and 1, cross-checked against an independent Python port of SplitMix64 and xoshiro128+;
+  - **known-answer values** for seeds 0 and 1, reproduced by an independent Python port (see [Where the known answers come from](#where-the-known-answers-come-from));
   - `nextBipolar()` is in (−1, 1) and never 0, and `nextUnipolar()` is in [0, 1).
 - [tests/dsp/generators/white_noise_test.cpp](../../tests/dsp/generators/white_noise_test.cpp):
   - the lifecycle contract holds;
@@ -73,6 +73,26 @@ Everything up to the float conversion is integer arithmetic, and the conversion 
 
   - the Welch spectrum is flat to within 0.043 dB across 15 bands (bound 0.25 dB), measured with the [harness](measuring-dsp.md);
   - a stereo render matches its golden file, `tests/golden/dsp/white_noise_seed1_stereo.wav`, bit for bit.
+
+### Where the known answers come from
+
+A known-answer test is only as trustworthy as its expected values. If they had been produced by running `random.hpp` and copying its output, the test would pin whatever the code did, bugs included: a wrong shift, the state words split in the wrong order, or a missing mask would all be "correct" by definition.
+
+So the values come from a second, independent implementation: [tools/reference/xoshiro128plus.py](../../tools/reference/xoshiro128plus.py).
+
+- **Written from the published reference, not from our header.** It follows Vigna's `splitmix64.c` and `xoshiro128plus.c` (prng.di.unimi.it).
+- **A different language with different integer semantics.** Python integers are arbitrary-precision, so the port masks every operation to 32 or 64 bits by hand. C++ wraps unsigned integers implicitly. A mistake in either is unlikely to be repeated in the other.
+- **The same seeding convention as `random.hpp`.** Two SplitMix64 outputs, each split low word first, fill `s[0..3]`. This convention is ours (the reference code leaves seeding to the user), so the port states it explicitly.
+- **Pure standard library.** It runs anywhere Python 3 does.
+
+```sh
+python3 tools/reference/xoshiro128plus.py              # seeds 0 and 1, 4 outputs each
+python3 tools/reference/xoshiro128plus.py 2026 -n 8    # any seeds, any count
+```
+
+It prints each sequence as a C++ initialiser, in the form the test uses. For seeds 0 and 1 it gives `{0xE9966C19U, 0xB8F8985EU, 0xC3536FC5U, 0x97D6A8F6U}` and `{0x47EDEA62U, 0xB3E6660BU, 0xFE08B43DU, 0x6F8BCA7DU}`, which match the C++ exactly.
+
+The port is not run by CTest; the values it produced are already in the test. Run it again if the generator or its seeding ever changes on purpose. A deliberate change to the sequence also changes every noise golden file, so re-record them in the same commit.
 
 ## References
 

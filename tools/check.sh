@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # The local gate: run this before every commit (macOS, for now).
 # It configures, builds, and runs all tests (including pluginval on the built
-# VST3 and auval on the AU, which is installed temporarily), then runs clang-tidy, the format check, and the identity-leak check.
+# VST3 and auval on the AU, which is installed temporarily), then runs clang-tidy, the format check, the identity-leak check,
+# and the no-published-builds check.
 # It stops at the first failure.
 #
-#   tools/check.sh          debug build + tests, tidy, format, leak check
+#   tools/check.sh          debug build + tests, tidy, format, leak check, publish check
 #   tools/check.sh --asan   also run the ASan/UBSan build and tests
 #
 # CI on GitHub runs only for major/minor version tags (vX.Y.0), so this script
@@ -30,5 +31,8 @@ tools/format.sh --check
 
 step "Identity leak check"
 tools/check-identity-leak.sh
+
+step "No published builds"
+tools/check-no-published-builds.sh
 
 printf '\nAll checks passed.\n'

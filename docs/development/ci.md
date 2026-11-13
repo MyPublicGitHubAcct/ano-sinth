@@ -7,11 +7,13 @@
   2. runs clang-tidy;
   3. runs the format check;
   4. runs the identity-leak check;
+  5. runs the no-published-builds check;
 
   and stops at the first failure. Add `--asan` to also run the sanitizer build. The git hooks also check formatting and identity leaks on each commit.
 - **GitHub Actions runs only for major and minor versions.** The trigger is a pushed tag `vX.Y.0`, or a manual dispatch. Patch versions (`vX.Y.Z` with Z > 0), ordinary pushes, and pull requests run nothing. This keeps hosted CI time for the points where a version is cut.
-- **Platform order.** macOS is tested first: locally before every commit, then in CI. **Linux and Windows are tested after macOS** in every version run. They are not built locally, and release artifacts for them are still deferred (see PLAN.md).
+- **Platform order.** macOS is tested first: locally before every commit, then in CI. **Linux and Windows are tested after macOS** in every version run. They are not built locally.
 - **Fail fast.** One failure stops the run, so no minutes are spent after something has already broken.
+- **No downloadable builds on GitHub.** CI compiles and tests, and nothing more. No workflow uploads artifacts, creates releases or release assets, pushes packages, or deploys Pages, and no one uploads binaries by hand. The repository is public, so any of these would make a compiled plugin downloadable by anyone. Binaries contain JUCE (AGPLv3 or commercial) and the real plugin identity, so distributing them is a separate decision (see PLAN.md, **Distribution**). [tools/check-no-published-builds.sh](../../tools/check-no-published-builds.sh) enforces this for workflows: it fails on `actions/upload-artifact`, release actions, `gh release`, Pages deploys, package pushes, and `contents: write` or `packages: write` permissions. It runs in `tools/check.sh` and as the last step of CI job 1.
 
 ## The workflow: [version-ci.yml](../../.github/workflows/version-ci.yml)
 
@@ -19,10 +21,10 @@ The jobs run as a chain. Each needs the one before it, so a failure skips everyt
 
 | # | Job | Runner | What it does |
 |---|---|---|---|
-| 1 | Version, format, and identity checks | ubuntu-latest | Checks that the tag equals `v` + `project(VERSION …)` in [CMakeLists.txt](../../CMakeLists.txt). Then runs the clang-format 23.1.5 check and the identity-leak check over tracked files and every commit message, with values from secrets. These need no compiler, so they use the cheapest runner. |
+| 1 | Version, format, and identity checks | ubuntu-latest | Checks that the tag equals `v` + `project(VERSION …)` in [CMakeLists.txt](../../CMakeLists.txt). Then runs the clang-format 23.1.5 check, the identity-leak check over tracked files and every commit message (with values from secrets), and the no-published-builds check. These need no compiler, so they use the cheapest runner. |
 | 2 | macOS tests (`debug`, `asan`) | macos-latest | `cmake --workflow --preset <preset>`, which includes pluginval at strictness 10 on the VST3 and `auval -strict` on the AU (neither in `asan`; see [plugin-validation.md](plugin-validation.md)). The debug leg also runs clang-tidy 23.1.4. The matrix has `fail-fast: true`, so if one leg fails the other is cancelled. Uses the placeholder identity. |
 | 3 | Linux and Windows tests | ubuntu-22.04, windows-latest | Starts only after both macOS legs pass. The `debug` legs include pluginval. Three legs in one fail-fast matrix: Linux GCC 12 `debug` and `asan` (under `xvfb-run`), and Windows MSVC `debug` (inside `vcvars64.bat`, located with `vswhere`). ASan isn't run on Windows. Uses the placeholder identity. |
-| 4 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds, tests (pluginval and auval validate the release VST3 and AU), and uploads the VST3, AU, and Standalone outputs as artifacts. |
+| 4 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds and tests (pluginval and auval validate the release VST3 and AU). **Uploads nothing**: the outputs are discarded with the runner. |
 
 Within each job, steps stop at the first failure (the GitHub default). `concurrency` cancels an older run of the same ref if a newer one starts.
 
@@ -56,7 +58,7 @@ The leak check and the release build use them. To change one, run `printf %s "<v
 
 ## History
 
-The first CI run (run 43498239659, from commit `2b5476c`) ran on every push and covered all three platforms:
+The first CI run (run 43498239659, from commit `2b5476c`) ran on every push and covered all three platforms. It failed and stored no artifacts. On 2026-11-13 the repository had no releases, no workflow artifacts, and no packages:
 
 - **Linux, GCC 12:** passed as-is, for both `debug` and `asan`.
 - **Windows, MSVC:** failed on warning C4459. A test constant was hidden by a JUCE template parameter with the same name. That has been fixed in the test, but MSVC hasn't checked the fix yet. The first version run will show whether it worked.
@@ -65,6 +67,5 @@ The first CI run (run 43498239659, from commit `2b5476c`) ran on every push and 
 
 | Item | Planned in |
 |---|---|
-| Linux and Windows release artifacts | The Linux and Windows milestone (PLAN.md) |
-| Code signing and notarization (macOS), installers | Before the first public release |
+| Distributing builds (where, signing and notarization, installers, all platforms) | A later decision, never via GitHub as things stand (PLAN.md, **Distribution**) |
 | Build caching (ccache) | When CI time becomes a problem |

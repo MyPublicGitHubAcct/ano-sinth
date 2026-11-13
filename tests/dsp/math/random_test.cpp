@@ -52,9 +52,9 @@ TEST_CASE("Random: reset() and setSeed() restart a sequence", "[dsp][random]")
 
 TEST_CASE("Random: known-answer values pin the algorithm on every platform", "[dsp][random]")
 {
-    // The first outputs for seed 0 and seed 1, recorded when the generator was
-    // written and cross-checked against an independent Python port of
-    // SplitMix64 seeding + xoshiro128+. Integer arithmetic only, so every
+    // The first outputs for seed 0 and seed 1, reproduced by an independent
+    // Python port of SplitMix64 seeding + xoshiro128+ written from the published
+    // reference code: tools/reference/xoshiro128plus.py. Integer arithmetic only, so every
     // compiler and CPU must reproduce them bit for bit. If this fails, presets
     // and golden renders that use noise will no longer match.
     Random zero{0};

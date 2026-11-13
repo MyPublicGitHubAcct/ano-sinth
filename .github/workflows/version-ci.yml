@@ -7,6 +7,9 @@
 #   checks -> macOS tests -> Linux + Windows tests -> macOS release build
 # Any failure stops everything after it, and a failing matrix leg cancels its
 # siblings.
+#
+# No job publishes anything: no artifacts, releases, or packages. Compiled
+# builds are never downloadable from GitHub (tools/check-no-published-builds.sh).
 
 name: Version CI
 
@@ -46,6 +49,7 @@ jobs:
           BRUTALIS_PLUGIN_CODE: ${{ secrets.BRUTALIS_PLUGIN_CODE }}
           BRUTALIS_BUNDLE_ID: ${{ secrets.BRUTALIS_BUNDLE_ID }}
         run: tools/check-identity-leak.sh
+      - run: tools/check-no-published-builds.sh
 
   test:
     name: macOS tests (${{ matrix.preset }})
@@ -140,11 +144,6 @@ jobs:
             -DBRUTALIS_BUNDLE_ID="$BRUTALIS_BUNDLE_ID"
           cmake --build --preset release
           ctest --preset release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Brutalis-${{ github.ref_name }}-macOS
-          path: |
-            build/release/plugin/brutalis_artefacts/Release/VST3
-            build/release/plugin/brutalis_artefacts/Release/AU
-            build/release/plugin/brutalis_artefacts/Release/Standalone
-          if-no-files-found: error
+      # Deliberately no upload step. GitHub hosts source only: the release
+      # build is compiled and validated here, then discarded with the runner.
+      # tools/check-no-published-builds.sh (job 1) fails on any publishing step.
