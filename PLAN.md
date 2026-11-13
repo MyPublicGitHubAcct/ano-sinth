@@ -24,11 +24,11 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 ## Current status
 
-**Phase 0: Foundation, done except M0.6's plugin validation.** The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: macOS first, then Linux and Windows, then the macOS release build.
+**Phase 0: Foundation, done except AU validation (auval, M0.6).** The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: macOS first, then Linux and Windows, then the macOS release build.
 
 Still open:
 
-- **M0.6:** plugin validation (pluginval/auval).
+- **M0.6:** AU validation (`auval`, which needs an installed AU). pluginval is wired in: the VST3 passes at strictness 10.
 - **Linux and Windows:** tested in Version CI after macOS. Not built locally, and no release artifacts for them yet. See the section below.
 
 **Next:** M1.0.
@@ -70,7 +70,7 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
   - Add `.clang-format` and `.clang-tidy` (Core Guidelines checks).
   - Add an optional sanitizer preset (ASan/UBSan) for Clang and GCC.
   - Add a pre-commit format check or a script that does the same.
-- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Not yet run in this form. pluginval/auval still to do.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
+- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Not yet run in this form. **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. auval still to do.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
   - The test jobs use the placeholder identity.
   - Release jobs read `BRUTALIS_MANUFACTURER_CODE`, `BRUTALIS_PLUGIN_CODE`, and `BRUTALIS_BUNDLE_ID` from GitHub Actions secrets and set `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`.
   - Add a CI check that fails if the real values appear in tracked files. Keep the values for this check in a secret too.
@@ -230,7 +230,7 @@ Each effect is a standalone, reusable `libs/dsp` processor. Add them to the fixe
 
 ### M1.12 Plugin target and validation
 - [ ] VST3, AU, and Standalone build on every platform (AU on macOS only).
-- [ ] pluginval in CI, plus `auval` on macOS. Manual smoke test in at least one DAW per platform.
+- [~] pluginval in CI (done in Phase 0: VST3 at strictness 10), plus `auval` on macOS (still open). Manual smoke test in at least one DAW per platform.
 - [ ] State save and restore round-trips.
 
 ### M1.13 Parity verification and sign-off
@@ -302,4 +302,5 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | Namespaces: `anoesis::dsp`, `anoesis::gui`, `anoesis::interop`, `brutalis`. CMake targets: `anoesis_dsp`, `anoesis_gui`, `anoesis_interop`, `brutalis`. | The reusable libs carry the company name because they are meant for reuse beyond this product. |
 | 2026-11-13 | Plugin tests compile the plugin's own sources (the `brutalis_plugin_common` INTERFACE target) into a JUCE console app, rather than linking the plugin's shared-code library. | The tests exercise the shipped code without the format wrappers. |
 | 2026-11-13 | Linux and Windows: no local builds. Every major or minor version is tested on both in Version CI, after macOS passes. Release artifacts for them are deferred. | Decided by the project owner (this refines an earlier same-day deferral of Linux and Windows builds). See **Linux and Windows**. |
+| 2026-11-13 | pluginval v1.0.4 (latest stable) added as a CTest test at strictness 10 on the VST3. Downloaded at configure time with pinned SHA-256 hashes and cached in `.cache/`. Skipped in sanitizer builds. | Running as a CTest test means `tools/check.sh` and every CI test leg run it with no extra wiring. Verified both ways: the plugin passes, and NaN output fails. See docs/development/plugin-validation.md. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |

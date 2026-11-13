@@ -23,6 +23,8 @@ option(BRUTALIS_BUILD_TESTS          "Build the Catch2 test targets" ON)
 option(BRUTALIS_BUILD_PLUGIN         "Build the plugin target (needs JUCE)" ON)
 option(BRUTALIS_REQUIRE_REAL_IDENTITY "Fail configure if any placeholder identity value is in use (release builds)" OFF)
 option(BRUTALIS_ALLOW_ANY_COMPILER   "Allow a compiler other than the platform's standard one" OFF)
+option(BRUTALIS_PLUGINVAL            "Validate the built plugin with pluginval as a CTest test" ON)
+set(BRUTALIS_PLUGINVAL_EXECUTABLE "" CACHE FILEPATH "Use this pluginval binary instead of downloading the pinned release")
 
 # --- Language standard --------------------------------------------------------
 # The highest standard JUCE and Catch2 both support on every target compiler.
@@ -34,6 +36,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(AnoesisCompiler)
 include(AnoesisJuce)
+include(AnoesisPluginval)
 anoesis_check_platform_compiler()
 
 if(BRUTALIS_SANITIZERS)

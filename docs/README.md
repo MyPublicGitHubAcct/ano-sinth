@@ -21,7 +21,8 @@ Read these first, in this order.
 3. [Test-driven development in this repo](development/testing.md): the red-green-refactor loop, with Catch2 and CTest.
 4. [Code quality: warnings, formatting, static analysis](development/code-quality.md)
 5. [Product identity](development/product-identity.md): how the private plugin codes stay out of the repository.
-6. [Continuous integration](development/ci.md)
+6. [Plugin validation with pluginval](development/plugin-validation.md)
+7. [Continuous integration](development/ci.md)
 
 ### 2. DSP theory and its implementation
 

@@ -82,6 +82,8 @@ Plugins are not copied into the system plugin folders automatically (`COPY_PLUGI
 | `BRUTALIS_BUILD_PLUGIN` | ON | Builds JUCE, `libs/gui`, `libs/interop`, and the plugin. Turn it off to build only `libs/dsp` and its tests: fast, with no JUCE involved. |
 | `BRUTALIS_REQUIRE_REAL_IDENTITY` | OFF (ON in `release`) | Fails configure if a placeholder identity value is in use. |
 | `BRUTALIS_ALLOW_ANY_COMPILER` | OFF | Turns the standard-compiler check into a warning. |
+| `BRUTALIS_PLUGINVAL` | ON | Validates the built VST3 with pluginval as a CTest test. The pinned binary is downloaded on the first configure; see [plugin-validation.md](plugin-validation.md). |
+| `BRUTALIS_PLUGINVAL_EXECUTABLE` | empty | Uses a local pluginval binary instead of downloading one (offline builds). |
 
 ## Language standard
 
