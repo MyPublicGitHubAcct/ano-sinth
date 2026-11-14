@@ -5,7 +5,9 @@
 // [oscillators] benchmarks print both side by side, so any later change to
 // minBLEP (taps, vectorisation, the 8 waveforms) can be judged against the
 // alternative D6 rejected, with the same harness. Its residuals are also an
-// independent analytic check of the BLEP/BLAMP formulation.
+// independent analytic check of the BLEP/BLAMP formulation. It reads the same
+// waveform table (waveform.hpp) as minBLEP, so all 7 periodic waveforms
+// compare like for like.
 
 #pragma once
 
@@ -13,7 +15,9 @@
 #include <anoesis/dsp/oscillators/phase.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 
+#include <cmath>
 #include <cstdint>
+#include <numbers>
 
 /// PolyBLEP / PolyBLAMP.
 ///
@@ -35,13 +39,10 @@ namespace anoesis::test::reference
 
 using dsp::halfCycle;
 using dsp::incrementFor;
-using dsp::naivePulse;
-using dsp::naiveSaw;
-using dsp::naiveTriangle;
 using dsp::ProcessSpec;
 using dsp::toCycles;
 using dsp::Waveform;
-using dsp::widthToPhase;
+using dsp::WaveShape;
 
 namespace polyblep
 {
@@ -133,14 +134,12 @@ public:
         started = false;
     }
 
+    /// The same shape table as the minBLEP oscillator (waveform.hpp).
     void setWaveform(Waveform newWaveform) noexcept
     {
-        waveform = newWaveform;
-    }
-
-    void setPulseWidth(float width) noexcept
-    {
-        widthPhase = widthToPhase(width);
+        shape = &dsp::waveShape(newWaveform);
+        sineLevel = shape->sineLevel();
+        hasSine = sineLevel < 0.0f || sineLevel > 0.0f;
     }
 
     void setFrequency(float hz) noexcept
@@ -166,21 +165,33 @@ public:
 
     [[nodiscard]] float next() noexcept
     {
-        float y = 0.0f;
-        switch (waveform)
+        // Two loop bodies, as in MinBlepOscillator: sin() in the body costs
+        // the waveforms without a sine about 30% even when untaken.
+        return hasSine ? nextSample<true>() : nextSample<false>();
+    }
+
+private:
+    template <bool WithSine>
+    [[nodiscard]] float nextSample() noexcept
+    {
+        // PolyBLEP is zero-phase, so the sine needs neither correction nor
+        // delay.
+        float y = shape->linearValueAt(phase);
+        if constexpr (WithSine)
         {
-        case Waveform::saw:
-            y = naiveSaw(toCycles(phase)) + jump(0, -2.0f);
-            break;
-        case Waveform::pulse:
-            y = naivePulse(phase, widthPhase) + jump(0, 2.0f) + jump(widthPhase, -2.0f);
-            break;
-        case Waveform::triangle:
-        {
-            const float slopeChange = 8.0f * toCycles(increment);
-            y = naiveTriangle(toCycles(phase)) + bend(0, slopeChange) + bend(halfCycle, -slopeChange);
-            break;
+            y += sineLevel * std::sin(2.0f * std::numbers::pi_v<float> * toCycles(phase));
         }
+        const float dt = toCycles(increment);
+        for (const auto& corner : shape->corners())
+        {
+            if (corner.jumps)
+            {
+                y += jump(corner.phase, corner.jump);
+            }
+            if (corner.bends)
+            {
+                y += bend(corner.phase, corner.bend * dt);
+            }
         }
         phase += increment;
         arrivedSamplesPerCycle = samplesPerCycle;
@@ -189,7 +200,6 @@ public:
         return y;
     }
 
-private:
     // An edge at `edgePhase` matters while it is under `Points / 2` samples
     // behind (measured with the increment that brought us here) or ahead
     // (with the current one). Both tests are integer compares, so samples
@@ -232,13 +242,14 @@ private:
     float sampleRate = 48000.0f;
     std::uint32_t phase = 0;
     std::uint32_t increment = 0;
-    std::uint32_t widthPhase = halfCycle;
     float samplesPerCycle = 0.0f;
     float arrivedSamplesPerCycle = 0.0f;
     std::uint32_t nearAhead = 0;  // Points / 2 samples' worth of phase, at the current increment
     std::uint32_t nearBehind = 0; // ... at the increment that brought us here
     bool started = false;
-    Waveform waveform = Waveform::saw;
+    const WaveShape* shape = &dsp::waveShape(Waveform::saw);
+    float sineLevel = 0.0f;
+    bool hasSine = false;
 };
 
 } // namespace anoesis::test::reference

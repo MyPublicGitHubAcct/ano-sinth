@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 
 /// Fixed-point oscillator phase.
@@ -40,18 +39,9 @@ inline constexpr std::uint32_t halfCycle = 0x80000000U;
 }
 
 /// A phase or an increment in cycles, [0, 1).
-[[nodiscard]] inline float toCycles(std::uint32_t phase) noexcept
+[[nodiscard]] constexpr float toCycles(std::uint32_t phase) noexcept
 {
     return static_cast<float>(phase) * cyclesPerUnit;
-}
-
-/// The phase of a pulse width in (0, 1), kept one part in 2^16 away from
-/// the ends so the two edges never coincide. NaN gives the narrowest width.
-[[nodiscard]] inline std::uint32_t widthToPhase(float width) noexcept
-{
-    constexpr float lowest = 1.0f / 65536.0f;
-    const float w = width > lowest ? std::min(width, 1.0f - lowest) : lowest;
-    return static_cast<std::uint32_t>(w * 4294967296.0f);
 }
 
 } // namespace anoesis::dsp

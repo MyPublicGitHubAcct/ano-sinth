@@ -1,14 +1,16 @@
-// The D6 measurement report: the minBLEP oscillator (32 and 64 taps) and the
-// PolyBLEP reference, measured with the test harness (measureAliasing, measureHarmonics, powerSpectrum) and printed
-// as Markdown tables. Hidden from the default run; run it in an optimised
-// build (about a minute):
+// The oscillator measurement report: the minBLEP oscillator (32 and 64 taps)
+// and the PolyBLEP reference, for each of the 7 periodic waveforms, measured
+// with the test harness (measureAliasing, measureHarmonics, powerSpectrum)
+// and printed as Markdown tables. Hidden from the default run; run it in an
+// optimised build (a minute or two):
 //
 //   cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[d6-report]"
 //
-// Results and the decision: docs/dsp/band-limited-oscillators.md. The
-// mipmapped-wavetable candidate was measured too, then removed; to rerun it,
-// check out commit 984d868.
+// Results: docs/dsp/band-limited-oscillators.md (the D6 decision) and
+// docs/dsp/oscillator-waveforms.md (the 8 waveforms). The mipmapped-wavetable
+// candidate was measured too, then removed; to rerun it, check out commit
+// 984d868.
 
 #include "oscillator_support.hpp"
 
@@ -41,20 +43,7 @@ namespace
 constexpr std::size_t n = 65536;
 constexpr double audible = 20000.0;
 constexpr int topTwoOctaves = 104; // MIDI 104..127: 3.3 to 12.5 kHz
-
-const char* shapeName(Waveform shape)
-{
-    switch (shape)
-    {
-    case Waveform::saw:
-        return "saw";
-    case Waveform::pulse:
-        return "square";
-    case Waveform::triangle:
-        return "triangle";
-    }
-    return "";
-}
+constexpr double minusInfinity = -std::numeric_limits<double>::infinity();
 
 std::string db(double value)
 {
@@ -82,84 +71,95 @@ std::vector<float> renderNote(Waveform shape, std::uint64_t cycles, double rate,
     osc.prepare(
         {.sampleRate = static_cast<float>(rate * static_cast<double>(ratio)), .maxBlockSize = 512, .numChannels = 1});
     osc.setWaveform(shape);
-    osc.setPulseWidth(0.5f);
     osc.setIncrement(coherentIncrement(cycles, n, ratio));
     return render(osc, rate, ratio, 4096, n);
 }
 
-struct AliasSweep
+double peakOf(const std::vector<float>& signal)
 {
-    double worstAll = -std::numeric_limits<double>::infinity();
-    double worstTop = -std::numeric_limits<double>::infinity();
-    double worstBelow = -std::numeric_limits<double>::infinity(); ///< MIDI 0-103
-    int worstNote = 0;
-};
-
-template <typename Osc>
-AliasSweep sweepAliasing(Waveform shape, double rate, std::size_t ratio)
-{
-    AliasSweep sweep;
-    const auto window = rectangularWindow(n);
-    for (int note = 0; note <= 127; ++note)
+    double peak = 0.0;
+    for (const float x : signal)
     {
-        const auto cycles = noteCycles(note, rate);
-        const auto f0 = static_cast<double>(cycles) * rate / n;
-        const auto alias = measureAliasing(renderNote<Osc>(shape, cycles, rate, ratio), f0, rate, window, audible);
-        if (alias.worstAliasDb > sweep.worstAll)
-        {
-            sweep.worstAll = alias.worstAliasDb;
-            sweep.worstNote = note;
-        }
-        auto& band = note >= topTwoOctaves ? sweep.worstTop : sweep.worstBelow;
-        band = std::max(band, alias.worstAliasDb);
+        peak = std::isfinite(x) ? std::max(peak, static_cast<double>(std::abs(x)))
+                                : std::numeric_limits<double>::infinity();
     }
-    return sweep;
+    return peak;
 }
 
-struct Droop
+// One sweep over MIDI 0-127: the worst alias, the passband error against the
+// waveform's Fourier series, and the peak level, from the same renders.
+struct Sweep
 {
-    double worstTo10k = 0.0; ///< most negative harmonic error (dB) up to 10 kHz, over all notes
-    double worstTo20k = 0.0; ///< ... up to 20 kHz (-inf: some harmonic missing)
-    double at15k = 0.0;      ///< error of the harmonic nearest 15 kHz, for a 110 Hz saw
+    double worstAll = minusInfinity;
+    double worstTop = minusInfinity;   ///< MIDI 104-127
+    double worstBelow = minusInfinity; ///< MIDI 0-103
+    int worstNote = 0;
+    double droopTo10k = 0.0; ///< most negative harmonic error (dB) up to 10 kHz
+    double droopTo20k = 0.0; ///< ... up to 20 kHz (-inf: some harmonic missing)
+    double at15k = 0.0;      ///< error of the harmonic nearest 15 kHz, at A2 (110 Hz)
     double at19k = 0.0;      ///< ... nearest 19 kHz
+    double peak = 0.0;
 };
 
 template <typename Osc>
-Droop measureDroop(double rate, std::size_t ratio)
+Sweep sweep(Waveform shape, double rate, std::size_t ratio, bool withDroop)
 {
-    Droop droop;
+    Sweep result;
     const auto window = rectangularWindow(n);
-    const auto errorDb = [](double measured, std::size_t k)
+    // A harmonic whose ideal amplitude is this small sits on a null of the
+    // series (a pulse's k w = integer, a square's even harmonics); its
+    // relative error says nothing about droop.
+    constexpr double negligible = 1e-3;
+    const auto errorDb = [&](double measured, std::size_t k)
     {
-        const auto ratioToIdeal = measured / idealHarmonic(Waveform::saw, k);
-        return ratioToIdeal < 1e-4 ? -std::numeric_limits<double>::infinity() : toDb(ratioToIdeal);
+        const auto ratioToIdeal = measured / idealHarmonic(shape, k);
+        return ratioToIdeal < 1e-4 ? minusInfinity : toDb(ratioToIdeal);
     };
     for (int note = 0; note <= 127; ++note)
     {
         const auto cycles = noteCycles(note, rate);
         const auto f0 = static_cast<double>(cycles) * rate / n;
-        const auto harmonics =
-            measureHarmonics(renderNote<Osc>(Waveform::saw, cycles, rate, ratio), f0, rate, window, audible);
+        const auto out = renderNote<Osc>(shape, cycles, rate, ratio);
+        result.peak = std::max(result.peak, peakOf(out));
+
+        const auto alias = measureAliasing(out, f0, rate, window, audible);
+        if (alias.worstAliasDb > result.worstAll)
+        {
+            result.worstAll = alias.worstAliasDb;
+            result.worstNote = note;
+        }
+        auto& band = note >= topTwoOctaves ? result.worstTop : result.worstBelow;
+        band = std::max(band, alias.worstAliasDb);
+
+        if (!withDroop)
+        {
+            continue;
+        }
+        const auto harmonics = measureHarmonics(out, f0, rate, window, audible);
         for (std::size_t k = 1; k <= harmonics.size(); ++k)
         {
+            if (idealHarmonic(shape, k) < negligible)
+            {
+                continue;
+            }
             const auto e = errorDb(harmonics[k - 1], k);
             if (static_cast<double>(k) * f0 <= 10000.0)
             {
-                droop.worstTo10k = std::min(droop.worstTo10k, e);
+                result.droopTo10k = std::min(result.droopTo10k, e);
             }
-            droop.worstTo20k = std::min(droop.worstTo20k, e);
+            result.droopTo20k = std::min(result.droopTo20k, e);
         }
-        if (note == 45) // A2, 110 Hz
+        if (note == 45 && shape == Waveform::saw) // A2, 110 Hz
         {
             const auto nearest = [&](double hz)
             {
                 return std::min(harmonics.size(), static_cast<std::size_t>(std::lround(hz / f0)));
             };
-            droop.at15k = errorDb(harmonics[nearest(15000.0) - 1], nearest(15000.0));
-            droop.at19k = errorDb(harmonics[nearest(19000.0) - 1], nearest(19000.0));
+            result.at15k = errorDb(harmonics[nearest(15000.0) - 1], nearest(15000.0));
+            result.at19k = errorDb(harmonics[nearest(19000.0) - 1], nearest(19000.0));
         }
     }
-    return droop;
+    return result;
 }
 
 // Worst alias (dB re a saw's fundamental) under a deep vibrato: linear FM,
@@ -206,6 +206,37 @@ double worstDc(double rate)
     return worst;
 }
 
+struct Level
+{
+    double worstDc = 0.0; ///< largest |mean - ideal mean|, 1 kHz steps to Nyquist
+    double peak = 0.0;    ///< over those renders and 0.01 Hz
+};
+
+// DC against the ideal mean, and the peak, from 0.01 Hz to Nyquist at `rate`.
+template <typename Osc>
+Level measureLevel(Waveform shape, double rate)
+{
+    Level level;
+    for (int kHz = 1; kHz < static_cast<int>(rate / 2000.0); ++kHz)
+    {
+        const auto hz = 1000.0 * kHz;
+        const auto cycles = static_cast<std::uint64_t>(std::lround(coherentFrequency(hz, rate, n) * n / rate));
+        const auto out = renderNote<Osc>(shape, cycles, rate, 1);
+        const auto mean = std::accumulate(out.begin(), out.end(), 0.0) / n;
+        level.worstDc = std::max(level.worstDc, std::abs(mean - idealMean(shape)));
+        level.peak = std::max(level.peak, peakOf(out));
+    }
+    for (const double hz : {0.01, (rate / 2.0) - 1.0, rate / 2.0})
+    {
+        auto osc = Candidate<Osc>::make();
+        osc.prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = 512, .numChannels = 1});
+        osc.setWaveform(shape);
+        osc.setFrequency(static_cast<float>(hz));
+        level.peak = std::max(level.peak, peakOf(render(osc, rate, 1, 0, 16384)));
+    }
+    return level;
+}
+
 // "44.1 kHz, 2x" for a row label.
 std::string rowLabel(double rate, std::size_t ratio)
 {
@@ -226,31 +257,60 @@ void printReport()
         header += std::string(" ") + name + " |";
         rule += "---:|";
     }
-
-    out << "## Worst alias below 20 kHz, dB re fundamental\n\nTop two octaves (MIDI 104-127, 3.3-12.5 kHz) "
-           "(the note of the worst case over the whole keyboard) / MIDI 0-103.\n\n";
-    for (const auto shape : {Waveform::saw, Waveform::pulse, Waveform::triangle})
+    const auto row = [&](const std::string& label, const auto& cell)
     {
-        out << "### " << shapeName(shape) << "\n\n" << header << "\n" << rule << "\n";
-        for (const double rate : {44100.0, 48000.0})
-        {
-            for (const std::size_t ratio : {std::size_t{1}, std::size_t{2}, std::size_t{4}})
+        out << "| " << label << " |";
+        (
+            [&]
             {
-                out << "| " << rowLabel(rate, ratio) << " |";
-                (
-                    [&]
-                    {
-                        const auto s = sweepAliasing<Oscs>(shape, rate, ratio);
-                        out << " " << db(s.worstTop) << " (MIDI " << s.worstNote << ") / " << db(s.worstBelow) << " |";
-                    }(),
-                    ...);
-                out << '\n' << std::flush; // one row at a time: the report takes a while
-            }
+                out << " " << cell.template operator()<Oscs>() << " |";
+            }(),
+            ...);
+        out << '\n' << std::flush; // one row at a time: the report takes a while
+    };
+
+    for (const double rate : {44100.0, 48000.0})
+    {
+        out << "## " << rowLabel(rate, 1) << ": worst alias below 20 kHz, dB re fundamental\n\n"
+            << "Top two octaves (MIDI 104-127, 3.3-12.5 kHz) (the note of the worst case over the whole keyboard) / "
+               "MIDI 0-103. Then the worst harmonic error against the waveform's Fourier series, dB, up to 10 kHz / "
+               "up to 20 kHz, over MIDI 0-127 (harmonics on a null of the series skipped). Then the peak level.\n\n"
+            << header << "\n"
+            << rule << "\n";
+        for (const auto shape : periodicShapes)
+        {
+            row(shapeName(shape),
+                [&]<typename Osc>
+                {
+                    const auto s = sweep<Osc>(shape, rate, 1, true);
+                    std::ostringstream cell;
+                    cell << db(s.worstTop) << " (MIDI " << s.worstNote << ") / " << db(s.worstBelow) << "; droop "
+                         << db(s.droopTo10k) << " / " << db(s.droopTo20k) << "; peak " << std::fixed
+                         << std::setprecision(2) << s.peak;
+                    return cell.str();
+                });
         }
         out << "\n";
     }
 
-    out << "## Saw passband droop, dB re ideal harmonic amplitude\n\n"
+    out << "## Saw, oversampled: worst alias below 20 kHz, dB re fundamental\n\n"
+           "Top two octaves (the worst note) / MIDI 0-103.\n\n"
+        << header << "\n"
+        << rule << "\n";
+    for (const double rate : {44100.0, 48000.0})
+    {
+        for (const std::size_t ratio : {std::size_t{2}, std::size_t{4}})
+        {
+            row(rowLabel(rate, ratio),
+                [&]<typename Osc>
+                {
+                    const auto s = sweep<Osc>(Waveform::saw, rate, ratio, false);
+                    return db(s.worstTop) + " (MIDI " + std::to_string(s.worstNote) + ") / " + db(s.worstBelow);
+                });
+        }
+    }
+
+    out << "\n## Saw passband droop, dB re ideal harmonic amplitude\n\n"
            "Worst harmonic up to 10 kHz / up to 20 kHz over MIDI 0-127; then a 110 Hz saw's harmonics nearest "
            "15 kHz / 19 kHz.\n\n"
         << header << "\n"
@@ -259,16 +319,12 @@ void printReport()
     {
         for (const std::size_t ratio : {std::size_t{1}, std::size_t{2}})
         {
-            out << "| " << rowLabel(rate, ratio) << " |";
-            (
-                [&]
+            row(rowLabel(rate, ratio),
+                [&]<typename Osc>
                 {
-                    const auto d = measureDroop<Oscs>(rate, ratio);
-                    out << " " << db(d.worstTo10k) << " / " << db(d.worstTo20k) << "; " << db(d.at15k) << " / "
-                        << db(d.at19k) << " |";
-                }(),
-                ...);
-            out << '\n' << std::flush; // one row at a time: the report takes a while
+                    const auto d = sweep<Osc>(Waveform::saw, rate, ratio, true);
+                    return db(d.droopTo10k) + " / " + db(d.droopTo20k) + "; " + db(d.at15k) + " / " + db(d.at19k);
+                });
         }
     }
 
@@ -280,34 +336,36 @@ void printReport()
     {
         for (const std::size_t ratio : {std::size_t{1}, std::size_t{2}})
         {
-            out << "| " << rowLabel(rate, ratio) << " |";
-            (
-                [&]
+            row(rowLabel(rate, ratio),
+                [&]<typename Osc>
                 {
-                    out << " " << db(vibratoAliasing<Oscs>(300, rate, ratio)) << " / "
-                        << db(vibratoAliasing<Oscs>(750, rate, ratio)) << " |";
-                }(),
-                ...);
-            out << '\n' << std::flush; // one row at a time: the report takes a while
+                    return db(vibratoAliasing<Osc>(300, rate, ratio)) + " / " +
+                           db(vibratoAliasing<Osc>(750, rate, ratio));
+                });
         }
     }
 
-    out << "\n## DC and memory\n\n" << header << "\n" << rule << "\n";
-    out << "| largest saw/triangle mean, 1 kHz to Nyquist, 48 kHz |" << std::scientific << std::setprecision(1);
-    (
-        [&]
-        {
-            out << " " << worstDc<Oscs>(48000.0) << " |";
-        }(),
-        ...);
-    out << std::defaultfloat << "\n| bytes per oscillator |";
-    (
-        [&]
-        {
-            out << " " << sizeof(Oscs) << " |";
-        }(),
-        ...);
-    out << "\n\nShared tables: minBLEP 32-tap " << minBlepTable32().bytes() << " bytes, 64-tap "
+    out << "\n## DC and peak, 48 kHz, 0.01 Hz to Nyquist\n\n"
+           "Largest |mean - ideal mean| over 1 kHz steps to Nyquist / largest |sample| over those, 0.01 Hz, and "
+           "Nyquist.\n\n"
+        << header << "\n"
+        << rule << "\n";
+    for (const auto shape : periodicShapes)
+    {
+        row(shapeName(shape),
+            [&]<typename Osc>
+            {
+                const auto level = measureLevel<Osc>(shape, 48000.0);
+                std::ostringstream cell;
+                cell << std::scientific << std::setprecision(1) << level.worstDc << " / " << std::fixed
+                     << std::setprecision(2) << level.peak;
+                return cell.str();
+            });
+    }
+
+    out << "\n## Memory\n\n" << header << "\n" << rule << "\n";
+    row("bytes per oscillator", []<typename Osc> { return std::to_string(sizeof(Osc)); });
+    out << "\nShared tables: minBLEP 32-tap " << minBlepTable32().bytes() << " bytes, 64-tap "
         << minBlepTable64().bytes() << " bytes.\n";
     out << std::fixed << std::setprecision(3) << "minBLEP group delay: 32-tap " << minBlepTable32().delay()
         << " samples, 64-tap " << minBlepTable64().delay() << " samples.\n";
@@ -315,7 +373,7 @@ void printReport()
 
 } // namespace
 
-TEST_CASE("D6 report: measure minBLEP against the PolyBLEP reference", "[.][d6-report]")
+TEST_CASE("Oscillator report: every waveform, minBLEP against the PolyBLEP reference", "[.][d6-report]")
 {
     printReport<PolyBlep2, PolyBlep4, MinBlep32, MinBlep64>();
     SUCCEED();

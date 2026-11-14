@@ -1,8 +1,9 @@
 // Behavioural tests for the band-limited oscillators: the minBLEP oscillator
 // (decision D6, at 32 and 64 taps) and the PolyBLEP reference, all held to:
 // waveform shape, aliasing, stability from 0.01 Hz to Nyquist, DC, per-sample
-// pitch changes, and reset. The measurements that decided D6 are in
-// antialiasing_report.cpp. Doc: docs/dsp/band-limited-oscillators.md
+// pitch changes, and reset, for each of the 7 periodic waveforms. The
+// measurements are in antialiasing_report.cpp.
+// Docs: docs/dsp/band-limited-oscillators.md, docs/dsp/oscillator-waveforms.md
 
 #include "oscillator_support.hpp"
 
@@ -20,6 +21,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <numbers>
 #include <numeric>
 #include <vector>
 
@@ -31,7 +34,6 @@ namespace
 {
 
 constexpr double rate = 48000.0;
-constexpr std::array allShapes{Waveform::saw, Waveform::pulse, Waveform::triangle};
 
 anoesis::dsp::ProcessSpec specAt(double sampleRate)
 {
@@ -60,23 +62,15 @@ std::vector<float> renderPlain(Osc& osc, std::size_t numSamples)
 
 // Distance in samples from phase t to the nearest point where `shape` jumps
 // or bends, given dt cycles per sample.
-double distanceToEdge(Waveform shape, double t, double dt, double width)
+double distanceToEdge(Waveform shape, double t, double dt)
 {
-    const auto distance = [&](double edge)
+    double nearest = std::numeric_limits<double>::infinity();
+    for (const double edge : idealCorners(shape))
     {
         const auto d = std::abs(t - edge);
-        return std::min(d, 1.0 - d) / dt;
-    };
-    switch (shape)
-    {
-    case Waveform::saw:
-        return distance(0.0);
-    case Waveform::pulse:
-        return std::min(distance(0.0), distance(width));
-    case Waveform::triangle:
-        return std::min(distance(0.0), distance(0.5));
+        nearest = std::min(nearest, std::min(d, 1.0 - d) / dt);
     }
-    return 0.0;
+    return nearest;
 }
 
 } // namespace
@@ -85,34 +79,37 @@ TEMPLATE_TEST_CASE("Band-limited oscillators follow the ideal waveform away from
                    PolyBlep2, PolyBlep4, MinBlep32, MinBlep64)
 {
     // Sample n is the waveform at phase n dt, delayed by latencySamples().
+    // The onset after reset is skipped like an edge (minBLEP starts from
+    // silence; see the onset test).
     constexpr std::uint32_t increment = 1U << 22U; // 2^-10 cycles per sample: 46.9 Hz at 48 kHz
     const double dt = std::ldexp(1.0, -10);
-    const double width = 0.3;
+    constexpr std::size_t length = 8192;
 
-    for (const auto shape : allShapes)
+    for (const auto shape : periodicShapes)
     {
-        CAPTURE(Candidate<TestType>::name, static_cast<int>(shape));
+        CAPTURE(Candidate<TestType>::name, shapeName(shape));
         auto osc = prepared<TestType>(shape);
-        osc.setPulseWidth(static_cast<float>(width));
         osc.setIncrement(increment);
-        const auto out = renderPlain(osc, 4096);
+        const auto out = renderPlain(osc, length);
         const auto delay = static_cast<double>(osc.latencySamples());
+        const auto guard = static_cast<double>(Candidate<TestType>::guardSamples);
 
         std::size_t checked = 0;
         for (std::size_t n = 0; n < out.size(); ++n)
         {
             const auto position = (static_cast<double>(n) - delay) * dt;
             const auto t = position - std::floor(position);
-            if (position < 0.0 ||
-                distanceToEdge(shape, t, dt, width) <= static_cast<double>(Candidate<TestType>::guardSamples))
+            if (static_cast<double>(n) <= guard + delay || distanceToEdge(shape, t, dt) <= guard)
             {
                 continue;
             }
             CAPTURE(n, t);
-            REQUIRE_THAT(out[n], WithinAbs(idealWave(shape, t, width), Candidate<TestType>::tolerance));
+            REQUIRE_THAT(out[n], WithinAbs(idealWave(shape, t), Candidate<TestType>::tolerance));
             ++checked;
         }
-        CHECK(checked > 3000);
+        // The QPulse, two edges 128 samples apart, leaves the fewest samples
+        // outside the guards: about 70% of them at 64 taps.
+        CHECK(checked > length * 6 / 10);
     }
 }
 
@@ -156,11 +153,10 @@ TEMPLATE_TEST_CASE("Band-limited oscillators stay finite and bounded from 0.01 H
                  sampleRate,
              })
         {
-            for (const auto shape : allShapes)
+            for (const auto shape : periodicShapes)
             {
-                CAPTURE(Candidate<TestType>::name, sampleRate, hz, static_cast<int>(shape));
+                CAPTURE(Candidate<TestType>::name, sampleRate, hz, shapeName(shape));
                 auto osc = prepared<TestType>(shape, sampleRate);
-                osc.setPulseWidth(0.1f);
                 osc.setFrequency(static_cast<float>(hz));
                 const auto out = renderPlain(osc, 8192);
                 // Each candidate's own overshoot (see Candidate::peak); a
@@ -180,17 +176,17 @@ TEMPLATE_TEST_CASE("Band-limited oscillators add no DC offset", "[dsp][oscillato
     for (const double target : {50.0, 1000.0, 5000.0, 12000.0, 20000.0})
     {
         const auto cycles = static_cast<std::uint64_t>(std::lround(coherentFrequency(target, rate, n) * n / rate));
-        for (const auto shape : allShapes)
+        for (const auto shape : periodicShapes)
         {
-            CAPTURE(Candidate<TestType>::name, target, static_cast<int>(shape));
+            CAPTURE(Candidate<TestType>::name, target, shapeName(shape));
             auto osc = prepared<TestType>(shape);
-            osc.setPulseWidth(0.25f);
             osc.setIncrement(coherentIncrement(cycles, n));
             const auto out = render(osc, rate, 1, 4096, n);
             const auto mean = std::accumulate(out.begin(), out.end(), 0.0) / static_cast<double>(n);
-            // A 25% pulse's ideal mean is 2 w - 1 = -0.5; the others' is 0.
-            // 1e-3 is -60 dB: far below anything audible as an offset.
-            CHECK_THAT(mean, WithinAbs(shape == Waveform::pulse ? -0.5 : 0.0, 1e-3));
+            // A pulse of width w has the ideal mean 2 w - 1 (the HPulse -0.5,
+            // the QPulse -0.75); the others' is 0. 1e-3 is -60 dB: far below
+            // anything audible as an offset.
+            CHECK_THAT(mean, WithinAbs(idealMean(shape), 1e-3));
         }
     }
 }
@@ -200,7 +196,7 @@ TEMPLATE_TEST_CASE("Band-limited oscillators accept a new increment every sample
 {
     SECTION("re-setting the same increment changes nothing")
     {
-        for (const auto shape : allShapes)
+        for (const auto shape : periodicShapes)
         {
             auto plain = prepared<TestType>(shape);
             auto touched = prepared<TestType>(shape);
@@ -252,13 +248,140 @@ TEMPLATE_TEST_CASE("Band-limited oscillators accept a new increment every sample
 TEMPLATE_TEST_CASE("Band-limited oscillators restart identically after reset", "[dsp][oscillator][d6]", PolyBlep2,
                    PolyBlep4, MinBlep32, MinBlep64)
 {
-    for (const auto shape : allShapes)
+    for (const auto shape : periodicShapes)
     {
+        CAPTURE(shapeName(shape));
         auto osc = prepared<TestType>(shape);
         osc.setFrequency(4321.0f);
         const auto first = renderPlain(osc, 1000);
         osc.reset();
         const auto second = renderPlain(osc, 1000);
         CHECK(first == second);
+    }
+}
+
+TEMPLATE_TEST_CASE("The sine is a pure tone", "[dsp][oscillator][waveform]", PolyBlep2, PolyBlep4, MinBlep32, MinBlep64)
+{
+    // The sine has no edges, so neither method adds anything to it: every
+    // harmonic above the first is float rounding.
+    constexpr std::size_t n = 16384;
+    for (const double target : {100.0, 3000.0, 15000.0})
+    {
+        const auto cycles = static_cast<std::uint64_t>(std::lround(coherentFrequency(target, rate, n) * n / rate));
+        auto osc = prepared<TestType>(Waveform::sine);
+        osc.setIncrement(coherentIncrement(cycles, n));
+        const auto out = render(osc, rate, 1, 4096, n);
+        const auto f0 = static_cast<double>(cycles) * rate / static_cast<double>(n);
+        const auto harmonics = measureHarmonics(out, f0, rate, rectangularWindow(n), rate / 2.0);
+        CAPTURE(Candidate<TestType>::name, target);
+        REQUIRE_FALSE(harmonics.empty());
+        CHECK_THAT(harmonics[0], WithinAbs(1.0, 1e-5));
+        for (std::size_t k = 2; k <= harmonics.size(); ++k)
+        {
+            CAPTURE(k);
+            CHECK(harmonics[k - 1] < 1e-5); // -100 dB
+        }
+    }
+}
+
+TEMPLATE_TEST_CASE("The minBLEP sine is delayed exactly like the other waveforms, even under per-sample pitch changes",
+                   "[dsp][oscillator][waveform]", MinBlep32, MinBlep64)
+{
+    // The edges of every waveform are timed by the phase trajectory: the
+    // phase moves linearly, by the increment that arrived, between one
+    // sample and the next. Their band-limited output arrives latencySamples()
+    // late. The sine must be the sine of that same trajectory, latencySamples()
+    // late, so that a sine and a saw stay in phase through any modulation.
+    // Here a fast, deep vibrato; the reference trajectory is accumulated in
+    // 64-bit arithmetic.
+    auto osc = prepared<TestType>(Waveform::sine);
+    const auto delay = static_cast<double>(osc.latencySamples());
+    constexpr std::size_t length = 4096;
+    std::vector<std::uint64_t> trajectory(length + 1, 0); // phase in 2^-32 cycles, unwrapped
+    std::vector<std::uint32_t> increments(length);
+    for (std::size_t i = 0; i < length; ++i)
+    {
+        const auto cycles = 0.05 * (1.0 + (0.5 * std::sin(static_cast<double>(i) * 0.03)));
+        increments[i] = static_cast<std::uint32_t>(std::ldexp(cycles, 32));
+        trajectory[i + 1] = trajectory[i] + increments[i];
+    }
+    for (std::size_t i = 0; i < length; ++i)
+    {
+        osc.setIncrement(increments[i]);
+        const float y = osc.next();
+        // Sample i is the phase at time i - delay. Between samples j and
+        // j + 1 the phase moves by the increment set before sample j.
+        const double time = static_cast<double>(i) - delay;
+        if (time < 1.0 || i < Candidate<TestType>::guardSamples)
+        {
+            continue; // the onset
+        }
+        const auto j = static_cast<std::size_t>(std::floor(time));
+        const double fraction = time - static_cast<double>(j);
+        const double phase = static_cast<double>(trajectory[j]) + (fraction * static_cast<double>(increments[j]));
+        const double expected = std::sin(2.0 * std::numbers::pi * std::ldexp(std::fmod(phase, 4294967296.0), -32));
+        CAPTURE(i);
+        REQUIRE_THAT(y, WithinAbs(expected, 1e-4));
+    }
+}
+
+TEMPLATE_TEST_CASE("minBLEP starts every waveform from silence after reset", "[dsp][oscillator][waveform]", MinBlep32,
+                   MinBlep64)
+{
+    // The first sample is a band-limited onset: the step (and, for the
+    // straight segments, the bend) from silence to the waveform, so the
+    // output starts at exactly 0 whatever the shape and pitch.
+    for (const double hz : {50.0, 1000.0, 5000.0, 12000.0, 23000.0})
+    {
+        for (const auto shape : periodicShapes)
+        {
+            CAPTURE(Candidate<TestType>::name, hz, shapeName(shape));
+            auto osc = prepared<TestType>(shape);
+            osc.setFrequency(static_cast<float>(hz));
+            CHECK_THAT(osc.next(), WithinAbs(0.0, 1e-6));
+            const auto rest = renderPlain(osc, 256);
+            CHECK(std::ranges::all_of(rest, [](float x) { return std::abs(x) < Candidate<TestType>::peak; }));
+        }
+    }
+}
+
+TEMPLATE_TEST_CASE("Band-limited oscillators switch waveform mid-note without losing the phase",
+                   "[dsp][oscillator][waveform]", PolyBlep2, PolyBlep4, MinBlep32, MinBlep64)
+{
+    // A waveform change takes effect at the next sample, on the same phase.
+    // Once the switch has passed through the residuals, the output is the
+    // new waveform, delayed as usual. (The switch itself is a jump that is
+    // not band-limited; the waveform selector is not meant to be modulated.)
+    constexpr std::uint32_t increment = 1U << 22U; // 2^-10 cycles per sample
+    const double dt = std::ldexp(1.0, -10);
+    constexpr std::size_t before = 1000;
+    constexpr std::size_t after = 4096;
+    for (const auto from : periodicShapes)
+    {
+        for (const auto to : periodicShapes)
+        {
+            CAPTURE(Candidate<TestType>::name, shapeName(from), shapeName(to));
+            auto osc = prepared<TestType>(from);
+            osc.setIncrement(increment);
+            static_cast<void>(renderPlain(osc, before));
+            osc.setWaveform(to);
+            const auto out = renderPlain(osc, after);
+            const auto delay = static_cast<double>(osc.latencySamples());
+            const auto guard = static_cast<double>(Candidate<TestType>::guardSamples);
+            std::size_t checked = 0;
+            for (std::size_t i = 0; i < out.size(); ++i)
+            {
+                const auto position = (static_cast<double>(before + i) - delay) * dt;
+                const auto t = position - std::floor(position);
+                if (static_cast<double>(i) <= guard + delay || distanceToEdge(to, t, dt) <= guard)
+                {
+                    continue;
+                }
+                CAPTURE(i, t);
+                REQUIRE_THAT(out[i], WithinAbs(idealWave(to, t), Candidate<TestType>::tolerance));
+                ++checked;
+            }
+            CHECK(checked > after / 2);
+        }
     }
 }

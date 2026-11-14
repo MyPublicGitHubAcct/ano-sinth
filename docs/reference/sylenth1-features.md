@@ -25,7 +25,7 @@ Four oscillators: A1, A2, B1, B2.
 | Control | Behavior |
 |---|---|
 | Voices | 0–8 unison voices. 0 turns the oscillator off. |
-| Waveform | 8 analog-style waveforms. **The manual does not name them.** |
+| Waveform | 8 waveforms "emulating common analog wave shapes" (p. 14). **The manual does not name them.** Third-party sources do: see [Waveforms](#waveforms) below. |
 | Octave / Note | Coarse tuning. Centered by default (0). |
 | Fine | ±1 semitone. |
 | Volume | Oscillator output level. |
@@ -38,6 +38,41 @@ Four oscillators: A1, A2, B1, B2.
 | C / P | Copy and paste oscillator settings, including between presets. |
 
 Requirements: alias-free; stable from below 0.01 Hz up to Nyquist; up to 32 voices per note (4 oscillators × 8 unison voices) and 512 voices in total.
+
+### Waveforms
+
+**Names (high confidence).** Three independent third-party sources list the same eight: Saw, Pulse, HPulse, QPulse, Triangle, Sine, Noise, TriSaw ([Vintage Synth](https://www.vintagesynth.com/lennar-digital/sylenth1) spec sheet; [ADSR beginner tutorial](https://www.adsrsounds.com/sylenth-tutorials/first-30-minutes-sylenth-beginner-tutorial/); [Splice](https://splice.com/blog/taking-closer-look-lennar-digital-sylenth1-plugin/), which names HPulse, QPulse, and TriSaw as the "modified waveforms"). KVR forum posts use the same names. The [MusicRadar oscillators article](https://www.musicradar.com/tuition/tech/how-to-master-sylenth1s-parts-and-oscillators-630710) could not be read (its body loads client-side). A search-engine excerpt of it expands the names to "Half Pulse" and "Quarter Pulse", but that excerpt is not a primary reading. The two lists disagree on the selector order (Sine before or after Triangle), so the order is open (W9).
+
+**Shapes.** No source describes the shapes of HPulse, QPulse, or TriSaw. The shapes below are the waveform over one cycle, with phase t ∈ [0, 1) and value y. A *jump* J is a step in y. A *bend* K is a change of slope, in units per cycle. Everything else is a straight segment. "Confidence" refers to the shape. The names are settled.
+
+| Waveform | Shape over one cycle | Source | Confidence |
+|---|---|---|---|
+| Saw | Rising ramp y = 2t − 1. One jump J = −2 at t = 0. | Name: as above. Rising: the manual's Inv diagram (p. 15) draws the plain saw rising and the inverted one falling. | High for the shape; medium for "rising", because the diagram is an illustration. |
+| Pulse | y = +1 on [0, ½), −1 on [½, 1). Jumps J = −2 at ½ and J = +2 at 0. | KVR forum, [thread 301405](https://www.kvraudio.com/forum/viewtopic.php?t=301405): users identify "Pulse" as the square wave. The [ADSR pulse-lead tutorial](https://www.adsrsounds.com/sylenth-tutorials/learn-how-to-make-a-huge-pulse-lead-in-sylenth/) says there are "three variations of the Pulse waveform" (Pulse, HPulse, QPulse). | Medium: 50% is inferred from "it's the square", not stated. |
+| HPulse | A narrower fixed pulse: y = +1 on [0, w), −1 after, with **hypothesis w = ¼** ("half" the square's width). Jumps at 0 and w. | KVR [thread 272881](https://www.kvraudio.com/forum/viewtopic.php?t=272881) treats it as narrower than Pulse and QPulse as narrower again. Fixed widths: KVR thread 301405 ("fixed width pulse waves, you just can't modulate the pulse width"). | Low for w. Levels and DC are open (W4). |
+| QPulse | As HPulse, with **hypothesis w = ⅛** ("quarter" of the square's width). | As HPulse. | Low for w. |
+| Triangle | −1 → +1 over [0, ½), +1 → −1 over [½, 1). Bends K = −8 at ½ and K = +8 at 0. | Name only. | High for the shape; start phase open (W6). |
+| Sine | sin 2πt. | Name only. | High for the shape; start phase open (W6). |
+| TriSaw | **Unknown** triangle/saw hybrid. Three candidates, all piecewise linear: (a) a skewed triangle, rising over [0, p) and falling over [p, 1) with p ≠ ½: bends only, harmonics falling as 1/k²; (b) a triangle plus a saw, rescaled: one jump and two bends, harmonics falling as 1/k; (c) a triangle-shaped first half and a saw-shaped second half: one jump and bends. | Name only (Splice, Vintage Synth, ADSR). | None. Must be measured (W3). |
+| Noise | Not periodic. **Hypothesis: white**, uniformly distributed, the same for every note. | Name only. One tutorial (ADSR pulse lead) speaks of band-passing "a white noise" into "a bright noise", which suggests white but is not a specification. | Low for spectrum and distribution (W7). |
+
+**Invert and PWM (high confidence, official).** Manual p. 15: Inv inverts the oscillator's output. Two saws, one inverted, sum to a pulse, and changing the phase of one (both oscillators retriggered) changes the pulse width. The developer (posting as "Lennard" in the LennarDigital support forum, KVR thread 301405, December 2010) adds that the two-saw sum has no DC, unlike a ±1 pulse whose width varies, and that a DC offset "can cause numerous problems". That remark is why W4 asks whether HPulse and QPulse are DC-free.
+
+**Implemented as provisional (2026-11-13).** M1.1 builds the working hypotheses below, with TriSaw as candidate (b), (triangle + saw)/2, and the narrow pulses at ±1. Each is one row of data, so a measurement that disagrees changes that row and its expected test values. See [oscillator-waveforms.md](../dsp/oscillator-waveforms.md).
+
+**Open questions, settled by measuring the demo (M1.13).** Black-box only. Common setup: one oscillator, 1 voice, Retrig on, Phase 0, Inv off, filters bypassed, amp envelope at A = 0 and S = max, effects off, rendered offline to 48 kHz WAV. Keep renders shorter than the demo's reminder sound interval (about 60 s).
+
+| # | Question | Working hypothesis | Measurement that settles it |
+|---|---|---|---|
+| W1 | Pulse width of Pulse. | 50% | Render a low note (A0, 27.5 Hz: 1745 samples per cycle at 48 kHz) and measure the high and low times. Check: a 50% pulse has no even harmonics. |
+| W2 | Pulse widths of HPulse and QPulse. | 25% and 12.5% | As W1. In the spectrum, a width w has a null at every harmonic k where k·w is a whole number: every 4th harmonic missing for 25%, every 8th for 12.5%. |
+| W3 | The shape of TriSaw. | (b), (triangle + saw)/2: chosen as the provisional shape because it differs clearly from the triangle and has both a jump and bends | First, the Wave display's icon in the demo (to read the rough shape, not to copy the graphic). Then one cycle at A0 on a scope: count the jumps and bends and fit straight segments. The harmonic roll-off decides between "bends only" (1/k², candidate a) and "has a jump" (1/k, candidates b and c). |
+| W4 | Levels and DC of the narrow pulses: ±1 with a DC of 2w − 1, or shifted to be DC-free (+1.5/−0.5 for 25%, for example), or rescaled? | ±1, not DC-free | The mean and the peaks of a render of several seconds. The output path must be DC-coupled. It is digital, so it should be, but check the saw's mean ≈ 0 as a control. |
+| W5 | Relative levels across waveforms at the same Volume: equal peak, equal RMS, or something else? | Equal peak (±1) | Peak and RMS of each waveform at A0 with the same Volume. Use a low note so the band-limiting overshoot does not distort the peak reading. |
+| W6 | Polarity and start phase for each waveform: what Phase 0 starts on (the saw at −1, sine at 0 rising, triangle at −1 or at 0, pulse high first?) | Saw at −1 rising, pulse high first, triangle at −1, sine at 0 rising | The first cycle after note-on with Retrig on and Phase 0, then Phase 90 and 180 to confirm the direction. |
+| W7 | Noise: spectrum (white or coloured), amplitude distribution, whether it depends on the note or the sample rate, and whether unison voices are decorrelated. | White, uniform, independent of the note, decorrelated | Power spectral density of a long render (flat = white, −3 dB/octave = pink); a histogram (flat = uniform, bell-shaped = Gaussian); compare notes far apart and 44.1 against 48 kHz; with 2 voices and Stereo 10, the correlation between left and right. |
+| W8 | Overshoot: do Sylenth1's oscillators overshoot like a minimum-phase BLEP (about 37% on a saw)? | Unknown | Peak of a high saw (MIDI 96 and up), against W5's low-note peak. Already an open item in [band-limited-oscillators.md](../dsp/band-limited-oscillators.md). |
+| W9 | The order of the waveforms in the selector, and the default. | Saw first; default Saw (the manual's p. 14 screenshot shows a saw icon) | Step through the selector in the demo from an initialised patch. Matters only for our own UI order and parameter-value mapping. |
 
 ## 3. Filters (pp. 5, 16–18)
 

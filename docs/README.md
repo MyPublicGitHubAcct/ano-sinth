@@ -42,6 +42,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 **Oscillators (M1.1)**
 
 9. [Band-limited oscillators: choosing the anti-aliasing method (D6)](dsp/band-limited-oscillators.md): why naive waveforms alias; PolyBLEP, minBLEP, and mipmapped wavetables measured side by side; why minBLEP with 64 taps.
+10. [Oscillator waveforms: the 8 shapes as data](dsp/oscillator-waveforms.md): any piecewise-linear waveform as jumps and bends; Sylenth1's 8 waveforms as a table of corners; why noise lives beside the oscillator; every waveform measured.
 
 ### 3. Performance
 

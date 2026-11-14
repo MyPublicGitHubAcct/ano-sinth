@@ -7,9 +7,13 @@
 #include <anoesis/dsp/oscillators/phase.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <numbers>
 #include <vector>
 
 /// Band-limited oscillator: minBLEP / minBLAMP (Brandt, 2001), the method
@@ -39,7 +43,13 @@
 /// the jump and the bend from silence added like any other edge. The output
 /// starts at 0 and needs no history.
 ///
-/// Doc: docs/dsp/band-limited-oscillators.md
+/// The waveform is data (a WaveShape: corners with jumps and bends, see
+/// waveform.hpp), so the per-sample loop is the same for every waveform. A
+/// sine part has no edges; slope x delay would only delay it to first order,
+/// so it is evaluated at the phase latencySamples() ago instead, read from a
+/// short phase history.
+///
+/// Docs: docs/dsp/band-limited-oscillators.md, docs/dsp/oscillator-waveforms.md
 namespace anoesis::dsp
 {
 
@@ -117,8 +127,14 @@ class MinBlepOscillator
 public:
     static_assert(Taps >= 2 && (Taps & (Taps - 1)) == 0, "Taps must be a power of two");
 
-    /// `table.taps()` must equal Taps. The table must outlive the oscillator.
-    explicit MinBlepOscillator(const MinBlepTable& table) noexcept : table(&table) {}
+    /// `residuals.taps()` must equal Taps. The table must outlive the oscillator.
+    explicit MinBlepOscillator(const MinBlepTable& residuals) noexcept
+        : table(&residuals),
+          delay(residuals.delay()),
+          sineDelayWhole(wholeSamples(residuals.delay())),
+          sineDelayFraction(residuals.delay() - static_cast<float>(wholeSamples(residuals.delay())))
+    {
+    }
 
     void prepare(const ProcessSpec& spec) noexcept
     {
@@ -133,16 +149,25 @@ public:
         ring.fill(0.0f);
         position = 0;
         started = false;
+        untilCorner = 0;
+        historyValid = false;
     }
 
+    /// One of the periodic waveforms. Noise is not generated here (see
+    /// isPeriodic()); selecting it gives silence.
     void setWaveform(Waveform newWaveform) noexcept
     {
-        waveform = newWaveform;
+        setShape(waveShape(newWaveform));
     }
 
-    void setPulseWidth(float width) noexcept
+    /// Any shape, for waveforms beyond the table. It must outlive its use.
+    void setShape(const WaveShape& newShape) noexcept
     {
-        widthPhase = widthToPhase(width);
+        shape = &newShape;
+        sineLevel = newShape.sineLevel();
+        hasSine = sineLevel < 0.0f || sineLevel > 0.0f;
+        untilCorner = 0; // find the segment and the next corner on the next sample
+        historyValid = false;
     }
 
     void setFrequency(float hz) noexcept
@@ -163,51 +188,131 @@ public:
 
     [[nodiscard]] float next() noexcept
     {
-        // Edges crossed on the way to this sample, with the increment that
-        // brought us here. None on the first sample, which is the onset.
+        // Two versions of the loop body: with the sine's history and sin()
+        // in the body, even untaken, a sample of the saw costs about 30% more
+        // (measured on Apple clang).
+        return hasSine ? nextSample<true>() : nextSample<false>();
+    }
+
+private:
+    static constexpr std::uint32_t historySize = 8; // a power of two, > the delay + 1
+
+    template <bool WithSine>
+    [[nodiscard]] float nextSample() noexcept
+    {
+        // The step that brought us here: none on the first sample, which is
+        // the onset. Most samples cross no corner; one compare tells.
         const auto step = started ? arrivedBy : 0U;
-        const float dt = toCycles(increment);
-        const float t = toCycles(phase);
-        float naive = 0.0f;
-        float slope = 0.0f; // per sample
-        switch (waveform)
+        if (step >= untilCorner)
         {
-        case Waveform::saw:
-            jumpIfCrossed(0, step, -2.0f);
-            naive = naiveSaw(t);
-            slope = 2.0f * dt;
-            break;
-        case Waveform::pulse:
-            jumpIfCrossed(0, step, 2.0f);
-            jumpIfCrossed(widthPhase, step, -2.0f);
-            naive = naivePulse(phase, widthPhase);
-            break;
-        case Waveform::triangle:
+            scanCorners(step);
+        }
+        else
         {
-            const float slopeChange = 8.0f * toCycles(step);
-            bendIfCrossed(0, step, slopeChange);
-            bendIfCrossed(halfCycle, step, -slopeChange);
-            naive = naiveTriangle(t);
-            slope = t < 0.5f ? 4.0f * dt : -4.0f * dt;
-            break;
+            untilCorner -= step;
         }
-        }
+
+        // The straight segments, undelayed: the residuals carry the delay.
+        const float naive = segmentValue + (segmentSlope * toCycles(phase - segmentPhase));
+        const float slope = segmentSlope * toCycles(increment); // per sample
+
+        // The sine has no edges. It is delayed by evaluating it at the phase
+        // latencySamples() ago, on the same trajectory the edges are timed by.
+        const float sine = WithSine ? delayedSine() : 0.0f;
+
         if (!started)
         {
-            addResidual(&MinBlepTable::stepRow, 0.0f, naive);
+            // The onset: steps from silence to the waveform's value and
+            // slope. The sine's bend is left uncorrected (see the doc).
+            addResidual(&MinBlepTable::stepRow, 0.0f, naive + sine);
             addResidual(&MinBlepTable::rampRow, 0.0f, slope);
+            started = true;
         }
-        float y = naive - (slope * table->delay());
+        float y = naive - (slope * delay) + sine;
         y += ring[position];
         ring[position] = 0.0f;
         position = (position + 1) & (Taps - 1);
         phase += increment;
         arrivedBy = increment;
-        started = true;
         return y;
     }
 
-private:
+    // The sine is read from the phase history, wholeSamples + 1 back.
+    [[nodiscard]] static std::uint32_t wholeSamples(float groupDelay) noexcept
+    {
+        const auto whole = static_cast<std::uint32_t>(groupDelay);
+        return whole < historySize - 2 ? whole : historySize - 2;
+    }
+
+    // The sine at the phase latencySamples() ago, recording this sample's
+    // phase in the history first.
+    [[nodiscard]] float delayedSine() noexcept
+    {
+        if (!historyValid)
+        {
+            // As if it had run at this pitch forever.
+            for (std::uint32_t k = 1; k < historySize; ++k)
+            {
+                history[(historyIndex - k) & (historySize - 1)] = phase - (k * increment);
+            }
+            historyValid = true;
+        }
+        history[historyIndex & (historySize - 1)] = phase;
+        const float sine = sineLevel * std::sin(2.0f * std::numbers::pi_v<float> * toCycles(delayedPhase()));
+        ++historyIndex;
+        return sine;
+    }
+
+    // The phase latencySamples() before this sample. The phase moves
+    // linearly between samples, so this interpolates between the two
+    // samples around it, exactly.
+    [[nodiscard]] std::uint32_t delayedPhase() const noexcept
+    {
+        const std::uint32_t later = history[(historyIndex - sineDelayWhole) & (historySize - 1)];
+        const std::uint32_t earlier = history[(historyIndex - sineDelayWhole - 1) & (historySize - 1)];
+        return later - static_cast<std::uint32_t>(sineDelayFraction * static_cast<float>(later - earlier));
+    }
+
+    // The slow path, on a sample where `step` crossed a corner (or after a
+    // reset or a new shape): adds the residuals of every corner crossed,
+    // finds the segment the phase is now in, and how far the next corner is.
+    void scanCorners(std::uint32_t step) noexcept
+    {
+        const float stepCycles = toCycles(step);
+        std::uint64_t nearest = std::numeric_limits<std::uint64_t>::max();
+        for (const auto& corner : shape->corners())
+        {
+            float since = 0.0f;
+            if (crossed(corner.phase, step, since))
+            {
+                if (corner.jumps)
+                {
+                    addResidual(&MinBlepTable::stepRow, since, corner.jump);
+                }
+                if (corner.bends)
+                {
+                    addResidual(&MinBlepTable::rampRow, since, corner.bend * stepCycles);
+                }
+            }
+            // A corner exactly here has just been crossed (or is part of the
+            // onset): the next time it comes round is a whole cycle away.
+            const std::uint32_t ahead = corner.phase - phase;
+            nearest = std::min(nearest, ahead == 0 ? std::uint64_t{1} << 32U : std::uint64_t{ahead});
+        }
+        untilCorner = nearest;
+        if (shape->corners().empty())
+        {
+            segmentPhase = 0;
+            segmentValue = 0.0f;
+            segmentSlope = 0.0f;
+            return;
+        }
+        const auto& segment = shape->cornerAt(phase);
+        segmentPhase = segment.phase;
+        segmentValue = segment.value;
+        segmentSlope = segment.slope;
+    }
+
     // Adds `height` x the residual `row` for an edge `since` samples ago.
     void addResidual(const float* (MinBlepTable::*rowOf)(std::size_t) const noexcept, float since,
                      float height) noexcept
@@ -236,33 +341,28 @@ private:
         return true;
     }
 
-    void jumpIfCrossed(std::uint32_t edgePhase, std::uint32_t stepTaken, float height) noexcept
-    {
-        float since = 0.0f;
-        if (crossed(edgePhase, stepTaken, since))
-        {
-            addResidual(&MinBlepTable::stepRow, since, height);
-        }
-    }
-
-    void bendIfCrossed(std::uint32_t edgePhase, std::uint32_t stepTaken, float slopeChange) noexcept
-    {
-        float since = 0.0f;
-        if (crossed(edgePhase, stepTaken, since))
-        {
-            addResidual(&MinBlepTable::rampRow, since, slopeChange);
-        }
-    }
-
     const MinBlepTable* table;
+    float delay; // the table's, kept here: the per-sample path reads no table
+    const WaveShape* shape = &waveShape(Waveform::saw);
+    // The segment the phase is in, and the distance (in phase units) from the
+    // previous sample's phase to the next corner; 0 forces a scan.
+    std::uint32_t segmentPhase = 0;
+    float segmentValue = 0.0f;
+    float segmentSlope = 0.0f;
+    std::uint64_t untilCorner = 0;
+    float sineLevel = 0.0f;
+    bool hasSine = false;
+    bool historyValid = false;
     float sampleRate = 48000.0f;
     std::uint32_t phase = 0;
     std::uint32_t increment = 0;
     std::uint32_t arrivedBy = 0;
-    std::uint32_t widthPhase = halfCycle;
+    std::uint32_t historyIndex = 0;
+    std::uint32_t sineDelayWhole = 0;
+    float sineDelayFraction = 0.0f;
     std::size_t position = 0;
     bool started = false;
-    Waveform waveform = Waveform::saw;
+    std::array<std::uint32_t, historySize> history{};
     std::array<float, Taps> ring{};
 };
 

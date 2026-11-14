@@ -1,4 +1,5 @@
-// CPU cost of the minBLEP oscillator (decision D6) and the PolyBLEP reference.
+// CPU cost of the minBLEP oscillator (decision D6) and the PolyBLEP reference,
+// for every periodic waveform.
 // The wavetable candidate's numbers (it was removed after D6) are in the
 // baselines doc.
 //
@@ -54,12 +55,24 @@ void benchmarkCandidate()
             return out[blockSize - 1];
         };
     };
+    // Every waveform at an ordinary pitch and at 12 kHz, where minBLEP's
+    // cost per edge dominates (the saw and square also at 5 kHz, as in D6).
     steady("saw 440 Hz", Waveform::saw, 440.0f);
     steady("saw 5 kHz", Waveform::saw, 5000.0f);
+    steady("saw 12 kHz", Waveform::saw, 12000.0f);
     steady("square 440 Hz", Waveform::pulse, 440.0f);
     steady("square 5 kHz", Waveform::pulse, 5000.0f);
     steady("square 12 kHz", Waveform::pulse, 12000.0f);
+    steady("HPulse 440 Hz", Waveform::hpulse, 440.0f);
+    steady("HPulse 12 kHz", Waveform::hpulse, 12000.0f);
+    steady("QPulse 440 Hz", Waveform::qpulse, 440.0f);
+    steady("QPulse 12 kHz", Waveform::qpulse, 12000.0f);
     steady("triangle 440 Hz", Waveform::triangle, 440.0f);
+    steady("triangle 12 kHz", Waveform::triangle, 12000.0f);
+    steady("sine 440 Hz", Waveform::sine, 440.0f);
+    steady("sine 12 kHz", Waveform::sine, 12000.0f);
+    steady("TriSaw 440 Hz", Waveform::trisaw, 440.0f);
+    steady("TriSaw 12 kHz", Waveform::trisaw, 12000.0f);
 
     // A new pitch every sample (vibrato, +-1 semitone), through setFrequency:
     // the path pitch modulation and portamento will take.

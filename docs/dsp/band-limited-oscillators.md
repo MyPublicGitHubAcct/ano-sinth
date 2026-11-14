@@ -56,7 +56,7 @@ Any method can also run at 2× or 4× the rate and be decimated (see [oversampli
 
 ### The prototypes
 
-All five were built with one interface (`prepare`, `reset`, `setWaveform`, `setPulseWidth`, `setFrequency`, `setIncrement`, `next`, `latencySamples`), and each produces a saw, a pulse, and a triangle. They were measured as prototypes in commit `984d868`, in `anoesis::dsp::prototype`. After the decision, each went one of three ways:
+All five were built with one interface (`prepare`, `reset`, `setWaveform`, `setPulseWidth`, `setFrequency`, `setIncrement`, `next`, `latencySamples`), and each produced a saw, a pulse of any width, and a triangle. (Since then the waveforms have become data, with fixed pulse widths and no `setPulseWidth`: see [oscillator-waveforms.md](oscillator-waveforms.md).) They were measured as prototypes in commit `984d868`, in `anoesis::dsp::prototype`. After the decision, each went one of three ways:
 
 | Candidate | Where it is now | Notes |
 |---|---|---|
@@ -67,12 +67,12 @@ All five were built with one interface (`prepare`, `reset`, `setWaveform`, `setP
 Shared details, in [phase.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/phase.hpp) and [waveform.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/waveform.hpp):
 
 - **Phase is a 32-bit fixed-point accumulator** (2³² units per cycle). A float phase cannot reach 0.01 Hz: at 48 kHz the increment, 2·10⁻⁷ cycles, is only 3 or 4 float steps near t = 1, so the pitch would be off by tens of percent. Fixed point resolves 1.1·10⁻⁵ Hz, wraps by itself, and needs no double precision (a Cortex-M4F has no double FPU). The same accumulator carries over into the chosen method.
-- **A pulse edge is located with one subtraction.** In fixed point, `phase − widthPhase` wraps by itself, so the distance to the falling edge needs no modulo.
+- **An edge is located with one subtraction.** In fixed point, `phase − edgePhase` wraps by itself, so the distance to any edge (a pulse's falling edge, for example) needs no modulo.
 - **minBLEP starts each note as a band-limited onset.** Its delay compensation assumes the residuals of earlier edges are in the ring buffer, and after `reset()` they are not. A first version measured spikes of up to 4.6 on the first samples of a high triangle. Now the first sample adds a step and a bend from silence to the waveform's value and slope, so the output starts at exactly 0 and is the band-limited version of the gated waveform.
 
 ### The measurements
 
-[antialiasing_report.cpp](../../tests/dsp/oscillators/antialiasing_report.cpp) is a hidden test (`[d6-report]`, about 40 s in `relwithdebinfo` with all five candidates). It measures each candidate with the harness and prints the tables below. It now covers minBLEP and the PolyBLEP reference; the wavetable column comes from commit `984d868`:
+[antialiasing_report.cpp](../../tests/dsp/oscillators/antialiasing_report.cpp) is a hidden test (`[d6-report]`, about 40 s in `relwithdebinfo` with all five candidates). It measures each candidate with the harness and prints the tables below. It now covers minBLEP and the PolyBLEP reference, for all 7 periodic waveforms (results in [oscillator-waveforms.md](oscillator-waveforms.md#results); the saw, square, and triangle numbers below are unchanged). The wavetable column comes from commit `984d868`:
 
 ```sh
 cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
@@ -162,7 +162,7 @@ All five stay finite, bounded, and free of denormals for every shape from 0 Hz t
 - **Overshoot.** Minimum phase overshoots by about 37% on a saw (9% for linear phase). That costs headroom ahead of the filter's drive stages, and drive will respond to it. Whether Sylenth1's oscillators overshoot like this is not known; M1.13 can measure it against the demo. A linear-phase BLEP with a lookahead of half the taps (about 0.7 ms at 64 taps) would remove the extra overshoot. It wasn't measured, because the aliasing would be the same.
 - **Latency.** 2.79 samples of group delay. It is the same for every oscillator, so mixing them causes no comb filtering, and it is far too small to report to the host.
 - **High-pitch cost and SIMD (Phase 3).** The residual add uses a masked ring index, which blocks vectorisation. A double-length linear buffer would let the 64 multiply-adds per edge run 4 or 8 wide. Across unison voices the edges fall at different samples, so SIMD across voices needs per-lane edge handling.
-- **Waveforms.** The next M1.1 task builds the 8 waveforms. Every piecewise-linear one (pulses of any width, saw/triangle hybrids) is a list of jumps and bends for the same machinery. A sine needs no correction, and noise is generated separately.
+- **Waveforms.** All 8 are built on this oscillator, as data: lists of corners with their jumps and bends, plus a sine. Noise is generated separately. See [oscillator-waveforms.md](oscillator-waveforms.md), which also reports every waveform's measurements.
 
 ## Tests
 
@@ -170,11 +170,11 @@ All five stay finite, bounded, and free of denormals for every shape from 0 Hz t
   - The minBLEP tables start at −1, end at exactly 0, start the ramp table at the group delay, and continue smoothly from row to row.
   - The PolyBLEP residuals cancel the naive step (±½ at the edge), integrate to zero, and are continuous where the polynomial pieces meet, and the ramp residual is the running integral of the step residual.
   - (Until `984d868`: the wavetable levels matched the Fourier series, and the level selection kept folded harmonics above 20 kHz.)
-- [band_limited_oscillator_test.cpp](../../tests/dsp/oscillators/band_limited_oscillator_test.cpp) runs the same tests on minBLEP (32 and 64 taps) and the PolyBLEP reference:
+- [band_limited_oscillator_test.cpp](../../tests/dsp/oscillators/band_limited_oscillator_test.cpp) runs the same tests on minBLEP (32 and 64 taps) and the PolyBLEP reference, for each of the 7 periodic waveforms (the waveform-specific tests are listed in [oscillator-waveforms.md](oscillator-waveforms.md#tests)):
   - The output follows the ideal waveform away from edges (allowing for latency).
   - A 5 kHz saw's worst alias is below −27 dB.
   - The output stays finite, bounded, and denormal-free from 0 Hz to fs, for every shape, at 44.1 and 48 kHz.
-  - The output has no DC (and the pulse has its ideal 2w − 1).
+  - The output has no DC (and each pulse has its ideal 2w − 1).
   - Re-setting the same increment every sample changes nothing, and the vibrato's worst alias is below −50 dB.
   - `reset()` reproduces the output exactly.
 - [measure_test.cpp](../../tests/support/test/measure_test.cpp) covers `measureHarmonics`: known amplitudes, the frequency limit, and a band-limited saw at exactly 2/(πk).
