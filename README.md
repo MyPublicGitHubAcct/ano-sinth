@@ -34,6 +34,32 @@ Test-driven development is required, and warnings are errors. Read
 [docs/development/testing.md](docs/development/testing.md) and run
 `tools/install-hooks.sh` once after cloning.
 
+## Running the checks
+
+Locally (macOS), before every commit:
+
+```sh
+tools/check.sh           # debug build + tests, clang-tidy, format, identity and publish checks
+tools/check.sh --asan    # the same, plus the ASan/UBSan build and tests
+```
+
+Linux and Windows are not built locally. They run in the Version CI workflow on
+GitHub, which a `vX.Y.0` tag starts with every job. To run only some platforms,
+dispatch it by hand. Every input defaults to `true`, so pass `false` for each
+job to skip:
+
+```sh
+gh workflow run version-ci.yml                                                    # everything
+gh workflow run version-ci.yml -f linux=false -f windows=false -f release=false   # macOS only
+gh workflow run version-ci.yml -f macos=false -f windows=false -f release=false   # Linux only
+gh workflow run version-ci.yml -f macos=false -f linux=false -f release=false     # Windows only
+gh workflow run version-ci.yml -f macos=false -f linux=false -f windows=false     # macOS release build only
+gh workflow run version-ci.yml -f asan=false                                      # skip the ASan legs (macOS, Linux)
+```
+
+The selected jobs still run in order (macOS → Linux → Windows → release), and a
+failure stops the rest. Details: [docs/development/ci.md](docs/development/ci.md).
+
 ## License
 
 MIT; see [LICENSE](LICENSE). The JUCE and Catch2 submodules keep their own
