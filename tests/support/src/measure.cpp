@@ -120,6 +120,24 @@ AliasingResult measureAliasing(std::span<const float> signal, double fundamental
     return result;
 }
 
+std::vector<double> measureHarmonics(std::span<const float> signal, double fundamentalHz, double sampleRate,
+                                     const Window& window, double maxFrequencyHz)
+{
+    const auto spectrum = powerSpectrum(signal, sampleRate, window);
+    requireResolvable(spectrum, fundamentalHz);
+    std::vector<double> amplitudes;
+    for (std::size_t h = 1;; ++h)
+    {
+        const auto f = static_cast<double>(h) * fundamentalHz;
+        if (f >= sampleRate / 2.0 || f > maxFrequencyHz)
+        {
+            break;
+        }
+        amplitudes.push_back(std::sqrt(2.0 * spectrum.powerAround(f, spectrum.mainLobeBins)));
+    }
+    return amplitudes;
+}
+
 ResponsePoint measureResponseAt(const MonoProcess& process, double frequencyHz, double sampleRate, double amplitude,
                                 std::size_t settleSamples, std::size_t measureSamples)
 {

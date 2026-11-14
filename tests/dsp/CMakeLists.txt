@@ -2,6 +2,7 @@
 add_executable(anoesis_dsp_tests
     library_test.cpp
     benchmarks/foundations_benchmark.cpp
+    benchmarks/oscillator_benchmark.cpp
     core/audio_block_test.cpp
     core/denormals_test.cpp
     core/processor_test.cpp
@@ -11,6 +12,9 @@ add_executable(anoesis_dsp_tests
     math/fast_math_test.cpp
     math/pitch_test.cpp
     math/random_test.cpp
+    oscillators/antialiasing_methods_test.cpp
+    oscillators/antialiasing_prototypes_test.cpp
+    oscillators/antialiasing_report.cpp
     resampling/oversampler_test.cpp)
 
 # anoesis::dsp comes in through anoesis::test_support. Naming it here as well

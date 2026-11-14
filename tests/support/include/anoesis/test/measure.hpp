@@ -43,6 +43,14 @@ struct AliasingResult
                                              const Window& window,
                                              double maxFrequencyHz = std::numeric_limits<double>::infinity());
 
+/// The amplitude of each harmonic k f0 (index k - 1) up to `maxFrequencyHz`
+/// and below Nyquist: sqrt(2 x the power within the harmonic's main lobe),
+/// so a sine of amplitude A reads A. Compare with an ideal waveform's
+/// Fourier series to measure passband droop.
+[[nodiscard]] std::vector<double> measureHarmonics(std::span<const float> signal, double fundamentalHz,
+                                                   double sampleRate, const Window& window,
+                                                   double maxFrequencyHz = std::numeric_limits<double>::infinity());
+
 /// A mono process under test: takes a whole input signal, returns the output
 /// (same length and rate).
 using MonoProcess = std::function<std::vector<float>(std::span<const float>)>;

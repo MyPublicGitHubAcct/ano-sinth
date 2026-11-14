@@ -33,7 +33,7 @@ Still open:
 
 **Phase 1: M1.0 done** (2026-11-13). `libs/dsp` has the processor lifecycle, math utilities, smoothing, denormal protection, seedable noise, and 2×/4× oversampling. `tests/support` holds the measurement harness (FFT, THD, aliasing, frequency response, golden files), and the first CPU baselines are recorded. 96 tests pass on macOS (debug and ASan/UBSan).
 
-**Next:** M1.1 (oscillators). D6, the anti-aliasing method, is decided there by prototyping and measuring with the harness.
+**M1.1 (oscillators) in progress.** D6 is decided: **minBLEP, 64 taps** (2026-11-13), chosen by prototyping and measuring five candidates with the harness. **Next:** the 8 band-limited waveforms, built on the minBLEP oscillator.
 
 ---
 
@@ -43,7 +43,6 @@ Settle these before or during Phase 0. Each one affects the work that follows.
 
 | # | Decision | Why it matters | Needed by |
 |---|---|---|---|
-| D6 | **Oscillator anti-aliasing method** (PolyBLEP/PolyBLAMP, minBLEP, or mipmapped wavetables) | Affects quality, CPU cost, and how well it ports to STM32. Prototype and measure in M1.1. | M1.1 |
 | D7 | **Preset and bank file format** (for example JSON or XML with a version field) | A long-term compatibility commitment. | M1.10 |
 | D9 | **Visual design direction for the GUI** | Must be original (clean-room). Affects `libs/gui`. | M1.11 |
 
@@ -141,7 +140,7 @@ Each milestone lives mostly in `libs/dsp` and is tested in isolation before inte
 **Docs:** the processor lifecycle; smoothing and why zipper noise happens; denormals; oversampling theory; how we measure DSP quality.
 
 ### M1.1 Oscillators (inventory §2)
-- [ ] Prototype and measure the anti-aliasing approaches (D6). Choose one and record the decision.
+- [x] Prototype and measure the anti-aliasing approaches (D6). Choose one and record the decision. *Five prototypes (PolyBLEP 2- and 4-point, minBLEP 32 and 64 taps, octave-mipmapped wavetables), each a saw, pulse, and triangle, measured with the harness: aliasing over MIDI 0–127 at 44.1 and 48 kHz with and without 2×/4× oversampling, droop, a ±25% vibrato, 0.01 Hz to Nyquist, DC, CPU, and memory. Chosen: **minBLEP, 64 taps**, with a worst alias of −91 dB below 20 kHz at 44.1 kHz with no oversampling, a flat passband, and 2.9 ns per oscillator-sample at normal pitches. Doc: [band-limited oscillators](docs/dsp/band-limited-oscillators.md). CPU: [baselines](docs/performance/baselines.md).*
 - [ ] 8 band-limited waveforms. The names are unspecified; identify them from the demo or video, then implement.
 - [ ] Octave, note, and fine tuning (±1 semitone). Volume, pan, invert.
 - [ ] Retrigger and phase (0–360°). Free-running when retrigger is off.
@@ -333,6 +332,7 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | Golden files are 32-bit float WAVs in `tests/golden/`, compared per sample with an explicit tolerance (0 for integer-exact output). They are recorded with `ANOESIS_UPDATE_GOLDEN=1`, and failed renders go to `build/<preset>/test-output/`. | Inspectable in any audio tool. The tolerance absorbs FMA-contraction differences between compilers. See docs/dsp/measuring-dsp.md. |
 | 2026-11-13 | Oversampling uses **polyphase IIR elliptic halfbands**, not linear-phase FIR. Spec at a 44.1 kHz base: pass 0–20 kHz, reject ≥ 100 dB from 24.1 kHz. 4× is two cascaded 2× stages. | About 12 first-order sections instead of 70+ FIR taps. Latency is 3–4 samples rather than about 35, so the reported latency barely changes when oversampling is toggled. Ripple is about 1e-10 dB. The phase is non-linear only near 20 kHz, and dry/wet mixing happens inside the oversampled domain. See docs/dsp/oversampling.md. |
 | 2026-11-13 | Benchmarks are Catch2 `BENCHMARK`s in the test executables, tagged `[!benchmark]` (hidden from ctest, enforced by a CTest check), run with `tools/bench.sh` in `relwithdebinfo`. Results are recorded by hand in `docs/performance/baselines.md` with the machine and commit. Not run in CI. | No new dependency. Shared CI runners are too noisy for CPU numbers. See docs/performance/benchmarking.md. |
+| 2026-11-13 | D6: oscillators are band-limited with **minBLEP/minBLAMP, 64 taps** (a Kaiser-windowed sinc, β 9.3, cut off at Nyquist, made minimum-phase by the real cepstrum, tabulated at 64 phases per sample). Phase is a 32-bit fixed-point accumulator. | Chosen by the project owner from measurements of five prototypes. At 44.1 kHz with no oversampling: worst alias below 20 kHz −91.0 dB over MIDI 0–127 (−102.5 dB below MIDI 104), against −14.1/−22.3 dB (PolyBLEP 2-/4-point) and −68.6 dB (wavetables, at bass notes); a passband flat to 20 kHz; −124 dB under a ±25% vibrato. Cost: 2.9 ns per oscillator-sample at normal pitches (as cheap as PolyBLEP there), rising to 22 ns for a 12 kHz square; 304 B per oscillator plus 33 KB of shared tables. Taps stay a table parameter (32 taps: −66.5 dB, 176 B, 16.6 KB), so a cheaper real-time mode remains possible. PolyBLEP is kept as a test-only reference. The wavetable prototype is removed in the commit after the one that measured it (see the doc). See docs/dsp/band-limited-oscillators.md. |
 | 2026-11-13 | **No downloadable builds on GitHub.** The release job's `actions/upload-artifact` step was removed, and `tools/check-no-published-builds.sh` fails on any workflow step that would publish files. | Decided by the project owner. The repo is public; binaries contain JUCE and the real identity, and distribution is decided separately. See **Distribution**. |
 | 2026-11-13 | The white-noise known-answer values are reproduced by an independent Python port, [tools/reference/xoshiro128plus.py](tools/reference/xoshiro128plus.py), written from the published reference C code rather than from `random.hpp`. | Expected values copied from the implementation's own output would pin its bugs too. See docs/dsp/white-noise.md. |
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |

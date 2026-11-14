@@ -1,9 +1,11 @@
-# Test code inherits the project checks, minus two that only fire inside
+# Test code inherits the project checks, minus three that only fire inside
 # Catch2's macros (TEST_CASE expands to a static function; CHECK/REQUIRE expand
-# to do-while loops).
+# to do-while loops; TEMPLATE_TEST_CASE registers each instantiation through a
+# static object whose constructor may throw).
 ---
 InheritParentConfig: true
 Checks: >
   -misc-use-anonymous-namespace,
-  -cppcoreguidelines-avoid-do-while
+  -cppcoreguidelines-avoid-do-while,
+  -bugprone-throwing-static-initialization
 ...

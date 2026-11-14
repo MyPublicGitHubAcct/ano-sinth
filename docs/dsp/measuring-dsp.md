@@ -56,7 +56,7 @@ All of this lives in `anoesis_test_support` ([tests/support/](../../tests/suppor
 | [fft.hpp](../../tests/support/include/anoesis/test/fft.hpp) | `fftInPlace` (radix-2, iterative, twiddles from `std::polar` so their error doesn't grow with N) and `realFft`. Decision D5: hand-written, no dependency. |
 | [window.hpp](../../tests/support/include/anoesis/test/window.hpp) | `rectangularWindow`, `hannWindow`, `blackmanHarrisWindow`, `kaiserWindow(n, β)`. Each returns its samples and its main-lobe half-width. All are periodic. |
 | [spectrum.hpp](../../tests/support/include/anoesis/test/spectrum.hpp) | `powerSpectrum` and `averagedPowerSpectrum` (Welch) with the normalisation above; `Spectrum::powerAround(f, bins)` |
-| [measure.hpp](../../tests/support/include/anoesis/test/measure.hpp) | `measureThd`, `measureAliasing` (with an optional upper frequency, for example 20 kHz), `measureResponseAt`, `impulseResponseSpectrum`, `toDb`, `powerToDb` |
+| [measure.hpp](../../tests/support/include/anoesis/test/measure.hpp) | `measureThd`, `measureAliasing` (with an optional upper frequency, for example 20 kHz), `measureHarmonics` (each harmonic's amplitude, for droop against an ideal waveform), `measureResponseAt`, `impulseResponseSpectrum`, `toDb`, `powerToDb` |
 | [golden.hpp](../../tests/support/include/anoesis/test/golden.hpp) | `writeWav`/`readWav` (32-bit float WAV) and `compareWithGolden` |
 
 A typical spectral test:

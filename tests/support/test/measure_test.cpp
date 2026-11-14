@@ -102,6 +102,40 @@ TEST_CASE("THD measures known harmonic content exactly", "[support][measure]")
     }
 }
 
+TEST_CASE("Harmonic amplitudes are measured per harmonic, up to a frequency limit", "[support][measure]")
+{
+    const auto f0 = coherentFrequency(1000.0, rate, n);
+    const auto x = harmonicSignal(f0, {0.5, 0.0, 0.25, 0.001});
+
+    SECTION("every harmonic below Nyquist, by default")
+    {
+        const auto harmonics = measureHarmonics(x, f0, rate, rectangularWindow(n));
+        REQUIRE(harmonics.size() == 23); // 23 f0 < 24 kHz < 24 f0
+        // Tolerance: float quantisation of x, ~1e-7 relative.
+        CHECK_THAT(harmonics[0], WithinRel(0.5, 1e-5));
+        CHECK_THAT(harmonics[1], WithinAbs(0.0, 1e-6));
+        CHECK_THAT(harmonics[2], WithinRel(0.25, 1e-5));
+        CHECK_THAT(harmonics[3], WithinRel(0.001, 1e-4));
+        CHECK_THAT(harmonics[22], WithinAbs(0.0, 1e-6));
+    }
+
+    SECTION("only harmonics at or below maxFrequencyHz")
+    {
+        const auto harmonics = measureHarmonics(x, f0, rate, rectangularWindow(n), 3.5 * f0);
+        CHECK(harmonics.size() == 3);
+    }
+
+    SECTION("a band-limited sawtooth has the ideal 2 / (pi k) amplitudes")
+    {
+        const auto saw = measureHarmonics(bandLimitedSaw(f0), f0, rate, rectangularWindow(n));
+        for (std::size_t k = 1; k <= saw.size(); ++k)
+        {
+            CAPTURE(k);
+            CHECK_THAT(saw[k - 1], WithinRel(2.0 / (std::numbers::pi * static_cast<double>(k)), 1e-4));
+        }
+    }
+}
+
 TEST_CASE("Aliasing: a band-limited sawtooth is clean, a naive one is not", "[support][measure]")
 {
     const auto f0 = coherentFrequency(2500.0, rate, n);

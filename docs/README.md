@@ -39,6 +39,10 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 7. [How we measure DSP quality](dsp/measuring-dsp.md): FFT, windows, coherent sampling, THD, aliasing, frequency response, and golden files. Read this before writing any spectral test.
 8. [Oversampling: 2× and 4× with polyphase IIR halfbands](dsp/oversampling.md)
 
+**Oscillators (M1.1)**
+
+9. [Band-limited oscillators: choosing the anti-aliasing method (D6)](dsp/band-limited-oscillators.md): why naive waveforms alias; PolyBLEP, minBLEP, and mipmapped wavetables measured side by side; why minBLEP with 64 taps.
+
 ### 3. Performance
 
 1. [Benchmarking: measuring CPU cost](performance/benchmarking.md): the harness, its pitfalls, and the real-time budget.

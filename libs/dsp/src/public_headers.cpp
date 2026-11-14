@@ -18,5 +18,9 @@
 #include <anoesis/dsp/math/fast_math.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
 #include <anoesis/dsp/math/random.hpp>
+#include <anoesis/dsp/oscillators/prototype/common.hpp>
+#include <anoesis/dsp/oscillators/prototype/min_blep.hpp>
+#include <anoesis/dsp/oscillators/prototype/poly_blep.hpp>
+#include <anoesis/dsp/oscillators/prototype/wavetable.hpp>
 #include <anoesis/dsp/resampling/halfband.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>
