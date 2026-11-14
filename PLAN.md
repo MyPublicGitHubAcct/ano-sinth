@@ -35,6 +35,8 @@ Still open:
 
 **M1.1 (oscillators) done** (2026-11-14). D6 is decided: **minBLEP, 64 taps** (2026-11-13), chosen by prototyping and measuring five candidates with the harness. The 8 waveforms are built on it as data, with provisional shapes to be measured in M1.13. Tuning, volume, pan, and invert live in an `OscillatorSlot`. Retrigger and phase: a retrigger while sounding is a band-limited phase jump, which hard sync will reuse. Unison: 0–8 voices per oscillator with detune and stereo spread, Noise as one source per slot, and voice-count changes that fade instead of clicking, all on working hypotheses to be measured in M1.13 (inventory O8, O13–O16). The range: stable from 0.01 Hz up to Nyquist, a fade about the waveform's mean from 0.45 fs, band-limited pitch steps, and the whole slot tested under stress at every rate and block size. Drift (v3): two-pole noise per polyphonic voice, σ 1.5 cents at a 0.5 Hz corner, held per 64 samples, on by default in the plugin (inventory O18–O25). 253 tests pass on macOS in debug, and 251 under ASan/UBSan (which skips the plugin validators). **Next:** M1.2, envelopes and LFOs.
 
+**M1.2 (envelopes and LFOs) in progress.** ADSR: the evidence is gathered (inventory §4, E1–E12) and six segment models are measured (docs/dsp/envelopes.md). **Next:** the project owner chooses the model and the open behaviors, then build it.
+
 ---
 
 ## Open decisions
@@ -151,7 +153,7 @@ Each milestone lives mostly in `libs/dsp` and is tested in isolation before inte
 **Docs:** aliasing and band-limited synthesis; the method chosen and the alternatives; unison and detune laws; stereo spreading; the oscillator's range (low-frequency precision, above Nyquist, pitch steps); analog drift and its models.
 
 ### M1.2 Envelopes and LFOs (§4, §6, §8)
-- [ ] ADSR with sample-accurate gate. Curve shapes and time ranges come from measurement.
+- [~] ADSR with sample-accurate gate. Curve shapes and time ranges come from measurement. *Evidence gathered and rated in inventory §4 (new Envelopes section, E1–E12): the manual (common ADSRs, mod envelopes "similar"; A or R of 0 clicks on purpose; Mono Legato does not retrigger; short decays save polyphony), one KVR test reading the attack and release as exponential, one ear test (release about 25 s at the top of the knob, about 1 s at half), and one report that Sylenth1 retriggers without clicks. Six segment models prototyped and measured with the harness (`[envelope-report]`, `[envelope]` benchmarks): linear (accumulated, counted), exponential towards an overshoot target at three ratios (float recursion, double, and a counted float closed form), and an analog RC. Float recursion misses long stages by 1.5–8% at 25 s and 192 kHz; counting is exact. A retrigger from 0 clicks at up to −12 dB, and from the current level at about −35 dB. A jumped sustain change clicks at −12 dB, and a 10 ms ramp at −50 dB. The RC's held decay goes subnormal at 94 ms. Awaiting the project owner's choice of the model and behaviors. Doc: [envelopes](docs/dsp/envelopes.md).*
 - [ ] LFO: 10 waveforms (names unspecified), rate, gain, bipolar offset, free mode, retrigger on note.
 - [ ] Tempo sync: note values including triplets and dotted values, driven by host BPM and transport.
 

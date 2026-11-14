@@ -49,6 +49,10 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 14. [Oscillator range: from 0.01 Hz to beyond Nyquist](dsp/oscillator-range.md): what "stable" means at each end; float phase, accumulated residuals, and denormals at the bottom; what a band-limited waveform is once its fundamental passes Nyquist, the options measured, and the fade about the mean chosen; why a pitch step clicks in a minBLEP oscillator and how it is band-limited; period and phase at 0.01 Hz over whole cycles; hours of simulated time; the slot under stress at every rate and block size.
 15. [Oscillator drift](dsp/oscillator-drift.md): where analog drift comes from and why it is heard as beating between voices; random walks, one- and two-pole noise, sample and hold, slow sines, and 1/f noise compared by spectrum, distribution, independence, and cost; what is known about Sylenth1's drift; the two-pole chosen, held per 64 samples, one per polyphonic voice.
 
+**Envelopes and LFOs (M1.2)**
+
+16. [Envelopes: the ADSR](dsp/envelopes.md): the four stages; linear, analog RC, and overshoot-target exponential segments; constant rate against constant time; why float recursion fails on long stages and counting fixes it; clicks at retriggers and sustain changes; denormals in analog-style tails; what is known about Sylenth1's envelopes; six models measured.
+
 ### 3. Performance
 
 1. [Benchmarking: measuring CPU cost](performance/benchmarking.md): the harness, its pitfalls, and the real-time budget.

@@ -203,6 +203,44 @@ So two common assumptions are wrong or unsupported: drift is **on by default** i
 
 One ADSR per part (Amp Env A and B). An attack or release of 0 is allowed and clicks on purpose.
 
+### Envelopes
+
+This section covers all four envelopes: the two amp envelopes here and the two mod envelopes in [§6](#6-modulation-pp-1920). The manual gives only the outline. Everything past that comes from one KVR thread and a few users' remarks. The prototypes and measurements are in [envelopes.md](../dsp/envelopes.md). In the DSP the stage times are seconds and sustain is a linear level in [0, 1]. The knob laws belong to the parameter table (M1.9), so a measurement that disagrees changes a mapping, not DSP code.
+
+| Topic | What the source says | Source | Confidence |
+|---|---|---|---|
+| Kind | "common ADSR envelopes, with Attack, Decay, Sustain and Release parameters", used "to make the sound fade in and out, or add punch". | Manual p. 17 | High |
+| A or R of 0 | "setting the Attack or Release settings to 0 creates a very sharp on/off switching effect, which might result in a clicking sound", useful "for sounds that need a lot of punch, like a kick drum"; a small value removes the click. | Manual p. 17 | High: 0 is allowed and is (close to) instant. Whether a decay of 0 is instant too is not said. |
+| Mod envelopes | "common ADSR envelopes with Attack, Decay, Sustain and Release settings, similar to the amplitude envelope", typically sent to cutoff ("FEG") or pitch ("PEG"). | Manual p. 19 | High that they are ADSRs; medium that "similar" means the same curves and ranges (E9) |
+| Envelopes as mod sources | The Misc panels can use "the amplitude envelopes and the modulation envelopes". | Manual pp. 6, 19–20 | High |
+| Mono Legato | Forces mono and will "stop retriggering notes whenever another key is pressed", so notes slide "in pitch and velocity without actually restarting a new note". | Manual p. 29 | High that a legato note does not retrigger the envelopes |
+| Decay, release, and voices | "Try to keep the Decay and the Release parameters as small as possible. Sounds with a smaller release time will usually also use less notes of polyphony." | Manual p. 30 | High for release. For decay it suggests that a held note whose envelope has decayed to a sustain of 0 may free its voice (E11). |
+| Curve shape | chk071: "it looks like both the attack and the release slope of the amp envelope are exponential, so it's highly likely that the other stages are too", from a test at about 50% attack and 75% release, read on a VU meter ([p=6214974](https://www.kvraudio.com/forum/viewtopic.php?p=6214974), [p=6214990](https://www.kvraudio.com/forum/viewtopic.php?p=6214990), 21 Aug 2015). fluffy_little_something: "most definitely exponential". TIMT: "completely linear", with no test, and BlitBit read that as being about the knob mapping. | KVR thread 444457, "Synths with the snappiest envelopes" | Low–medium: one meter reading. A VU meter shows dB, and "exponential" may describe how the curve looked there. A pure exponential release is a straight line in dB (E2, E3). |
+| Times and knob law | fluffy_little_something: "With release at max the sound lasts about 25s, at 50% it lasts about 1s", by ear ([p=6214835](https://www.kvraudio.com/forum/viewtopic.php?p=6214835)). BlitBit, from a graph: "50% of the available slider values can be used to set time values between 1 and 25 seconds" ([p=6214934](https://www.kvraudio.com/forum/viewtopic.php?p=6214934)). TTU: the top 10% of the slider adds "only a few seconds" (synth not named, [p=6216150](https://www.kvraudio.com/forum/viewtopic.php?p=6216150)). | Same thread | Low: one ear test and one graph that was not viewed. Two points, 1 s at half the knob and about 25 s at the top, which several laws fit (E1). |
+| Snappiness | Users rank Sylenth1 among the snappiest (tristan-, fluffy_little_something), and others disagree (TIMT: "the stages themselves sound pretty slow to me"). The snap "is achieved most of the time via a filter envelope" (tristan-). | Same thread | Opinion. Fits short times at the bottom of the knob. |
+| Retrigger | TobiArps (Xfer forum, 11 April 2026): Serum 2 gives "clicks and pops every time the envelope retriggers which doesnt happen in other synths like sylenth 1". kelelee (Xfer forum, 2023): Sylenth1 retriggers a mono note that does not overlap the last. | [Xfer forum, "Mono Legato Retrigger Problem"](https://xferrecords.com/forums/general/mono-legato-retrigger-problem) | Low: one user's impression. It fits a retrigger that continues from the current level (E5). |
+| Automation | v3.008: "Sample accurate automation added" and "Clicks and pops during automation issue fixed". | Official changelog | High that automation is sample-accurate. That changes no longer click hints that parameter steps are smoothed (E8). |
+| AmpEnv link | v3.053: "Added option to link AmpEnv A and B parameters." | Official changelog | High. Built with the voice (M1.4). |
+
+No source gives the curve's exact form, the sustain law, what a retrigger does to the level, what a control change does mid-stage, or the level at which a voice is freed.
+
+**Open questions, settled by measuring the demo (M1.13).** Common setup as for W1–W9, with a Sine at A4 and Retrig on, so each cycle's peak (or the RMS per cycle) traces the envelope. The level per cycle is accurate to a fraction of a dB at 440 Hz. For fast stages, use a higher note or read the samples of a square directly. Read the LCD for every knob setting used.
+
+| # | Question | Working hypothesis | Measurement that settles it |
+|---|---|---|---|
+| E1 | The time range of each stage and the knob law (knob 0–10 → seconds). | The same law for A, D, and R. 0 is instant, 5 is about 1 s, and 10 is about 25 s. Two laws fit these points: a power law, t = 25 · x^4.64 with x = knob / 10, or an offset exponential, t = (576^x − 1) / 23. They differ at the bottom of the knob: at knob 1, 0.6 ms against 39 ms. | Attack at knob 0, 0.5, 1, 2, …, 10: the time from note-on to the peak (the corner where the rise ends). Repeat for decay (S 0) and release (S 10). Fit t(x). Also read the LCD, which may show the time directly. |
+| E2 | The attack's shape. | Concave (fast at first, slowing into the peak), like an RC charging towards a level above the peak: the level at half the attack time is between 0.5 (linear) and about 0.68 | Attack 1–2 s: the level at 25, 50, and 75% of the attack time. Linear gives 0.25 / 0.5 / 0.75. An overshoot target with ratio r gives (1 + r)(1 − (r / (1 + r))^p) at fraction p: 0.399 / 0.676 / 0.868 for r = 0.3. |
+| E3 | The decay's and release's shape. | Exponential, close to a pure exponential (a near-straight line in dB), ending at 0 in the stage's time | Release from S 10, 1–2 s: the level in dB against time. A straight line in dB is a pure exponential (then: where does it end?). A line that steepens at the end is an overshoot target, and its slope against its end gives r. Linear in amplitude is −6 dB at half the time. Check that the decay has the same shape (S 0, same knob). |
+| E4 | Sustain's law: a linear level or dB? | Linear: level = knob / 10 | Sustain at knob 0, 2.5, 5, 7.5, 10, held: the level in dB. Linear gives −∞, −12.0, −6.0, −2.5, 0. A dB law gives a straight line, and its range. |
+| E5 | A retrigger while sounding (Polyphony 1, not legato, or a stolen voice): does the level restart from 0 or continue from where it is? | It continues from the current level (TobiArps: no clicks) | Polyphony 1, A 1 s, R 2 s, the same note replayed during the release at about 0.3. Read the level on the samples around the second note-on: a drop to 0 means a restart, and a rise from 0.3 means it continues. Repeat during the attack and the decay. |
+| E6 | A note-off during the attack or decay: does the release start from the current level? | Yes, with no jump | A 2 s, note-off at 1 s, then at mid-decay: the level just before and after. |
+| E7 | A release from below full scale: the same time, or shorter in proportion (a constant rate)? | A constant rate, the stage entered at the current level of its full-scale curve. From 0.5 it is shorter, by 0.9 for a near-pure exponential and 0.5 for a linear one. | R at knob 7, released from S 10 and from S 5 (and S 1): each release's length to silence. Equal lengths mean constant time. The ratio otherwise also checks E3's shape. |
+| E8 | A control changed mid-stage: does a time change act on the running stage, and does a sustain change jump or glide? | Times apply at once, at the new rate, with the level continuous. Sustain glides (v3.008 fixed "clicks and pops during automation"). | Automate A from 10 to 2 halfway through a long attack: does the rise speed up at once? Automate S from 10 to 5 in one step during a held note: the transition's length and shape (a jump, a short ramp, or the decay's curve). |
+| E9 | Do the mod envelopes behave like the amp envelopes (the same ranges, curves, retrigger)? | Identical | ModEnv 1 to Volume A (or Mix A) at full amount, AmpEnv A at A 0, S 10: E1–E3's measurements on the mod envelope. Then ModEnv 1 to Pitch A at a known amount, for its curve read in pitch. |
+| E10 | When is a note's voice freed: when the release reaches 0, or at a threshold (−60, −80, −100 dB)? | When the release ends at exactly 0 | The Voices readout during a long release (R at knob 8): the moment it drops, against the level in a render at that moment. |
+| E11 | Is a held note whose amp envelopes have decayed to a sustain of 0 freed? (The manual's p. 30 tip suggests a short decay saves polyphony.) | No: freed only after note-off. To be revisited with the voice (M1.4). | S 0, D short, a key held for 10 s: does the Voices readout drop while it is held? Then play more notes than the polyphony while holding it: is it stolen first? |
+| E12 | Is an attack or release of 0 a single-sample step? Is a decay of 0 instant? | Instant (the next sample is at the end level) | A 0 (and then D 0) on a square at A4: the first samples after note-on. R 0: the samples after note-off. |
+
 ## 5. Mixer (p. 18)
 
 Mix A, Mix B, Main Volume (after the effects), and a stereo VU meter. The output is **not clipped**.
@@ -213,7 +251,7 @@ There is **no general mod matrix.** Each source has its own slots:
 
 | Source block | Count | Destinations each | Controls |
 |---|---|---|---|
-| Mod Envelope | 2 | 2 | ADSR |
+| Mod Envelope | 2 | 2 | ADSR (see [Envelopes](#envelopes)) |
 | LFO | 2 | 2 | Wave (10 waveforms, **not named**), Rate, Gain, Offset (±), Free |
 | Misc panel | 2 panels × 2 selectable sources = 4 | 2 | Source selector |
 
