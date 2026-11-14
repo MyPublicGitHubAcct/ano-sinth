@@ -2,6 +2,7 @@
 add_executable(anoesis_dsp_tests
     library_test.cpp
     benchmarks/foundations_benchmark.cpp
+    benchmarks/drift_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     core/allocation_counter_test.cpp
     core/audio_block_test.cpp
@@ -18,6 +19,7 @@ add_executable(anoesis_dsp_tests
     oscillators/antialiasing_report.cpp
     oscillators/band_limited_oscillator_test.cpp
     oscillators/band_limiting_residuals_test.cpp
+    oscillators/drift_report.cpp
     oscillators/oscillator_controls_report.cpp
     oscillators/oscillator_phase_report.cpp
     oscillators/oscillator_phase_test.cpp
