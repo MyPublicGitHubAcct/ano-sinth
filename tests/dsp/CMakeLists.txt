@@ -21,6 +21,7 @@ add_executable(anoesis_dsp_tests
     oscillators/oscillator_controls_report.cpp
     oscillators/oscillator_phase_report.cpp
     oscillators/oscillator_phase_test.cpp
+    oscillators/oscillator_range_report.cpp
     oscillators/oscillator_slot_test.cpp
     oscillators/unison_layout_test.cpp
     oscillators/unison_report.cpp
