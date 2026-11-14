@@ -2,7 +2,7 @@
 
 ## Requirements
 
-> Only **macOS** is built locally. Linux and Windows are built and tested in Version CI, after macOS, on every major or minor version ([ci.md](ci.md)). The Linux and Windows instructions below match what CI does.
+> Only **macOS** is built locally. Linux and Windows are built and tested in Version CI on every major or minor version ([ci.md](ci.md)). The Linux and Windows instructions below match what CI does.
 
 | | macOS | Linux | Windows |
 |---|---|---|---|

@@ -4,14 +4,14 @@
 # before each commit (tools/check.sh). Details: docs/development/ci.md
 #
 # Fail fast: the jobs run as a chain
-#   checks -> macOS tests -> Linux tests -> Windows tests -> macOS release build
+#   checks -> Linux tests -> Windows tests -> macOS tests -> macOS release build
 # Any failure stops everything after it, and a failing matrix leg cancels its
 # siblings.
 #
 # A tag push runs every job. A manual dispatch can pick which ones run (all are
 # on by default); a job that is switched off is skipped and the chain carries
 # on past it. For example, Linux only:
-#   gh workflow run version-ci.yml -f macos=false -f windows=false -f release=false
+#   gh workflow run version-ci.yml -f windows=false -f macos=false -f release=false
 #
 # No job publishes anything: no artifacts, releases, or packages. Compiled
 # builds are never downloadable from GitHub (tools/check-no-published-builds.sh).
@@ -23,16 +23,16 @@ on:
     tags: ['v[0-9]+.[0-9]+.0']
   workflow_dispatch:
     inputs:
-      macos:
-        description: macOS tests (Apple Clang)
-        type: boolean
-        default: true
       linux:
         description: Linux tests (GCC 12)
         type: boolean
         default: true
       windows:
         description: Windows tests (MSVC)
+        type: boolean
+        default: true
+      macos:
+        description: macOS tests (Apple Clang)
         type: boolean
         default: true
       asan:
@@ -84,30 +84,6 @@ jobs:
   # The names hold no matrix expression: GitHub appends " (<preset>)" to each
   # leg by itself, and a job skipped by its if: is never expanded, so an
   # expression in the name would show up literally.
-  macos:
-    name: macOS tests
-    needs: checks
-    if: github.event_name != 'workflow_dispatch' || inputs.macos
-    runs-on: macos-latest
-    strategy:
-      fail-fast: true
-      matrix:
-        preset: ${{ fromJSON((github.event_name == 'workflow_dispatch' && !inputs.asan) && '["debug"]' || '["debug", "asan"]') }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          submodules: recursive
-      - run: brew install ninja
-      - run: cmake --workflow --preset ${{ matrix.preset }}
-      - name: clang-tidy
-        if: matrix.preset == 'debug'
-        run: |
-          pip install clang-tidy==23.1.4
-          CLANG_TIDY="$(python3 -c 'import shutil; print(shutil.which("clang-tidy"))')" tools/tidy.sh build/debug
-
-  # From here on, each job runs if it is selected and nothing before it failed
-  # or was cancelled. A skipped job (switched off) does not stop the chain;
-  # failure() also sees failures further back, through a skipped job.
   #
   # Linux: Ubuntu 22.04 with its own GCC 12 is the minimum supported Linux
   # (decision D8). xvfb is there because the editor test creates JUCE
@@ -117,8 +93,8 @@ jobs:
   # LeakSanitizer, which Apple Clang does not support on macOS.
   linux:
     name: Linux GCC 12 tests
-    needs: macos
-    if: ${{ !cancelled() && !failure() && (github.event_name != 'workflow_dispatch' || inputs.linux) }}
+    needs: checks
+    if: github.event_name != 'workflow_dispatch' || inputs.linux
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: true
@@ -144,6 +120,10 @@ jobs:
           CXX: g++-12
         run: xvfb-run -a cmake --workflow --preset ${{ matrix.preset }}
 
+  # From here on, each job runs if it is selected and nothing before it failed
+  # or was cancelled. A skipped job (switched off) does not stop the chain;
+  # failure() also sees failures further back, through a skipped job.
+  #
   # Windows: Ninja needs cl.exe on PATH, so everything runs inside the Visual
   # Studio developer environment (vcvars64.bat), which also provides Ninja.
   # Debug only: the asan preset is not available on Windows.
@@ -163,9 +143,32 @@ jobs:
           call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           cmake --workflow --preset debug
 
+  # macOS: Apple Clang. The debug leg also runs clang-tidy, and pluginval and
+  # auval on the VST3 and AU.
+  macos:
+    name: macOS tests
+    needs: windows
+    if: ${{ !cancelled() && !failure() && (github.event_name != 'workflow_dispatch' || inputs.macos) }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        preset: ${{ fromJSON((github.event_name == 'workflow_dispatch' && !inputs.asan) && '["debug"]' || '["debug", "asan"]') }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - run: brew install ninja
+      - run: cmake --workflow --preset ${{ matrix.preset }}
+      - name: clang-tidy
+        if: matrix.preset == 'debug'
+        run: |
+          pip install clang-tidy==23.1.4
+          CLANG_TIDY="$(python3 -c 'import shutil; print(shutil.which("clang-tidy"))')" tools/tidy.sh build/debug
+
   release:
     name: macOS release build (universal)
-    needs: windows
+    needs: macos
     if: ${{ !cancelled() && !failure() && (github.event_name != 'workflow_dispatch' || inputs.release) }}
     runs-on: macos-latest
     env:

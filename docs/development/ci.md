@@ -11,7 +11,7 @@
 
   and stops at the first failure. Add `--asan` to also run the sanitizer build. The git hooks also check formatting and identity leaks on each commit.
 - **GitHub Actions runs only for major and minor versions.** The trigger is a pushed tag `vX.Y.0`, or a manual dispatch. Patch versions (`vX.Y.Z` with Z > 0), ordinary pushes, and pull requests run nothing. This keeps hosted CI time for the points where a version is cut.
-- **Platform order.** macOS is tested first: locally before every commit, then in CI. **Then Linux, then Windows**, one after the other, in every version run. They are not built locally.
+- **Platform order.** macOS is tested locally before every commit. In every version run, CI tests **Linux first, then Windows, then macOS**, one after the other, and builds the macOS release last. Linux and Windows are not built locally, so they go first: they are the platforms most likely to find something new.
 - **Fail fast.** One failure stops the run, so no minutes are spent after something has already broken.
 - **No downloadable builds on GitHub.** CI compiles and tests, and nothing more. No workflow uploads artifacts, creates releases or release assets, pushes packages, or deploys Pages, and no one uploads binaries by hand. The repository is public, so any of these would make a compiled plugin downloadable by anyone. Binaries contain JUCE (AGPLv3 or commercial) and the real plugin identity, so distributing them is a separate decision (see PLAN.md, **Distribution**). [tools/check-no-published-builds.sh](../../tools/check-no-published-builds.sh) enforces this for workflows: it fails on `actions/upload-artifact`, release actions, `gh release`, Pages deploys, package pushes, and `contents: write` or `packages: write` permissions. It runs in `tools/check.sh` and as the last step of CI job 1.
 
@@ -22,9 +22,9 @@ The jobs run as a chain. Each needs the one before it, so a failure skips everyt
 | # | Job | Runner | What it does |
 |---|---|---|---|
 | 1 | Version, format, and identity checks | ubuntu-latest | Checks that the tag equals `v` + `project(VERSION …)` in [CMakeLists.txt](../../CMakeLists.txt). Then runs the clang-format 23.1.5 check, the identity-leak check over tracked files and every commit message (with values from secrets), and the no-published-builds check. These need no compiler, so they use the cheapest runner. Always runs. |
-| 2 | macOS tests (`debug`, `asan`) | macos-latest | `cmake --workflow --preset <preset>`. The `debug` leg includes pluginval at strictness 10 on the VST3 and `auval -strict` on the AU, and runs clang-tidy 23.1.4. The `asan` leg runs the tests under ASan/UBSan (see [Why debug and asan are separate builds](#why-debug-and-asan-are-separate-builds)). Uses the placeholder identity. |
-| 3 | Linux GCC 12 tests (`debug`, `asan`) | ubuntu-22.04 | The same two presets, under `xvfb-run`. The `debug` leg includes pluginval. See [Why Linux has two legs](#why-linux-has-two-legs). Uses the placeholder identity. |
-| 4 | Windows MSVC tests (`debug`) | windows-latest | `debug` inside `vcvars64.bat` (located with `vswhere`), including pluginval. The `asan` preset doesn't exist on Windows. Uses the placeholder identity. |
+| 2 | Linux GCC 12 tests (`debug`, `asan`) | ubuntu-22.04 | `cmake --workflow --preset <preset>` under `xvfb-run`. The `debug` leg includes pluginval. The `asan` leg runs the tests under GCC's sanitizers (see [Why debug and asan are separate builds](#why-debug-and-asan-are-separate-builds) and [Why Linux has two legs](#why-linux-has-two-legs)). Uses the placeholder identity. |
+| 3 | Windows MSVC tests (`debug`) | windows-latest | `debug` inside `vcvars64.bat` (located with `vswhere`), including pluginval. The `asan` preset doesn't exist on Windows. Uses the placeholder identity. |
+| 4 | macOS tests (`debug`, `asan`) | macos-latest | The same two presets as Linux. The `debug` leg includes pluginval at strictness 10 on the VST3 and `auval -strict` on the AU, and runs clang-tidy 23.1.4. The `asan` leg runs the tests under ASan/UBSan. Uses the placeholder identity. |
 | 5 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds and tests (pluginval and auval validate the release VST3 and AU). **Uploads nothing**: the outputs are discarded with the runner. |
 
 The two-leg jobs are fail-fast matrices: if one leg fails, the other is cancelled. Jobs 3–5 run only if nothing before them failed or was cancelled.
@@ -51,19 +51,19 @@ A tag push always runs every job. A manual dispatch (Actions → Version CI → 
 
 ```sh
 gh workflow run version-ci.yml                                      # everything
-gh workflow run version-ci.yml -f macos=false -f windows=false -f release=false   # Linux only
+gh workflow run version-ci.yml -f windows=false -f macos=false -f release=false   # Linux only
 gh workflow run version-ci.yml -f asan=false -f release=false       # debug legs on all three platforms
 ```
 
 | Input | Job it controls |
 |---|---|
-| `macos` | 2, macOS tests |
-| `linux` | 3, Linux tests |
-| `windows` | 4, Windows tests |
-| `asan` | the `asan` leg of jobs 2 and 3 (off: `debug` only) |
+| `linux` | 2, Linux tests |
+| `windows` | 3, Windows tests |
+| `macos` | 4, macOS tests |
+| `asan` | the `asan` leg of jobs 2 and 4 (off: `debug` only) |
 | `release` | 5, macOS release build |
 
-Job 1 always runs. The chain still holds: each selected job waits for the selected jobs before it, and is skipped if one of them failed. A job that is switched off is *skipped*, not failed, so the chain carries on past it. The `if:` conditions use `!cancelled() && !failure()` rather than the default `success()`, because `success()` treats a skipped job before it as a reason to skip. `failure()` also sees failures further back, through a skipped job, so turning off Linux doesn't let Windows run after a macOS failure.
+Job 1 always runs. The chain still holds: each selected job waits for the selected jobs before it, and is skipped if one of them failed. A job that is switched off is *skipped*, not failed, so the chain carries on past it. The `if:` conditions use `!cancelled() && !failure()` rather than the default `success()`, because `success()` treats a skipped job before it as a reason to skip. `failure()` also sees failures further back, through a skipped job, so turning off Windows doesn't let macOS run after a Linux failure.
 
 Inputs are empty on a tag push, and GitHub's loose `==` treats an empty input as equal to `false`. So every condition checks `github.event_name != 'workflow_dispatch'` first, and never compares an input with `false`.
 

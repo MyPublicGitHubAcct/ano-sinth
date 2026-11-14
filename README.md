@@ -50,14 +50,14 @@ job to skip:
 
 ```sh
 gh workflow run version-ci.yml                                                    # everything
+gh workflow run version-ci.yml -f windows=false -f macos=false -f release=false   # Linux only
+gh workflow run version-ci.yml -f linux=false -f macos=false -f release=false     # Windows only
 gh workflow run version-ci.yml -f linux=false -f windows=false -f release=false   # macOS only
-gh workflow run version-ci.yml -f macos=false -f windows=false -f release=false   # Linux only
-gh workflow run version-ci.yml -f macos=false -f linux=false -f release=false     # Windows only
 gh workflow run version-ci.yml -f macos=false -f linux=false -f windows=false     # macOS release build only
 gh workflow run version-ci.yml -f asan=false                                      # skip the ASan legs (macOS, Linux)
 ```
 
-The selected jobs still run in order (macOS → Linux → Windows → release), and a
+The selected jobs still run in order (Linux → Windows → macOS → release), and a
 failure stops the rest. Details: [docs/development/ci.md](docs/development/ci.md).
 
 ## License

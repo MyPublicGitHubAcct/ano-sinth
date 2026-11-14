@@ -14,7 +14,7 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 1. A Catch2 test was written first and failed, then the code made it pass (TDD).
    Before committing, `tools/check.sh` passes locally (macOS).
-2. Builds without warnings and all tests pass on macOS, Linux, and Windows. *macOS is checked locally before every commit. Linux and Windows are checked by Version CI, after macOS, on every major or minor version (`vX.Y.0`). A task counts as done once it passes macOS. Linux or Windows failures found in a version run must be fixed before that version ships.*
+2. Builds without warnings and all tests pass on macOS, Linux, and Windows. *macOS is checked locally before every commit. Linux and Windows are checked by Version CI on every major or minor version (`vX.Y.0`). A task counts as done once it passes macOS. Linux or Windows failures found in a version run must be fixed before that version ships.*
 3. Code is formatted with clang-format, and clang-tidy reports nothing.
 4. Audio-thread code is real-time safe. `libs/dsp` code meets the portability rules in CLAUDE.md (no JUCE, no allocation after prepare, and so on).
 5. Part 4 docs are written or updated for the technique (see the doc column of each milestone).
@@ -24,11 +24,11 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 ## Current status
 
-**Phase 0: Foundation, done.** Version CI passed on the `v0.1.0` tag (run 43529431143), on macOS, Linux, and Windows. The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: macOS first, then Linux and Windows, then the macOS release build.
+**Phase 0: Foundation, done.** Version CI passed on the `v0.1.0` tag (run 43529431143), on macOS, Linux, and Windows. The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: Linux, then Windows, then macOS, then the macOS release build.
 
 Still open:
 
-- **Linux and Windows:** tested in Version CI after macOS. Not built locally. See the section below.
+- **Linux and Windows:** tested in Version CI, ahead of macOS. Not built locally. See the section below.
 - **Distribution:** GitHub never hosts compiled builds. See **Distribution** below.
 
 **Phase 1: M1.0 done** (2026-11-13). `libs/dsp` has the processor lifecycle, math utilities, smoothing, denormal protection, seedable noise, and 2×/4× oversampling. `tests/support` holds the measurement harness (FFT, THD, aliasing, frequency response, golden files), and the first CPU baselines are recorded. 96 tests pass on macOS (debug and ASan/UBSan).
@@ -70,7 +70,7 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
   - Add `.clang-format` and `.clang-tidy` (Core Guidelines checks).
   - Add an optional sanitizer preset (ASan/UBSan) for Clang and GCC.
   - Add a pre-commit format check or a script that does the same.
-- [x] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Passed in full on run 43524447930, after four Linux fixes found by the first version runs (see docs/development/ci.md, History). **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. **auval** runs as a CTest test on macOS: it installs the AU temporarily, runs `auval -strict`, then always uninstalls and restores. The `v0.1.0` tag run (43529431143) passed every job.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
+- [x] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: Linux (GCC 12) tests, then Windows (MSVC) tests, then macOS tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Passed in full on run 43524447930, after four Linux fixes found by the first version runs (see docs/development/ci.md, History). **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. **auval** runs as a CTest test on macOS: it installs the AU temporarily, runs `auval -strict`, then always uninstalls and restores. The `v0.1.0` tag run (43529431143) passed every job.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
   - The test jobs use the placeholder identity.
   - Release jobs read `BRUTALIS_MANUFACTURER_CODE`, `BRUTALIS_PLUGIN_CODE`, and `BRUTALIS_BUNDLE_ID` from GitHub Actions secrets and set `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`.
   - Add a CI check that fails if the real values appear in tracked files. Keep the values for this check in a secret too.
@@ -86,7 +86,7 @@ Written: [building](docs/development/building.md), [project structure](docs/deve
 Decided on 2026-11-13:
 
 - Development and pre-commit testing happen **on macOS only**.
-- **Every major or minor version is tested on Linux and Windows after macOS**, in Version CI ([docs/development/ci.md](docs/development/ci.md)).
+- **Every major or minor version is tested on Linux and Windows**, in Version CI ([docs/development/ci.md](docs/development/ci.md)).
 - Shipping Linux and Windows builds is deferred, along with all distribution (see **Distribution**).
 
 The D8 baselines (Windows 10, Ubuntu 22.04 with GCC 12) still stand, and code stays standard C++23 with no compiler extensions.
@@ -338,3 +338,4 @@ Each milestone above lists its docs. In addition:
 | 2026-11-13 | clang-format and clang-tidy pinned to major version 23. CI installs `clang-format==23.1.5` and `clang-tidy==23.1.4` from PyPI. | Different majors format the same code differently. |
 | 2026-11-13 | On GCC, JUCE's own compilation units (`external/JUCE/modules/*/*.cpp` and `*.c`) are compiled with `-Wno-conversion`, and JUCE's include directories are `SYSTEM` (so GCC skips warnings located in JUCE headers). Every other warning still applies to JUCE's units, and project code keeps `-Wconversion` on every compiler. Apple Clang still holds JUCE's units and headers to the full set. | The first version run showed that JUCE 9.0.5 isn't `-Wconversion`-clean on GCC 12. JUCE's GCC flag set omits it, unlike its Clang set, so the earlier row's "JUCE targets already had these" held for Clang only. The exemption is kept to JUCE's units, as code-quality.md requires. |
 | 2026-11-13 | Version CI runs as one chain, macOS → Linux → Windows → macOS release, and a manual dispatch can switch each job (and the ASan legs) on or off; a tag push runs everything. Sanitizer builds leave the plugin's shared code and format wrappers out of the default build (327 → 249 compiles on macOS). | Requested by the project owner. Debug and asan share no object files, so the saving comes from not building what ASan can't use: no host loads an ASan plugin, and `brutalis_plugin_tests` already compiles the plugin's sources under the sanitizers. Both Linux legs are kept: debug runs pluginval on the GCC build, asan adds LeakSanitizer and GCC's sanitizers. See docs/development/ci.md. |
+| 2026-11-13 | Version CI's chain order is now Linux → Windows → macOS → macOS release (it was macOS → Linux → Windows → release). | Requested by the project owner. macOS already passes locally before every commit, so the platforms that are never built locally now run first, and a GCC or MSVC failure ends the run before any macOS minutes are spent. See docs/development/ci.md. |

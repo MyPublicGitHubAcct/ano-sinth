@@ -59,7 +59,7 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
   - Windows: MSVC (Visual Studio), invoked from a developer environment so Ninja can find `cl.exe`
 
   Code must build cleanly on all three. Do not rely on extensions or behavior specific to one compiler.
-  **Only macOS is built locally.** Linux and Windows are tested in Version CI, after macOS, on every major or minor version. Because GCC and MSVC see the code only at version time, the portability rules matter even more.
+  **Only macOS is built locally.** Linux and Windows are tested in Version CI on every major or minor version. Because GCC and MSVC see the code only at version time, the portability rules matter even more.
 - **Plugin formats:** VST3, AU, Standalone.
 - **Target platforms:** macOS, Linux, Windows. **STM32 may be added later**, which constrains the DSP library (see below).
 
@@ -85,7 +85,7 @@ tools/bench.sh ["[area]"]               # [!benchmark] tests in relwithdebinfo -
 
 **Git workflow.** Commit directly to `main`. Do not create feature or work branches, in this repo or on GitHub. Run `tools/check.sh` and make sure it passes before every commit.
 
-**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is fail-fast: macOS tests first, then Linux (GCC 12) tests, then Windows (MSVC) tests, then the macOS release build. A manual dispatch can select which of those jobs run. Do not add per-push or per-PR CI.
+**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is fail-fast: Linux (GCC 12) tests first, then Windows (MSVC) tests, then macOS tests, then the macOS release build. A manual dispatch can select which of those jobs run. Do not add per-push or per-PR CI.
 
 **No downloadable builds on GitHub.** GitHub hosts source only. Never add workflow artifacts, releases or release assets, packages, or Pages deploys, and never upload binaries by hand. CI builds and tests, then discards the output. `tools/check-no-published-builds.sh` enforces this for workflows. Details: [docs/development/ci.md](docs/development/ci.md).
 
