@@ -6,6 +6,41 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-14: M1.1 oscillator drift
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark.
+- **What changed** ([oscillator-drift.md](../dsp/oscillator-drift.md)): a new `PitchDrift` generator (two-pole noise, updated every 64 samples). Nothing in the oscillators or the slot changed. New rows: the generator alone, and drift applied to a voice's slots, held per 64 samples (the default) or added to a note per sample.
+- **Before and after, same session:** the parent (`264f362`, the measurement commit, whose library code is identical) and then this tree. Every existing row is within −10% to +10% of the parent (the run-to-run noise of this machine), except one: "noteToFrequency every sample + inline stereo gain" read 23.43 on the parent against 9.21 now; earlier sessions measured it at 9.15–9.51, so the parent's reading is the outlier.
+
+| Benchmark (ns / sample) | parent | this commit |
+|---|---:|---:|
+| minBLEP 64-tap, saw 440 Hz | 3.17 | 2.92 |
+| minBLEP 64-tap, TriSaw 12 kHz | 17.80 | 17.97 |
+| Oscillator slot, saw 440 Hz, settled | 3.28 | 3.31 |
+| Oscillator slot, saw 440 Hz, pitch per sample | 6.41 | 6.45 |
+| Unison slot, saw 440 Hz, 8 voices | 25.21 | 24.78 |
+| Unison slot, saw 440 Hz, 8 voices, pitch per sample | 40.12 | 38.61 |
+| Unison: 32-voice note (4 slots x 8 voices) into one bus | 102.89 | 104.01 |
+
+New rows (drift at the default, 1.5 cents and 0.5 Hz; saws at 110–880 Hz, Detune 0.2 st, Stereo 0.5):
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| Drift: the generator alone, `process()` | 0.17 |
+| Drift: the generator alone, `addTo()` a note per sample | 0.19 |
+| Drift: 1 slot x 1 voice: no drift / held per 64 / a note per sample | 2.99 / 3.50 / 6.52 |
+| Drift: 1 slot x 8 voices: no drift / held per 64 / a note per sample | 23.44 / 23.93 / 35.44 |
+| Drift: 4 slots x 8 voices: no drift / held per 64 / a note per sample | 103.48 / 101.45 / 147.22 |
+
+### Observations
+
+- **Held per 64 samples, a whole note costs what it did without drift** (101.5 against 103.5 ns, within noise). The generator is 0.17 ns per sample, and each slot converts its note 8 times per 512 samples instead of once.
+- **A lone one-voice slot pays +17% held:** 8 process calls of 64 samples instead of one of 512, on an oscillator of 3 ns per sample.
+- **A note per sample costs a whole note +42%,** for the `exp2` per sample per slot. A voice with per-sample glide or pitch modulation pays that anyway; the drift adds 0.19 ns.
+- The six candidate models' costs (measured at `264f362`) are in [oscillator-drift.md](../dsp/oscillator-drift.md#cpu).
+
+---
+
 ## 2026-11-14: M1.1 oscillator range (the Nyquist fade, pitch steps)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark.

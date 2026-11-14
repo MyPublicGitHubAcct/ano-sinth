@@ -10,8 +10,6 @@ An analog oscillator never holds its pitch exactly. Its pitch wanders by a few c
 
 Read [oscillator-controls.md](oscillator-controls.md) (pitch as one fractional note), [oscillator-unison.md](oscillator-unison.md), and [oscillator-range.md](oscillator-range.md) (pitch steps) first.
 
-> **Status.** Evidence gathered, models measured, and the choice made (2026-11-14, Decisions log). Building it is the next commit; the sections **How it is applied here** and **Tests** describe the build once it lands.
-
 ## Theory
 
 ### Where drift comes from
@@ -66,7 +64,7 @@ The full source table, with confidence ratings, is in the inventory ([§2, Drift
 
 ## The options and the decision
 
-Measured by the hidden `[drift-report]` and `[drift-long-report]` ([drift_report.cpp](../../tests/dsp/oscillators/drift_report.cpp)) and the `[drift]` benchmarks ([drift_benchmark.cpp](../../tests/dsp/benchmarks/drift_benchmark.cpp)), on prototypes of each model ([drift_candidates.hpp](../../tests/dsp/oscillators/drift_candidates.hpp)). Every model is normalised to the same standard deviation σ and given one rate r = 0.5 Hz: the corner of the one- and two-pole noise; the target rate of the sample and hold; the middle of the three sines (0.618, 1, 1.618 × r); the clock of the 1/f noise, at 4r with 8 rows. Each starts from its stationary distribution, as a process that has been running unheard would be. The prototypes and this report can be rerun from the commit that recorded this decision.
+Measured at commit `264f362` by the hidden `[drift-report]` and `[drift-long-report]` and the `[drift]` benchmarks, on test-only prototypes of each model (`tests/dsp/oscillators/drift_candidates.hpp` at that commit). The prototypes were removed once the choice was built, and the report now measures `PitchDrift` (**Results** below); checking out that commit reruns every figure in this section. Every model is normalised to the same standard deviation σ and given one rate r = 0.5 Hz: the corner of the one- and two-pole noise; the target rate of the sample and hold; the middle of the three sines (0.618, 1, 1.618 × r); the clock of the 1/f noise, at 4r with 8 rows. Each starts from its stationary distribution, as a process that has been running unheard would be.
 
 ### Spectrum and distribution
 
@@ -189,11 +187,172 @@ Chosen by the project owner on 2026-11-14 (PLAN.md, Decisions log):
 
 ## How it is applied here
 
-Built in the next commit.
+### The generator
+
+`PitchDrift` ([pitch_drift.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/pitch_drift.hpp)) is the whole of it: a `Random`, two state variables, and a few coefficients: about 100 bytes.
+
+- **The model.** Uniform white noise w (scaled by √3 to unit variance) through two one-poles in cascade at the corner f_c: y₁ ← a·y₁ + g·w, y₂ ← a·y₂ + (1 − a)·y₁, with a = e^(−2π f_c Δ) and Δ = 64/fs. The coefficients are computed in double whenever the rate or the sample rate changes, from the closed-form stationary moments of the recursion, so that y₂ has unit variance exactly. The state is kept at unit σ; the offset is depth × y₂ / 100 semitones. So the depth scales the drift and nothing else, and changing it never disturbs the random sequence.
+- **Held per 64 samples, on its own grid.** `updateInterval` is 64. The grid is counted from the last note-on from silence (or `reset()`), never from a block boundary, so how a render is split into blocks changes nothing. The coefficients use the update rate fs/64, so the drift has the same statistics in seconds at every sample rate.
+- **Note-ons.** `noteOn()` from silence draws (y₁, y₂) jointly from the stationary distribution, through the Cholesky factor of its covariance, with approximately Gaussian draws (the sum of four uniforms), and restarts the grid. While sounding it does nothing: a legato note or a retrigger continues the drift. `stop()` marks the voice finished; `reset()` also restarts the random sequence from the seed.
+- **Off.** Depth 0, NaN, negative, or below `minDepthCents` (10⁻³ cents) is off. Off, `process()` makes one run of the whole block at exactly 0, so a note plus the offset is the note, bit for bit. The state still advances, so turning the drift on later starts from where the sequence would be.
+- **Seeds.** Each voice gives its drift its own seed (the instance seed plus the voice index, say); `Random` spreads every seed through SplitMix64, so adjacent seeds give independent streams. The seed is XORed with `seedSalt`, so a drift and a slot given the same seed do not share a sequence.
+- **Safety.** Rates are clamped to 0.001–50 Hz (NaN is the default) and depths to 1200 cents. `flushDenormal()` guards the state, as for any recursion ([denormals.md](denormals.md)). Nothing is allocated.
+
+### How a voice uses it
+
+The voice (M1.4) owns one `PitchDrift` and adds its offset to the note it gives each of its 4 oscillator slots. `OscillatorSlot` is unchanged.
+
+```cpp
+// The usual case: a note per block. The drift splits the block into runs of
+// constant offset, at most 64 samples long, on its own grid.
+drift.process(numSamples, [&](std::size_t start, std::size_t length, float semitones) {
+    for (auto& slot : slots)
+        slot.process(bus.subBlock(start, length), note + semitones);
+});
+
+// A voice that passes a note per sample anyway (glide, pitch modulation):
+drift.addTo(notes);  // adds the held offsets in place
+for (auto& slot : slots)
+    slot.process(bus, notes);
+```
+
+Both give the same pitch path. The first converts each slot's note once per run (an `exp2` per 64 samples); the second once per sample, which the voice pays for its glide or modulation anyway.
+
+The plugin's drift setting (M1.9) is global, not part of a preset, and on by default at `defaultDepthCents` (1.5) and `defaultRateHz` (0.5). In the library the depth starts at 0, so tests and other uses opt in.
+
+### Which content belongs to the pitch path
+
+A drifting oscillator's spectrum has three things beside each harmonic that a constant pitch does not, all of them the pitch path's own:
+
+- the harmonic spread over its deviation, a few cents;
+- the FM skirt of the drift's tail, which falls as f⁻⁶ in power away from the harmonic (the drift's −40 dB/decade, and a further 1/f² from frequency to phase): −81 dB in a 50 Hz band 50 Hz from a 4.2 kHz fundamental at the default depth, as the narrowband estimate predicts;
+- the hold's sidebands at ±k·fs/64.
+
+The oscillator adds one more thing: the slow error of each held step. A step is a change of increment, and below `bandLimitedPitchStep` it is not band-limited, by design ([oscillator-range.md](oscillator-range.md#pitch-steps-one-band-limited-bend-deferred-to-the-next-sample)). To separate that from the rest, the test and the report render the same held pitch path at 4× the rate and decimate it with the library's `Oversampler`: that reference has the pitch path's content and practically none of the oscillator's own error or aliasing. What the 1× render has beyond it is what the oscillator adds.
+
+## Results, as built
+
+From the `[drift-report]` (about 2 s) and `[drift-long-report]` (0.1 s), in `relwithdebinfo` ([drift_report.cpp](../../tests/dsp/oscillators/drift_report.cpp)):
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[drift-report]"
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[drift-long-report]"
+```
+
+### Statistics at every sample rate
+
+The default depth and rate (σ 1.5 cents, corner 0.5 Hz), one hour of updates. Theory: half the variance below 0.221 Hz and 99% below 1.69 Hz; the density at 0.05 / 0.5 / 5 / 50 Hz at 0 / −6.0 / −40.0 / −80.0 dB.
+
+| Rate | Update rate | σ (cents) | Mean | Peak | Kurtosis | Half below | 99% below | Density (dB) | Above 20 Hz |
+|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|
+| 44.1 kHz | 689 Hz | 1.485 | 0.012 | 6.26 | 3.11 | 0.231 Hz | 1.73 Hz | 0 / −6.0 / −39.9 / −79.6 | −51.4 dB |
+| 48 kHz | 750 Hz | 1.483 | 0.008 | 6.27 | 3.12 | 0.229 Hz | 1.72 Hz | 0 / −5.5 / −39.6 / −79.4 | −51.5 dB |
+| 96 kHz | 1500 Hz | 1.501 | 0.011 | 6.17 | 3.10 | 0.229 Hz | 1.69 Hz | 0 / −5.8 / −40.2 / −80.1 | −51.7 dB |
+| 192 kHz | 3000 Hz | 1.511 | 0.033 | 6.48 | 3.09 | 0.229 Hz | 1.74 Hz | 0 / −6.2 / −40.1 / −80.0 | −51.6 dB |
+
+The same drift, in seconds, at every rate, and as the theory says. The peak is about 4.2σ in an hour.
+
+**Note-ons from silence.** 100,000 notes started from silence: the starting offsets have σ 1.498 cents, mean −0.002, peak 6.13, kurtosis 2.83. That is the drift's own distribution: a note starts where a drift that had been running would be, not in tune.
+
+**Independence.** 64 pairs of voices seeded n and n + 1, 10 minutes each: mean |r| 0.031, worst 0.092, as independent streams give (about 0.029 and 0.11).
+
+**Ten hours** (σ 1 cent): peak 4.86σ; σ 0.989 in the first hour and 0.999 in the last; means 0.006 and −0.018; the worst one-minute mean 0.52σ; one-minute σ from 0.77 to 1.28; 2,816 ppm beyond 3σ, against a Gaussian's 2,700. Nothing wanders.
+
+### The pitch-step threshold and the hold
+
+A voice at 0.44 fs (21.1 kHz at 48 kHz), held per 64 samples, 60 s:
+
+| Depth, rate | Largest change of increment / `bandLimitedPitchStep` | Changes that reach it |
+|---|---:|---:|
+| 1.5 cents, 0.5 Hz (default) | 0.10 | none |
+| 5 cents, 2 Hz | 1.29 | 2.2 per second |
+| 20 cents, 5 Hz | 15.2 | 583 per second |
+
+At the default depth every held step takes the unbanded path, even at the top of the range. Each crossing is an exact band-limited bend, at about 15 ns: 2.2 a second costs nothing measurable.
+
+The hold's sidebands on a sine (f ± 750k Hz, k = 1…4, relative to the carrier, 48 kHz):
+
+| Depth, rate | 1 kHz | 5 kHz | 21.1 kHz |
+|---|---:|---:|---:|
+| 1.5 cents, 0.5 Hz (default) | −116.1 dB | −102.1 dB | −89.6 dB |
+| 5 cents, 2 Hz | −95.1 dB | −80.8 dB | −68.2 dB |
+
+### What the oscillator adds
+
+A one-voice slot at fs / 10.5 (4.2 kHz at 44.1 kHz, so every alias falls halfway between two harmonics), against the same slot on the same held pitch path at 4× and decimated. The power below 20 kHz away from the harmonics (each masked by twice its peak deviation plus 20 Hz), relative to the fundamental:
+
+| Waveform | Drift | 1× | 4× reference | Excess (what the 1× oscillator adds) |
+|---|---|---:|---:|---:|
+| Saw | none | −101.5 dB | −101.5 dB | under 0 (within −120 dB) |
+| Saw | 1.5 cents, 0.5 Hz | −82.2 dB | −82.4 dB | −95.5 dB |
+| Saw | 5 cents, 2 Hz | −67.5 dB | −67.5 dB | −93.1 dB |
+| Triangle | none | −102.0 dB | −102.0 dB | −138.1 dB |
+| Triangle | 1.5 cents, 0.5 Hz | −84.2 dB | −84.2 dB | −106.4 dB |
+| Triangle | 5 cents, 2 Hz | −68.1 dB | −68.1 dB | −93.9 dB |
+
+- **With no drift the reference matches the oscillator** to within −120 dB, so the reference is valid. The −101.5 dB both share is common to the 1× and the 4× render, so it is not the 1× oscillator's aliasing (most likely the window's leakage around the strong harmonics).
+- **With drift, the power away from the harmonics rises by 20 to 35 dB, and the reference rises with it.** That is the pitch path's own content: the FM skirts and the hold's sidebands.
+- **What the oscillator adds is −95 dB at the default depth** (saw), the slow error of held steps below `bandLimitedPitchStep`. Split into frequency bands, it is broadband (−100 to −116 dB per 2 kHz band at the default depth), not concentrated at the alias positions. It is 20 dB below the −74 dB that the bend path allows smooth modulation ([oscillator-range.md](oscillator-range.md)).
+
+### CPU
+
+Nanoseconds per sample, 48 kHz, `relwithdebinfo`, `tools/bench.sh "[oscillators]"` ([baselines](../performance/baselines.md)). Saws at 110–880 Hz, Detune 0.2 st, Stereo 0.5, drift at the default:
+
+| | No drift (a note per block) | Drift held per 64 (default) | Drift added to a note per sample |
+|---|---:|---:|---:|
+| The generator alone | | 0.17 | 0.19 |
+| 1 slot, 1 voice | 2.99 | 3.50 (+17%) | 6.52 (+118%) |
+| 1 slot, 8 voices | 23.4 | 23.9 (+2%) | 35.4 (+51%) |
+| **A whole note: 4 slots × 8 voices** | **103.5** | **101.5 (within noise)** | **147.2 (+42%)** |
+
+- **Held, a whole note costs what it did.** The generator is 0.17 ns per sample, and each slot converts its note 8 times per 512 samples instead of once.
+- **A lone single-voice slot pays +17% held**: 8 calls of 64 samples instead of 1 of 512, for an oscillator that costs only 3 ns per sample.
+- **A note per sample costs 40–50% more**, for the `exp2` per sample per slot and the increment per unison voice. A voice that passes a note per sample for its glide or modulation pays that anyway; the drift adds 0.19 ns.
+- Every other oscillator row is within noise of the parent commit, measured in the same session.
 
 ## Tests
 
-Built in the next commit.
+[pitch_drift_test.cpp](../../tests/dsp/oscillators/pitch_drift_test.cpp) (`[drift]`), each tolerance derived in the test from the two-pole's statistics:
+
+- **Off.** Off by default. With drift off a note per sample is untouched bit for bit, `process()` makes one run at exactly +0, and turning it on and off again gives 0 once more. A slot rendered through the drift's runs with drift off equals one rendered without it, bit for bit, for all 8 waveforms with unison.
+- **Depth.** Over an hour at 44.1, 48, 96, and 192 kHz, depths 1.5 and 10 cents, corners 0.5 and 2 Hz: σ within 5% of the depth and the mean within 0.1σ (the estimates spread by 1.1% and 0.019σ). The depth scales the offsets and nothing else.
+- **Rate.** The autocorrelation at ωτ = 0.5, 1, 2, 4 is (1 + ωτ)e^(−ωτ), within 0.08 (the estimate spreads by 0.021), at every sample rate and both corners: the rate is in seconds.
+- **Spectrum.** Falls 39.5 dB from 4 to 40 times the corner (±2 dB), flat below it, half the variance below 0.442 times the corner and 1% above 3.37 times.
+- **Distribution.** Kurtosis 3 ± 0.3; over an hour the peak is between 3 and 6σ.
+- **Nothing accumulates.** Six hours: every hour's σ within 10% of the depth, every hour's mean within 0.1σ.
+- **Seeds.** The same seed gives the same offsets; 16 pairs of adjacent seeds differ, each |r| under 0.15 and the mean under 0.06 over 10 minutes.
+- **Note-ons.** 20,000 notes from silence start with σ within 3% of the depth and mean 0. A note-on while sounding changes nothing, bit for bit. From silence the grid restarts at the note-on. `reset()` restarts the sequence.
+- **The hold and blocks.** The offset changes only on the grid, whatever the blocks; a note per sample through `addTo()` is bit-identical in blocks of 1, 37, and 4096; a slot with 8 voices and drift is bit-identical in blocks of 1, 37, and 4096.
+- **Controls** clamp, NaN is safe, and the defaults are 1.5 cents and 0.5 Hz. **No subnormal** offsets at the smallest and largest depths and rates, at every sample rate; below the smallest depth it is exactly 0. **No allocation** in any call.
+- **A voice's oscillators drift together:** two slots of one voice, one inverted, cancel to float rounding under a 20-cent drift; two voices with adjacent seeds differ. **Noise** is unaffected, bit for bit.
+- **No aliasing beyond the pitch path's own:** a saw and a triangle at fs / 10.5, against the 4× reference above. Without drift the reference matches to 10⁻¹¹ of the fundamental; with drift the 1× render's excess stays under −90 dB at the default depth and −85 dB at 5 cents and 2 Hz (measured −95.5 and −93.1), and the excess at the alias positions is no larger than the excess overall.
+
+[oscillator_range_test.cpp](../../tests/dsp/oscillators/oscillator_range_test.cpp): **the slot stress test now runs with drift**, at 20 cents and 5 Hz (13 times the default depth and 10 times its rate), added per sample through `addTo()` and told of every note-on. It is finite, under the same bound, free of subnormals, and bit-identical in blocks of 1, 37, and 4096 at all four rates for all 8 waveforms.
+
+**Every new test was checked to fail first.** Against an inert stub with the same interface, 10 of the 19 drift tests failed; the other 9 pin behaviour the stub shares (off, Noise, blocks), and the breaks below check them. Then 16 deliberate breaks in `PitchDrift`, each caught, each restored:
+
+| Break | Tests that failed |
+|---|---|
+| off not special-cased (runs of 64 at 0) | off |
+| the depth scaled by 1.41 | depth; nothing accumulates; distribution; note-ons |
+| the update rate taken as the sample rate (no /64) | depth; rate; spectrum; distribution; accumulation; seeds |
+| the update rate fixed at 48 kHz / 64 | rate (at the other sample rates) |
+| a one-pole instead of the two-pole | depth; rate; spectrum; distribution; accumulation |
+| no leak on the second pole (a random walk) | depth; rate; spectrum; distribution; accumulation; seeds |
+| a note from silence starts at 0 | note-ons |
+| a note-on while sounding redraws | note-ons |
+| the grid not restarted at a note-on | note-ons |
+| the grid restarted at every `process()` | the hold and blocks; the slot with drift and blocks; the slot stress test (56 block-size comparisons) |
+| the seed ignored | seeds; voices drift apart; spectrum |
+| no minimum depth | no subnormals; controls |
+| a NaN rate not caught | controls |
+| a jitter of 0.5 cent on each held run | no aliasing beyond the pitch path's own; the hold and blocks; the slot with drift and blocks; depth scaling; spectrum |
+| an allocation at a note-on | no allocation |
+
+The Noise test and the oscillators-cancel half of the voice test check the composition (the slot ignores the note for Noise; one drift drives a voice's slots), which no break in `PitchDrift` can change.
+
+The first version of the aliasing test compared the strongest line away from the harmonics with and without drift, and failed at −78 dB: the drift's FM skirt, which a fixed mask did not cover. Measured by bands it was the pitch path's own content. Hence the 4× reference.
 
 ## References
 

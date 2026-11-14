@@ -1,36 +1,35 @@
-// The drift report: candidate models of analog oscillator drift, prototyped
-// in drift_candidates.hpp and measured to choose one
-// (docs/dsp/oscillator-drift.md). For each model, at the same standard
-// deviation:
+// The drift report: PitchDrift (docs/dsp/oscillator-drift.md), as built.
 //
-// - the spectrum of the pitch deviation (the frequencies below which half
-//   and 99% of its variance lie, its level at decades around its rate, and
-//   what lies above 20 Hz, where pitch movement is heard as roughness rather
-//   than drift) and its distribution (peak and kurtosis);
-// - how independent two voices' streams are, from adjacent seeds;
-// - how it meets the oscillator's band-limited pitch-step threshold
-//   (bandLimitedPitchStep), updated every sample or at a control rate, held
-//   or interpolated, at the top of the range where an increment is largest.
+// - Its statistics at every sample rate: standard deviation, peak, kurtosis,
+//   where its variance lies in frequency, and what lies above 20 Hz.
+// - Note-ons from silence: the distribution of the starting values.
+// - Independence of voices seeded from adjacent seeds.
+// - The pitch-step threshold (bandLimitedPitchStep) at the top of the range.
+// - The hold's sidebands on a sine.
+// - Against a 4x-oversampled render of the same pitch path: what the 1x
+//   oscillator adds with drift (the bend path's slow error) and without.
 //
 // Hidden from the default run; run it in an optimised build (about 10 s):
 //
 //   cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[drift-report]"
 //
-// Ten hours of each model, checking that nothing wanders, is a separate
-// hidden case (about a minute):
+// Ten hours, checking that nothing wanders, is a separate hidden case:
 //
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[drift-long-report]"
 //
-// CPU: the "[drift]" benchmarks (tools/bench.sh "[drift]").
+// The six candidate models this was chosen from are measured by this report
+// at commit 264f362. CPU: tools/bench.sh "[drift]".
 
-#include "drift_candidates.hpp"
-#include "oscillator_support.hpp"
+#include "range_support.hpp"
 
 #include <anoesis/dsp/math/pitch.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>
+#include <anoesis/dsp/oscillators/pitch_drift.hpp>
+#include <anoesis/dsp/resampling/oversampler.hpp>
 
+#include <anoesis/test/buffer.hpp>
 #include <anoesis/test/spectrum.hpp>
 #include <anoesis/test/window.hpp>
 
@@ -42,22 +41,23 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <numbers>
 #include <span>
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace anoesis::test;
-using namespace anoesis::test::drift;
+using namespace anoesis::test::d6;
+using namespace anoesis::test::range;
+using anoesis::dsp::PitchDrift;
 
 namespace
 {
 
-constexpr double sampleRate = 48000.0;
-constexpr std::size_t controlInterval = 64;
-constexpr double controlHz = sampleRate / static_cast<double>(controlInterval); // 750 Hz
-constexpr double referenceRate = 0.5;                                           // Hz
+constexpr std::size_t interval = PitchDrift::updateInterval;
 constexpr std::uint64_t seed = 0x5EED;
 
 std::string fixed(double x, int digits)
@@ -67,7 +67,6 @@ std::string fixed(double x, int digits)
     return s.str();
 }
 
-// Streaming moments and peak.
 struct Moments
 {
     double n = 0.0;
@@ -90,397 +89,361 @@ struct Moments
         return sum / n;
     }
 
-    [[nodiscard]] double variance() const noexcept
+    [[nodiscard]] double sigma() const noexcept
     {
-        return (sum2 / n) - (mean() * mean());
+        return std::sqrt((sum2 / n) - (mean() * mean()));
     }
 
     [[nodiscard]] double kurtosis() const noexcept
     {
-        // About zero: every model is zero-mean by construction.
         return (sum4 / n) / ((sum2 / n) * (sum2 / n));
     }
 };
 
-template <typename Model>
-std::vector<float> renderControl(double seconds, double sigma, std::uint64_t modelSeed)
+PitchDrift preparedDrift(double sampleRate, float cents, float hz, std::uint64_t driftSeed = seed)
 {
-    Model model{{.sigmaCents = sigma, .rateHz = referenceRate, .updateHz = controlHz}, modelSeed};
-    std::vector<float> x(static_cast<std::size_t>(seconds * controlHz));
-    for (auto& v : x)
-    {
-        v = model.next();
-    }
-    return x;
+    PitchDrift drift{driftSeed};
+    drift.prepare({.sampleRate = static_cast<float>(sampleRate), .maxBlockSize = 512, .numChannels = 1});
+    drift.setDepthCents(cents);
+    drift.setRateHz(hz);
+    drift.noteOn();
+    return drift;
 }
 
-// One model's row of the statistics table: one hour at the control rate.
-template <typename Model>
+// One value per update, in cents.
+std::vector<float> updates(PitchDrift& drift, double seconds, double sampleRate)
+{
+    std::vector<float> cents;
+    drift.process(static_cast<std::size_t>(seconds * sampleRate),
+                  [&](std::size_t, std::size_t, float semitones) { cents.push_back(100.0f * semitones); });
+    return cents;
+}
+
 void reportStatistics(std::ostringstream& out)
 {
-    constexpr double sigma = 1.0;
-    const auto x = renderControl<Model>(3600.0, sigma, seed);
-    Moments m;
-    for (const float v : x)
+    out << "\n## Statistics at every sample rate\n\n"
+        << "Default depth and rate (sigma 1.5 cents, corner 0.5 Hz), one hour of updates (every 64 samples). Half "
+           "and 99% of the variance lie below f50 and f99 (theory: 0.221 and 1.69 Hz). Density: the PSD at "
+           "0.05 / 0.5 / 5 / 50 Hz relative to 0.05 Hz (theory: 0 / -6.0 / -40.0 / -80.0 dB).\n\n"
+        << "| Rate | Update rate | sigma (cents) | mean | peak | kurtosis | f50 (Hz) | f99 (Hz) | density (dB) | "
+           "above 20 Hz |\n|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|\n";
+    for (const double sampleRate : rates)
     {
-        m.add(v);
+        const double updateHz = sampleRate / static_cast<double>(interval);
+        auto drift = preparedDrift(sampleRate, PitchDrift::defaultDepthCents, PitchDrift::defaultRateHz);
+        const auto x = updates(drift, 3600.0, sampleRate);
+        Moments m;
+        for (const float v : x)
+        {
+            m.add(v);
+        }
+        const auto spectrum = averagedPowerSpectrum(x, updateHz, hannWindow(1U << 16U));
+        double total = 0.0;
+        for (std::size_t k = 1; k < spectrum.power.size(); ++k)
+        {
+            total += spectrum.power[k];
+        }
+        double cumulative = 0.0;
+        double f50 = 0.0;
+        double f99 = 0.0;
+        double above20 = 0.0;
+        for (std::size_t k = 1; k < spectrum.power.size(); ++k)
+        {
+            cumulative += spectrum.power[k];
+            const double f = spectrum.frequencyOf(k);
+            f50 = (f50 <= 0.0 && cumulative >= 0.5 * total) ? f : f50;
+            f99 = (f99 <= 0.0 && cumulative >= 0.99 * total) ? f : f99;
+            above20 += f > 20.0 ? spectrum.power[k] : 0.0;
+        }
+        const auto density = [&](double f)
+        {
+            const auto lo = spectrum.nearestBin(f * 0.9);
+            const auto hi = std::max(spectrum.nearestBin(f * 1.1), lo + 1);
+            double sum = 0.0;
+            for (std::size_t k = lo; k < hi; ++k)
+            {
+                sum += spectrum.power[k];
+            }
+            return sum / static_cast<double>(hi - lo);
+        };
+        const double reference = density(0.05);
+        const auto relative = [&](double f)
+        {
+            return fixed(10.0 * std::log10(density(f) / reference), 1);
+        };
+        out << "| " << sampleRate / 1000.0 << " kHz | " << fixed(updateHz, 1) << " Hz | " << fixed(m.sigma(), 3)
+            << " | " << fixed(m.mean(), 3) << " | " << fixed(m.peak, 2) << " | " << fixed(m.kurtosis(), 2) << " | "
+            << fixed(f50, 3) << " | " << fixed(f99, 2) << " | 0 / " << relative(0.5) << " / " << relative(5.0) << " / "
+            << relative(50.0) << " | " << fixed(10.0 * std::log10(above20 / total), 1) << " dB |\n";
     }
-
-    const auto spectrum = averagedPowerSpectrum(x, controlHz, hannWindow(1U << 16U));
-    double total = 0.0;
-    for (std::size_t k = 1; k < spectrum.power.size(); ++k)
-    {
-        total += spectrum.power[k];
-    }
-    double cumulative = 0.0;
-    double f50 = 0.0;
-    double f99 = 0.0;
-    double above20 = 0.0;
-    for (std::size_t k = 1; k < spectrum.power.size(); ++k)
-    {
-        cumulative += spectrum.power[k];
-        if (f50 <= 0.0 && cumulative >= 0.5 * total)
-        {
-            f50 = spectrum.frequencyOf(k);
-        }
-        if (f99 <= 0.0 && cumulative >= 0.99 * total)
-        {
-            f99 = spectrum.frequencyOf(k);
-        }
-        if (spectrum.frequencyOf(k) > 20.0)
-        {
-            above20 += spectrum.power[k];
-        }
-    }
-    // Power spectral density around f (+-10%), relative to that at rate / 10.
-    const auto density = [&](double f)
-    {
-        const auto lo = spectrum.nearestBin(f * 0.9);
-        const auto hi = std::max(spectrum.nearestBin(f * 1.1), lo + 1);
-        double sum = 0.0;
-        for (std::size_t k = lo; k < hi; ++k)
-        {
-            sum += spectrum.power[k];
-        }
-        return sum / static_cast<double>(hi - lo);
-    };
-    const double reference = density(referenceRate / 10.0);
-    const auto relative = [&](double f)
-    {
-        return fixed(10.0 * std::log10(density(f) / reference), 1);
-    };
-    out << "| " << Model::name << " | " << fixed(std::sqrt(m.variance()), 3) << " | " << fixed(m.peak, 2) << " | "
-        << fixed(m.kurtosis(), 2) << " | " << fixed(f50, 3) << " | " << fixed(f99, 2) << " | 0 / "
-        << relative(referenceRate) << " / " << relative(referenceRate * 10.0) << " / "
-        << relative(referenceRate * 100.0) << " | "
-        << (above20 > 0.0 ? fixed(10.0 * std::log10(above20 / total), 1) : std::string{"none"}) << " |\n";
 }
 
-void reportStatisticsTable(std::ostringstream& out)
+void reportNoteOns(std::ostringstream& out)
 {
-    out << "\n## Spectrum and distribution\n\n"
-        << "sigma 1 cent, rate " << referenceRate << " Hz, updated at " << controlHz
-        << " Hz (48 kHz / 64), one hour. f50 / f99: the frequencies below which 50% / 99% of the variance lies. "
-           "Density: the PSD at rate x 0.1 / 1 / 10 / 100, in dB relative to rate x 0.1.\n\n"
-        << "| Model | sigma (cents) | peak (cents) | kurtosis | f50 (Hz) | f99 (Hz) | density (dB) | above 20 Hz "
-           "(dB re total) |\n"
-        << "|---|---:|---:|---:|---:|---:|---|---:|\n";
-    reportStatistics<OnePole>(out);
-    reportStatistics<TwoPole>(out);
-    reportStatistics<SampleHold<false>>(out);
-    reportStatistics<SampleHold<true>>(out);
-    reportStatistics<SumOfSines>(out);
-    reportStatistics<Pink<8>>(out);
-
-    // A static offset per note has no spectrum within a note; across notes
-    // it is uniform.
-    Static model{{.sigmaCents = 1.0, .rateHz = referenceRate, .updateHz = controlHz}, seed};
+    auto drift = preparedDrift(48000.0, PitchDrift::defaultDepthCents, PitchDrift::defaultRateHz);
     Moments m;
     for (int note = 0; note < 100000; ++note)
     {
-        model.start();
-        m.add(model.next());
+        drift.stop();
+        drift.noteOn();
+        m.add(100.0 * drift.offset());
+        drift.advance(interval * 7);
     }
-    out << "| " << Static::name << " (100,000 notes) | " << fixed(std::sqrt(m.variance()), 3) << " | "
-        << fixed(m.peak, 2) << " | " << fixed(m.kurtosis(), 2) << " | 0 | 0 | | none |\n";
+    out << "\n## Note-ons from silence\n\n"
+        << "100,000 notes, each started from silence: the starting offset (cents), sigma " << fixed(m.sigma(), 3)
+        << ", mean " << fixed(m.mean(), 4) << ", peak " << fixed(m.peak, 2) << ", kurtosis " << fixed(m.kurtosis(), 2)
+        << " (a Gaussian: 3; the draw is a sum of four uniforms, bounded at 3.46 sigma).\n";
 }
 
-// Two streams from adjacent seeds: their correlation, over 64 pairs of ten
-// minutes each.
-template <typename Model>
 void reportIndependence(std::ostringstream& out)
 {
     double sumAbs = 0.0;
     double worst = 0.0;
-    for (std::uint64_t pair = 0; pair < 64; ++pair)
+    constexpr int pairs = 64;
+    for (std::uint64_t voice = 0; voice < pairs; ++voice)
     {
-        const auto a = renderControl<Model>(600.0, 1.0, seed + (2 * pair));
-        const auto b = renderControl<Model>(600.0, 1.0, seed + (2 * pair) + 1);
-        double ab = 0.0;
-        double aa = 0.0;
-        double bb = 0.0;
-        for (std::size_t i = 0; i < a.size(); ++i)
+        auto a = preparedDrift(48000.0, 1.0f, 0.5f, seed + voice);
+        auto b = preparedDrift(48000.0, 1.0f, 0.5f, seed + voice + 1);
+        const auto x = updates(a, 600.0, 48000.0);
+        const auto y = updates(b, 600.0, 48000.0);
+        double xy = 0.0;
+        double xx = 0.0;
+        double yy = 0.0;
+        for (std::size_t i = 0; i < x.size(); ++i)
         {
-            ab += static_cast<double>(a[i]) * b[i];
-            aa += static_cast<double>(a[i]) * a[i];
-            bb += static_cast<double>(b[i]) * b[i];
+            xy += static_cast<double>(x[i]) * y[i];
+            xx += static_cast<double>(x[i]) * x[i];
+            yy += static_cast<double>(y[i]) * y[i];
         }
-        const double r = ab / std::sqrt(aa * bb);
-        sumAbs += std::abs(r);
-        worst = std::max(worst, std::abs(r));
+        const double r = std::abs(xy / std::sqrt(xx * yy));
+        sumAbs += r;
+        worst = std::max(worst, r);
     }
-    out << "| " << Model::name << " | " << fixed(sumAbs / 64.0, 4) << " | " << fixed(worst, 4) << " |\n";
-}
-
-void reportIndependenceTable(std::ostringstream& out)
-{
     out << "\n## Independence of voices\n\n"
-        << "Streams from seeds n and n + 1 (Random seeds through SplitMix64), 64 pairs of 10 minutes at the control "
-           "rate: |correlation|.\n\n"
-        << "| Model | mean | worst |\n|---|---:|---:|\n";
-    reportIndependence<OnePole>(out);
-    reportIndependence<TwoPole>(out);
-    reportIndependence<SampleHold<false>>(out);
-    reportIndependence<SampleHold<true>>(out);
-    reportIndependence<SumOfSines>(out);
-    reportIndependence<Pink<8>>(out);
+        << pairs << " pairs of voices seeded n and n + 1, 10 minutes each: mean |r| " << fixed(sumAbs / pairs, 4)
+        << ", worst " << fixed(worst, 4) << " (independent streams: about 0.029 and 0.11).\n";
 }
 
-// The increments a voice at `note` would get, sample by sample, with the
-// drift added to the note in float (as a voice would pass it), and how they
-// meet bandLimitedPitchStep.
-struct StepResult
+void reportSteps(std::ostringstream& out)
 {
-    double worstRatio = 0.0; // largest |change of increment| / bandLimitedPitchStep
-    double crossingsPerSecond = 0.0;
-};
-
-template <typename Next>
-StepResult measureSteps(float note, double seconds, Next next)
-{
-    const auto samples = static_cast<std::size_t>(seconds * sampleRate);
-    const auto rate = static_cast<float>(sampleRate);
-    std::uint32_t previous = anoesis::dsp::incrementFor(anoesis::dsp::noteToFrequency(note + (next() * 0.01f)), rate);
-    double worst = 0.0;
-    std::size_t crossings = 0;
-    for (std::size_t i = 1; i < samples; ++i)
-    {
-        const auto increment = anoesis::dsp::incrementFor(anoesis::dsp::noteToFrequency(note + (next() * 0.01f)), rate);
-        const auto change = increment > previous ? increment - previous : previous - increment;
-        worst = std::max(worst, static_cast<double>(change));
-        if (change >= anoesis::dsp::bandLimitedPitchStep)
-        {
-            ++crossings;
-        }
-        previous = increment;
-    }
-    return {
-        .worstRatio = worst / static_cast<double>(anoesis::dsp::bandLimitedPitchStep),
-        .crossingsPerSecond = static_cast<double>(crossings) / seconds,
-    };
-}
-
-template <typename Model>
-void reportStepsFor(std::ostringstream& out, double sigma, double rateHz)
-{
-    // 0.44 fs: just below the Nyquist fade, where a relative pitch change
-    // makes the largest change of increment.
+    constexpr double sampleRate = 48000.0;
     const float note = anoesis::dsp::frequencyToNote(static_cast<float>(0.44 * sampleRate));
-    constexpr double seconds = 60.0;
-    std::string cells;
-    const auto cell = [](const StepResult& r)
+    out << "\n## Against the pitch-step threshold\n\n"
+        << "A voice at 0.44 fs (21.1 kHz at 48 kHz) with the drift added to its note, held per 64 samples, 60 s: the "
+           "largest change of increment in units of bandLimitedPitchStep, and how many changes per second reach "
+           "it.\n\n| Depth, rate | Largest change | Crossings |\n|---|---:|---:|\n";
+    for (const auto& [cents, hz] : {std::pair{1.5f, 0.5f}, std::pair{5.0f, 2.0f}, std::pair{20.0f, 5.0f}})
     {
-        return fixed(r.worstRatio, 4) + " (" + fixed(r.crossingsPerSecond, 1) + "/s)";
-    };
-    {
-        Model model{{.sigmaCents = sigma, .rateHz = rateHz, .updateHz = sampleRate}, seed};
-        cells += cell(measureSteps(note, seconds, [&] { return model.next(); })) + " | ";
-    }
-    for (const auto how : {Interpolation::hold, Interpolation::linear})
-    {
-        ControlRate<Model> model{
-            Model{{.sigmaCents = sigma, .rateHz = rateHz, .updateHz = controlHz}, seed},
-            controlInterval,
-            how,
-        };
-        cells += cell(measureSteps(note, seconds, [&] { return model.next(); })) + " | ";
-    }
-    out << "| " << Model::name << " | " << cells << "\n";
-}
-
-void reportStepsTable(std::ostringstream& out)
-{
-    for (const auto& [sigma, rateHz, label] : {
-             std::tuple{1.5, 0.5, "1.5 cents, 0.5 Hz"},
-             std::tuple{5.0, 2.0, "5 cents, 2 Hz"},
-             std::tuple{20.0, 5.0, "20 cents, 5 Hz (stress)"},
-         })
-    {
-        out << "\n## Against the pitch-step threshold: sigma " << label << "\n\n"
-            << "A voice at 0.44 fs (21.1 kHz at 48 kHz), its drift added to its note in float, 60 s. The largest "
-               "change of increment between samples, in units of bandLimitedPitchStep (2^18), and (in brackets) "
-               "how many changes per second reach it, each of which adds a band-limited bend (about 15 ns).\n\n"
-            << "| Model | every sample | control rate (64), held | control rate (64), linear |\n"
-            << "|---|---:|---:|---:|\n";
-        reportStepsFor<OnePole>(out, sigma, rateHz);
-        reportStepsFor<TwoPole>(out, sigma, rateHz);
-        reportStepsFor<SampleHold<false>>(out, sigma, rateHz);
-        reportStepsFor<SampleHold<true>>(out, sigma, rateHz);
-        reportStepsFor<SumOfSines>(out, sigma, rateHz);
-        reportStepsFor<Pink<8>>(out, sigma, rateHz);
+        auto drift = preparedDrift(sampleRate, cents, hz);
+        std::uint32_t previous = 0;
+        bool first = true;
+        double worst = 0.0;
+        std::size_t crossings = 0;
+        drift.process(static_cast<std::size_t>(60.0 * sampleRate),
+                      [&](std::size_t, std::size_t, float semitones)
+                      {
+                          const auto increment = anoesis::dsp::incrementFor(
+                              anoesis::dsp::noteToFrequency(note + semitones), static_cast<float>(sampleRate));
+                          if (!first)
+                          {
+                              const auto change = increment > previous ? increment - previous : previous - increment;
+                              worst = std::max(worst, static_cast<double>(change));
+                              crossings += change >= anoesis::dsp::bandLimitedPitchStep ? 1U : 0U;
+                          }
+                          first = false;
+                          previous = increment;
+                      });
+        out << "| " << cents << " cents, " << hz << " Hz | "
+            << fixed(worst / static_cast<double>(anoesis::dsp::bandLimitedPitchStep), 3) << " | "
+            << fixed(static_cast<double>(crossings) / 60.0, 1) << "/s |\n";
     }
 }
 
-// A drift held for each 64 samples is a staircase in pitch, which modulates
-// every partial at the control rate (750 Hz): sidebands at f +- 750 k Hz.
-// Measured on a sine, the sidebands' power (k = 1..4, both sides) relative
-// to the carrier's, held against interpolated linearly.
-template <typename Model>
-double staircaseSidebands(double sigma, double rateHz, double hz, Interpolation how)
+void reportSidebands(std::ostringstream& out)
 {
+    constexpr double sampleRate = 48000.0;
     constexpr std::size_t length = 1U << 18U;
-    anoesis::dsp::MinBlepOscillator<anoesis::dsp::minBlepTaps> osc{d6::minBlepTable64()};
-    osc.prepare({.sampleRate = static_cast<float>(sampleRate), .maxBlockSize = length, .numChannels = 1});
-    osc.setWaveform(anoesis::dsp::Waveform::sine);
-    ControlRate<Model> drift{
-        Model{{.sigmaCents = sigma, .rateHz = rateHz, .updateHz = controlHz}, seed},
-        controlInterval,
-        how,
-    };
-    const float note = anoesis::dsp::frequencyToNote(static_cast<float>(hz));
-    std::vector<float> x(length + 4096);
-    for (auto& v : x)
+    out << "\n## The hold's sidebands\n\n"
+        << "A sine through a one-voice slot, its note plus the drift (held per 64 samples, 750 Hz), 2^18 samples at "
+           "48 kHz: the power at f +- 750 k Hz (k = 1..4) relative to the carrier.\n\n"
+        << "| Depth, rate | 1 kHz | 5 kHz | 21.1 kHz |\n|---|---:|---:|---:|\n";
+    for (const auto& [cents, hz] : {std::pair{1.5f, 0.5f}, std::pair{5.0f, 2.0f}})
     {
-        osc.setFrequency(anoesis::dsp::noteToFrequency(note + (drift.next() * 0.01f)));
-        v = osc.next();
-    }
-    const auto spectrum = powerSpectrum(std::span{x}.subspan(4096, length), sampleRate, blackmanHarrisWindow(length));
-    // Wide enough to hold the carrier as the drift moves it (5 sigma).
-    const auto halfWidth =
-        static_cast<std::size_t>(std::ceil(((hz * 5.0 * sigma * 5.8e-4) + 20.0) / spectrum.binWidth()));
-    const double carrier = spectrum.powerAround(hz, halfWidth);
-    double sidebands = 0.0;
-    for (int k = 1; k <= 4; ++k)
-    {
-        for (const double side : {-1.0, 1.0})
+        out << "| " << cents << " cents, " << hz << " Hz";
+        for (const double carrierHz : {1000.0, 5000.0, 0.44 * sampleRate})
         {
-            const double f = hz + (side * controlHz * k);
-            if (f > 0.0 && f < sampleRate / 2.0)
+            auto slot = preparedSlot(Waveform::sine, 1, sampleRate);
+            slot.setPan(-1.0f);
+            slot.noteOn();
+            auto drift = preparedDrift(sampleRate, cents, hz);
+            const auto note = static_cast<float>(noteOf(carrierHz));
+            Buffer buffer{2, length + 4096};
+            drift.process(length + 4096, [&](std::size_t start, std::size_t run, float semitones)
+                          { slot.process(buffer.block().subBlock(start, run), note + semitones); });
+            const auto spectrum = powerSpectrum(std::span{buffer.channel(0)}.subspan(4096, length), sampleRate,
+                                                blackmanHarrisWindow(length));
+            const auto halfWidth = static_cast<std::size_t>(
+                std::ceil(((carrierHz * 5.0 * static_cast<double>(cents) * 5.8e-4) + 20.0) / spectrum.binWidth()));
+            const double carrier = spectrum.powerAround(carrierHz, halfWidth);
+            double sidebands = 0.0;
+            for (int k = 1; k <= 4; ++k)
             {
-                sidebands += spectrum.powerAround(f, halfWidth);
+                for (const double side : {-1.0, 1.0})
+                {
+                    const double f = carrierHz + (side * 750.0 * k);
+                    sidebands += (f > 0.0 && f < sampleRate / 2.0) ? spectrum.powerAround(f, halfWidth) : 0.0;
+                }
             }
+            out << " | " << fixed(10.0 * std::log10(sidebands / carrier), 1) << " dB";
+        }
+        out << " |\n";
+    }
+}
+
+// Power away from the harmonics of f0 (each masked by twice its peak
+// deviation plus 20 Hz), relative to the fundamental's.
+double powerAwayFromHarmonics(std::span<const float> x, double f0, double sampleRate, double peakCents)
+{
+    const auto spectrum = powerSpectrum(x, sampleRate, blackmanHarrisWindow(x.size()));
+    const double lobeHz = static_cast<double>(spectrum.mainLobeBins + 1) * spectrum.binWidth();
+    double outside = 0.0;
+    double fundamental = 0.0;
+    for (std::size_t k = 1; k < spectrum.power.size(); ++k)
+    {
+        const double f = spectrum.frequencyOf(k);
+        if (f >= 20000.0)
+        {
+            break;
+        }
+        const double harmonic = std::max(std::round(f / f0), 1.0) * f0;
+        const double width = (2.0 * harmonic * peakCents * std::numbers::ln2 / 1200.0) + 20.0 + lobeHz;
+        outside += (std::abs(f - harmonic) > width && f > lobeHz) ? spectrum.power[k] : 0.0;
+        fundamental += std::abs(f - f0) <= width ? spectrum.power[k] : 0.0;
+    }
+    return outside / fundamental;
+}
+
+void reportAgainstOversampled(std::ostringstream& out)
+{
+    constexpr double sampleRate = 44100.0;
+    constexpr double f0 = sampleRate / 10.5;
+    constexpr std::size_t block = 512;
+    constexpr std::size_t warmup = 16 * block;
+    constexpr std::size_t length = 1U << 16U;
+    const auto note = static_cast<float>(noteOf(f0));
+    out << "\n## Against a 4x-oversampled render of the same pitch path\n\n"
+        << "A one-voice slot at fs / 10.5 (4.2 kHz at 44.1 kHz), and the same slot on the same held pitch path at "
+           "4x, decimated by the library's Oversampler. Away from the harmonics (masked by twice their peak "
+           "deviation plus 20 Hz), below 20 kHz, relative to the fundamental: the 1x render's power, and its "
+           "excess over the 4x reference (what the 1x oscillator adds).\n\n"
+        << "| Waveform | Drift | 1x | 4x reference | Excess |\n|---|---|---:|---:|---:|\n";
+    for (const auto shape : {Waveform::saw, Waveform::triangle})
+    {
+        for (const auto& [cents, hz] : {std::pair{0.0f, 0.5f}, std::pair{1.5f, 0.5f}, std::pair{5.0f, 2.0f}})
+        {
+            auto base = preparedSlot(shape, 1, sampleRate);
+            auto fast = preparedSlot(shape, 1, 4.0 * sampleRate);
+            anoesis::dsp::Oversampler oversampler{anoesis::dsp::OversamplingFactor::four};
+            oversampler.prepare(
+                {.sampleRate = static_cast<float>(sampleRate), .maxBlockSize = block, .numChannels = 2});
+            for (auto* slot : {&base, &fast})
+            {
+                slot->setPan(-1.0f);
+                slot->noteOn();
+            }
+            auto drift = preparedDrift(sampleRate, cents, hz, 5);
+            Buffer one{2, warmup + length};
+            Buffer four{2, warmup + length};
+            double peak = 0.0;
+            for (std::size_t start = 0; start < warmup + length; start += block)
+            {
+                Buffer silent{2, block};
+                const auto inner = oversampler.upsample(silent.block());
+                drift.process(block,
+                              [&](std::size_t from, std::size_t run, float semitones)
+                              {
+                                  peak = std::max(peak, std::abs(100.0 * static_cast<double>(semitones)));
+                                  base.process(one.block().subBlock(start + from, run), note + semitones);
+                                  fast.process(inner.subBlock(4 * from, 4 * run), note + semitones);
+                              });
+                oversampler.downsample(four.block().subBlock(start, block));
+            }
+            // Masks as for the drift at that depth, so with and without
+            // compare like with like.
+            const double maskCents = cents > 0.0f ? peak : 0.0;
+            const double p1 =
+                powerAwayFromHarmonics(std::span{one.channel(0)}.subspan(warmup), f0, sampleRate, maskCents);
+            const double p4 =
+                powerAwayFromHarmonics(std::span{four.channel(0)}.subspan(warmup), f0, sampleRate, maskCents);
+            const double excess = p1 - p4;
+            out << "| " << shapeName(shape) << " | "
+                << (cents > 0.0f ? fixed(cents, 1) + " cents, " + fixed(hz, 1) + " Hz" : std::string{"none"}) << " | "
+                << fixed(10.0 * std::log10(p1), 1) << " dB | " << fixed(10.0 * std::log10(p4), 1) << " dB | "
+                << (excess > 0.0 ? fixed(10.0 * std::log10(excess), 1) + " dB" : std::string{"< 0"}) << " |\n";
         }
     }
-    return 10.0 * std::log10(sidebands / carrier);
-}
-
-template <typename Model>
-void reportStaircaseFor(std::ostringstream& out, double sigma, double rateHz)
-{
-    out << "| " << Model::name;
-    for (const double hz : {1000.0, 5000.0, 0.44 * sampleRate})
-    {
-        out << " | " << fixed(staircaseSidebands<Model>(sigma, rateHz, hz, Interpolation::hold), 1) << " / "
-            << fixed(staircaseSidebands<Model>(sigma, rateHz, hz, Interpolation::linear), 1);
-    }
-    out << " |\n";
-}
-
-void reportStaircaseTable(std::ostringstream& out)
-{
-    for (const auto& [sigma, rateHz, label] :
-         {std::tuple{1.5, 0.5, "1.5 cents, 0.5 Hz"}, std::tuple{5.0, 2.0, "5 cents, 2 Hz"}})
-    {
-        out << "\n## Holding the drift for 64 samples: sidebands at the control rate, sigma " << label << "\n\n"
-            << "A sine with the drift updated every 64 samples (750 Hz), 2^18 samples at 48 kHz. The power at f +- "
-               "750 k Hz (k = 1..4) relative to the carrier, in dB: held / interpolated linearly.\n\n"
-            << "| Model | 1 kHz | 5 kHz | 21.1 kHz (0.44 fs) |\n|---|---:|---:|---:|\n";
-        reportStaircaseFor<OnePole>(out, sigma, rateHz);
-        reportStaircaseFor<TwoPole>(out, sigma, rateHz);
-        reportStaircaseFor<SampleHold<false>>(out, sigma, rateHz);
-        reportStaircaseFor<SampleHold<true>>(out, sigma, rateHz);
-        reportStaircaseFor<SumOfSines>(out, sigma, rateHz);
-        reportStaircaseFor<Pink<8>>(out, sigma, rateHz);
-    }
-}
-
-// Ten hours at the control rate, streamed: the peak, and the spread of
-// one-minute means and standard deviations, first hour against last.
-template <typename Model>
-void reportLong(std::ostringstream& out)
-{
-    constexpr double sigma = 1.0;
-    constexpr double hours = 10.0;
-    Model model{{.sigmaCents = sigma, .rateHz = referenceRate, .updateHz = controlHz}, seed};
-    const auto perMinute = static_cast<std::size_t>(60.0 * controlHz);
-    const auto minutes = static_cast<std::size_t>(hours * 60.0);
-    Moments all;
-    Moments firstHour;
-    Moments lastHour;
-    double worstMinuteMean = 0.0;
-    double minMinuteSigma = 1e9;
-    double maxMinuteSigma = 0.0;
-    std::size_t beyond3 = 0;
-    for (std::size_t minute = 0; minute < minutes; ++minute)
-    {
-        Moments m;
-        for (std::size_t i = 0; i < perMinute; ++i)
-        {
-            const double x = model.next();
-            m.add(x);
-            all.add(x);
-            if (minute < 60)
-            {
-                firstHour.add(x);
-            }
-            if (minute >= minutes - 60)
-            {
-                lastHour.add(x);
-            }
-            if (std::abs(x) > 3.0 * sigma)
-            {
-                ++beyond3;
-            }
-        }
-        worstMinuteMean = std::max(worstMinuteMean, std::abs(m.mean()));
-        minMinuteSigma = std::min(minMinuteSigma, std::sqrt(m.variance()));
-        maxMinuteSigma = std::max(maxMinuteSigma, std::sqrt(m.variance()));
-    }
-    out << "| " << Model::name << " | " << fixed(all.peak, 2) << " | " << fixed(std::sqrt(firstHour.variance()), 3)
-        << " / " << fixed(std::sqrt(lastHour.variance()), 3) << " | " << fixed(firstHour.mean(), 3) << " / "
-        << fixed(lastHour.mean(), 3) << " | " << fixed(worstMinuteMean, 3) << " | " << fixed(minMinuteSigma, 2) << "-"
-        << fixed(maxMinuteSigma, 2) << " | " << fixed(1e6 * static_cast<double>(beyond3) / all.n, 1) << " |\n";
 }
 
 } // namespace
 
-TEST_CASE("Drift report: candidate models of oscillator drift", "[.][drift-report]")
+TEST_CASE("Drift report: PitchDrift as built", "[.][drift-report]")
 {
     std::ostringstream out;
     out << "# Drift report\n";
-    reportStatisticsTable(out);
-    reportIndependenceTable(out);
-    reportStepsTable(out);
-    reportStaircaseTable(out);
+    reportStatistics(out);
+    reportNoteOns(out);
+    reportIndependence(out);
+    reportSteps(out);
+    reportSidebands(out);
+    reportAgainstOversampled(out);
     std::cout << out.str() << std::flush;
     SUCCEED();
 }
 
-TEST_CASE("Drift report: ten hours of each model", "[.][drift-long-report]")
+TEST_CASE("Drift report: ten hours", "[.][drift-long-report]")
 {
+    constexpr double sampleRate = 48000.0;
+    auto drift = preparedDrift(sampleRate, 1.0f, PitchDrift::defaultRateHz);
+    const auto perMinute = static_cast<std::size_t>(60.0 * sampleRate);
+    constexpr std::size_t minutes = 600;
+    Moments all;
+    Moments firstHour;
+    Moments lastHour;
+    double worstMinuteMean = 0.0;
+    double minSigma = 1e9;
+    double maxSigma = 0.0;
+    double beyond3 = 0.0;
+    for (std::size_t minute = 0; minute < minutes; ++minute)
+    {
+        Moments m;
+        drift.process(perMinute,
+                      [&](std::size_t, std::size_t, float semitones)
+                      {
+                          const double x = 100.0 * static_cast<double>(semitones);
+                          m.add(x);
+                          all.add(x);
+                          if (minute < 60)
+                          {
+                              firstHour.add(x);
+                          }
+                          if (minute >= minutes - 60)
+                          {
+                              lastHour.add(x);
+                          }
+                          beyond3 += std::abs(x) > 3.0 ? 1.0 : 0.0;
+                      });
+        worstMinuteMean = std::max(worstMinuteMean, std::abs(m.mean()));
+        minSigma = std::min(minSigma, m.sigma());
+        maxSigma = std::max(maxSigma, m.sigma());
+    }
     std::ostringstream out;
     out << "\n## Ten hours\n\n"
-        << "sigma 1 cent, rate " << referenceRate << " Hz, at " << controlHz << " Hz. Per minute: the mean and the "
-        << "standard deviation of each one-minute window.\n\n"
-        << "| Model | peak (cents) | sigma, first / last hour | mean, first / last hour | worst minute mean | "
-           "minute sigma range | beyond 3 sigma (ppm) |\n"
-        << "|---|---:|---:|---:|---:|---:|---:|\n";
-    reportLong<OnePole>(out);
-    reportLong<TwoPole>(out);
-    reportLong<SampleHold<false>>(out);
-    reportLong<SampleHold<true>>(out);
-    reportLong<SumOfSines>(out);
-    reportLong<Pink<8>>(out);
+        << "sigma 1 cent, corner 0.5 Hz, 48 kHz, one value per update. Peak " << fixed(all.peak, 2)
+        << "; sigma first / last hour " << fixed(firstHour.sigma(), 3) << " / " << fixed(lastHour.sigma(), 3)
+        << "; mean first / last hour " << fixed(firstHour.mean(), 3) << " / " << fixed(lastHour.mean(), 3)
+        << "; worst one-minute mean " << fixed(worstMinuteMean, 3) << "; one-minute sigma " << fixed(minSigma, 2)
+        << " to " << fixed(maxSigma, 2) << "; beyond 3 sigma " << fixed(1e6 * beyond3 / all.n, 0)
+        << " ppm (a Gaussian: 2,700).\n";
     std::cout << out.str() << std::flush;
     SUCCEED();
 }

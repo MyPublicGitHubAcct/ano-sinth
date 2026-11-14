@@ -11,6 +11,7 @@
 #include <anoesis/dsp/math/random.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
+#include <anoesis/dsp/oscillators/pitch_drift.hpp>
 #include <anoesis/dsp/oscillators/unison.hpp>
 
 #include <anoesis/test/buffer.hpp>
@@ -247,13 +248,22 @@ struct StressResult
     bool subnormalState = false;
 };
 
+// With driftCents > 0, a PitchDrift of that depth and driftHz is added to
+// the notes per sample (as a voice that passes a note per sample would),
+// and told of every note-on.
 inline StressResult renderStress(Waveform shape, double sampleRate, std::size_t blockSize, std::span<const float> notes,
-                                 std::span<const Event> events)
+                                 std::span<const Event> events, float driftCents = 0.0f, float driftHz = 5.0f)
 {
     auto slot = preparedSlot(shape, 8, sampleRate);
     slot.setDetune(3.3219f); // the knob law's largest (O13)
     slot.setStereo(1.0f);
     slot.noteOn();
+    anoesis::dsp::PitchDrift drift{static_cast<std::uint64_t>(sampleRate)};
+    drift.prepare({.sampleRate = static_cast<float>(sampleRate), .maxBlockSize = 512, .numChannels = 1});
+    drift.setDepthCents(driftCents);
+    drift.setRateHz(driftHz);
+    drift.noteOn();
+    std::vector<float> drifted(notes.begin(), notes.end());
     StressResult result{.out = Buffer{2, notes.size()}};
     const auto checkState = [&]
     {
@@ -269,7 +279,9 @@ inline StressResult renderStress(Waveform shape, double sampleRate, std::size_t 
     {
         if (to > from)
         {
-            slot.process(result.out.block().subBlock(from, to - from), notes.subspan(from, to - from));
+            const auto span = std::span{drifted}.subspan(from, to - from);
+            drift.addTo(span);
+            slot.process(result.out.block().subBlock(from, to - from), span);
         }
     };
     std::size_t next = 0;
@@ -288,6 +300,7 @@ inline StressResult renderStress(Waveform shape, double sampleRate, std::size_t 
             {
             case Event::Kind::noteOn:
                 slot.noteOn(event.since);
+                drift.noteOn(); // a sounding voice: the drift continues
                 break;
             case Event::Kind::voices:
                 slot.setVoices(event.value);

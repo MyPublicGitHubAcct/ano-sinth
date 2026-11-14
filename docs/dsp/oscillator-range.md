@@ -366,7 +366,7 @@ Nanoseconds per sample, 64 taps, 48 kHz, `relwithdebinfo`, `tools/bench.sh "[osc
   - the voice count changed between 0 and 8, often mid-fade;
   - Inv toggled.
 
-  The pitch path holds at 0.01 Hz, sweeps per sample to 0.6 fs (beyond Nyquist even before the ±3.32-semitone detune), back down, then steps to a 40 Hz vibrato around 0.485 fs. The test checks that:
+  The pitch path holds at 0.01 Hz, sweeps per sample to 0.6 fs (beyond Nyquist even before the ±3.32-semitone detune), back down, then steps to a 40 Hz vibrato around 0.485 fs. A `PitchDrift` at 20 cents and 5 Hz rides on it, added per sample (since the drift task; [oscillator-drift.md](oscillator-drift.md)). The test checks that:
   - the output is finite and under the derived bound;
   - no output sample and no residual in flight is subnormal;
   - the output is bit-identical for every block size.

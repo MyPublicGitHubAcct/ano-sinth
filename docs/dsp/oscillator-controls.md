@@ -97,12 +97,12 @@ The library enforces no Sylenth1 ranges, so it stays reusable, and the open ques
 ### Why a slot, and not the oscillator or the voice
 
 - **Not in `MinBlepOscillator`.** The oscillator stays a mono, single-voice band-limited source. Putting volume and pan inside it would make every unison voice stereo and repeat the gain work 8 times per oscillator.
-- **Not in the voice.** The controls belong to each of the four oscillators, and unison detune, stereo spread, and drift (later M1.1 tasks) sit between an oscillator's tuning and its pan.
+- **Not in the voice.** The controls belong to each of the four oscillators, and unison detune and stereo spread sit between an oscillator's tuning and its pan. Drift is the voice's, not the slot's: one `PitchDrift` per voice, added to the note it gives all four slots ([oscillator-drift.md](oscillator-drift.md)).
 - **The slot is what unison extended.** It now holds up to 8 oscillators, each with its own `StereoGain`, plus one `WhiteNoise` for the Noise waveform ([oscillator-unison.md](oscillator-unison.md), [oscillator-waveforms.md](oscillator-waveforms.md#noise-lives-alongside-the-oscillator-not-in-it)).
 
 The design leaves the later work open:
 
-- **Unison** (built; [oscillator-unison.md](oscillator-unison.md)). Each unison voice's pitch is the slot's pitch plus its detune (and later drift), applied as a frequency ratio computed when the detune changes. Each voice has its own pair of stereo gains, computed when a control changes. Pan combines with Stereo as an offset, clipped at the sides (inventory O8, a working hypothesis), which is one function, `unisonPosition`.
+- **Unison** (built; [oscillator-unison.md](oscillator-unison.md)). Each unison voice's pitch is the slot's pitch (which includes the voice's drift) plus its detune, applied as a frequency ratio computed when the detune changes. Each voice has its own pair of stereo gains, computed when a control changes. Pan combines with Stereo as an offset, clipped at the sides (inventory O8, a working hypothesis), which is one function, `unisonPosition`.
 - **Per-voice pitch modulation.** The voice passes a note per sample (key, bend, portamento, Pitch A modulation); the slot adds its tuning.
 - **Part 2: FM and hard sync.** FM between oscillators is a per-sample input of the same shape as the notes (an increment or phase offset). Hard sync is a list of sync events (sample index and fraction) from the master slot, applied by `MinBlepOscillator::jumpTo(phase, since)`, the band-limited phase jump that retrigger already uses ([oscillator-phase.md](oscillator-phase.md)). Block processing does not get in the way, because each event carries its position within the block.
 

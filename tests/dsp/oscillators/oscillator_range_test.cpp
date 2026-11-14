@@ -339,6 +339,10 @@ TEST_CASE("The slot is stable across its whole range, at every rate and block si
     // sample towards the mean, |mean| <= 0.75), every channel gain is at
     // most 1, and at most 8 oscillators sound (voices fading out are among
     // the 8). Noise is at most 8 voices' power: sqrt(2 x 8) = 4 per channel.
+    // Drift at 20 cents and 5 Hz (13 times the default depth, 10 times its
+    // rate) rides on the pitch path, added per sample: it moves the pitch,
+    // not the level, so the bound is unchanged.
+    constexpr float stressDriftCents = 20.0f;
     constexpr float perVoicePeak = 2.7f;
     constexpr float bound = 8.0f * perVoicePeak;
     for (const double sampleRate : rates)
@@ -348,7 +352,7 @@ TEST_CASE("The slot is stable across its whole range, at every rate and block si
         for (const auto shape : allWaveforms)
         {
             CAPTURE(sampleRate, shapeName(shape));
-            const auto whole = renderStress(shape, sampleRate, 4096, notes, events);
+            const auto whole = renderStress(shape, sampleRate, 4096, notes, events, stressDriftCents);
             CHECK(whole.finite);
             CAPTURE(whole.peak);
             CHECK(whole.peak <= bound);
@@ -357,7 +361,7 @@ TEST_CASE("The slot is stable across its whole range, at every rate and block si
             for (const std::size_t blockSize : {1U, 37U})
             {
                 CAPTURE(blockSize);
-                const auto split = renderStress(shape, sampleRate, blockSize, notes, events);
+                const auto split = renderStress(shape, sampleRate, blockSize, notes, events, stressDriftCents);
                 CHECK(bitIdentical(split.out.channel(0), whole.out.channel(0)));
                 CHECK(bitIdentical(split.out.channel(1), whole.out.channel(1)));
                 CHECK_FALSE(split.subnormalState);
