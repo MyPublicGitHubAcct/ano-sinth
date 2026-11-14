@@ -4,6 +4,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/foundations_benchmark.cpp
     benchmarks/drift_benchmark.cpp
     benchmarks/envelope_benchmark.cpp
+    benchmarks/lfo_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     core/allocation_counter_test.cpp
     core/audio_block_test.cpp
@@ -11,6 +12,7 @@ add_executable(anoesis_dsp_tests
     core/processor_test.cpp
     control/adsr_test.cpp
     control/envelope_report.cpp
+    control/lfo_report.cpp
     control/smoother_test.cpp
     control/stereo_gain_test.cpp
     generators/white_noise_test.cpp

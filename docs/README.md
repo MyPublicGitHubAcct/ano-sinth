@@ -52,6 +52,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 **Envelopes and LFOs (M1.2)**
 
 16. [Envelopes: the ADSR](dsp/envelopes.md): the four stages; linear, analog RC, and overshoot-target exponential segments; constant rate against constant time; why float recursion fails on long stages and counting fixes it; clicks at retriggers and sustain changes; denormals in analog-style tails; what is known about Sylenth1's envelopes; six models measured, and the counted overshoot-target exponential chosen and built.
+17. [LFOs](dsp/lfos.md): how an LFO differs from an audio oscillator; why an LFO's steps click, and why band-limiting doesn't stop the click but a short slew does; phase accuracy over hours in float, double, and fixed point; control rate against audio rate, held or interpolated; per-voice against global, and what Free means; sample and hold, smoothed random, and the Lorenz attractor (and why it renders differently on each compiler); what is known about Sylenth1's LFOs; eight models measured, awaiting the choice.
 
 ### 3. Performance
 
