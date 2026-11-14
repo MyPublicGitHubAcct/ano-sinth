@@ -85,6 +85,7 @@ Some hosts call `processBlock` with more samples than they announced in `prepare
   3. one that was used, then prepared again.
 
   Outputs 2 and 3 must match output 1 *bit for bit*: reset is about state, so no tolerance is acceptable. Every stateful processor in later milestones runs through it. The checker has its own test ([tests/support/test/lifecycle_test.cpp](../../tests/support/test/lifecycle_test.cpp)), which uses an integrator: it passes when `reset()` clears the sum and fails when it doesn't.
+- **The allocation check.** [tests/dsp/support/allocation_counter.hpp](../../tests/dsp/support/allocation_counter.hpp) has `AllocationCounter`. The DSP test executable replaces the global `operator new` (and its array and nothrow forms), counting every allocation on a thread while a counter is alive. A test wraps the real-time calls in a counter's scope and checks `count() == 0` afterwards, outside the scope, because Catch2's assertions allocate. The replacement is compiled into the executable directly rather than taken from the support library, so the linker always uses it. Its own test checks that it counts a `make_unique` and a `vector` and nothing else. First used by unison ([oscillator-unison.md](oscillator-unison.md#tests)): changing the voice count mid-note, and every control and `process()` call, allocate nothing.
 
 ## References
 

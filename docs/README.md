@@ -43,8 +43,9 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 
 9. [Band-limited oscillators: choosing the anti-aliasing method (D6)](dsp/band-limited-oscillators.md): why naive waveforms alias; PolyBLEP, minBLEP, and mipmapped wavetables measured side by side; why minBLEP with 64 taps.
 10. [Oscillator waveforms: the 8 shapes as data](dsp/oscillator-waveforms.md): any piecewise-linear waveform as jumps and bends; Sylenth1's 8 waveforms as a table of corners; why noise lives beside the oscillator; every waveform measured.
-11. [Oscillator controls: tuning, volume, pan, and invert](dsp/oscillator-controls.md): pitch as one fractional note and how exact it is; volume tapers; pan laws (equal power, linear, balance) and what each does in mono; smoothing gains; the two-saw PWM trick; the oscillator slot that unison will extend.
+11. [Oscillator controls: tuning, volume, pan, and invert](dsp/oscillator-controls.md): pitch as one fractional note and how exact it is; volume tapers; pan laws (equal power, linear, balance) and what each does in mono; smoothing gains; the two-saw PWM trick; the oscillator slot.
 12. [Oscillator phase: start phase, retrigger, and free-running](dsp/oscillator-phase.md): a phase reset as an edge; band-limited jumps at a sub-sample time (the hard-sync technique); why the delayed sine needs its own residuals; free-running and where a free note starts; aliasing measured against a naive jump.
+13. [Oscillator unison: detune, stereo spread, and the voice count](dsp/oscillator-unison.md): why detuned copies sound big; spacing and knob laws; placing voices in stereo and how Pan combines with the spread; how a stack's level grows; noise as one source mixed to sound like many; what is known about Sylenth1's laws; changing the voice count without clicks; what SIMD across voices will need.
 
 ### 3. Performance
 

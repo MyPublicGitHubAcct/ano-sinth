@@ -829,11 +829,3 @@ TEST_CASE("OscillatorSlot: reset() finishes a volume ramp; a mono block is left 
     slot.process(mono.block(), 60.0f);
     CHECK(std::ranges::all_of(mono.channel(0), [](float s) { return sameBits(s, 0.0f); }));
 }
-
-TEST_CASE("OscillatorSlot: noise is silent until the unison slot adds WhiteNoise", "[dsp][oscillator][slot]")
-{
-    auto slot = preparedSlot(Waveform::noise);
-    const auto out = render(slot, 60.0f, 512);
-    CHECK(std::ranges::all_of(out.channel(0), [](float s) { return sameBits(s, 0.0f); }));
-    CHECK(std::ranges::all_of(out.channel(1), [](float s) { return sameBits(s, 0.0f); }));
-}

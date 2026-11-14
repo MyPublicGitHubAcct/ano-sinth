@@ -85,7 +85,7 @@ The **onset after a reset** remains band-limited for the straight segments, whic
 
 - **Nothing in the oscillator applies to it.** Noise has no phase, pitch, edges, delay, or onset.
 - **It would cost every voice.** The random generator's state and a branch would sit in every unison voice of every oscillator, all to serve one waveform.
-- **Unison handles it differently.** With noise selected, an oscillator slot can run one noise source instead of eight detuned copies, because detune and phase mean nothing to noise. That choice belongs to the slot that owns the unison voices (a later M1.1 task), which also picks between noise and the periodic oscillator once per block, not once per sample.
+- **Unison handles it differently.** With noise selected, the oscillator slot runs one noise source instead of eight detuned copies, because detune and phase mean nothing to noise. It mixes two noise draws per sample to the power and the left/right correlation that N noise voices would have at the voices' gains, so Voices and Stereo still apply. The slot picks between noise and the periodic oscillators once per block, not once per sample ([oscillator-unison.md](oscillator-unison.md#noise-one-source-that-sounds-like-many)).
 
 Whether Sylenth1's noise is white, uniform, and independent of the note is still open (inventory W7). `WhiteNoise` is white and uniform, with a peak of 1, which matches the equal-peak hypothesis W5.
 

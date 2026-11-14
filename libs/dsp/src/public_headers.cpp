@@ -23,6 +23,7 @@
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>
+#include <anoesis/dsp/oscillators/unison.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 #include <anoesis/dsp/resampling/halfband.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>

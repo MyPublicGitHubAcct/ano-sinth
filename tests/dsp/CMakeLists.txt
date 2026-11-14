@@ -3,6 +3,7 @@ add_executable(anoesis_dsp_tests
     library_test.cpp
     benchmarks/foundations_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
+    core/allocation_counter_test.cpp
     core/audio_block_test.cpp
     core/denormals_test.cpp
     core/processor_test.cpp
@@ -21,8 +22,12 @@ add_executable(anoesis_dsp_tests
     oscillators/oscillator_phase_report.cpp
     oscillators/oscillator_phase_test.cpp
     oscillators/oscillator_slot_test.cpp
+    oscillators/unison_layout_test.cpp
+    oscillators/unison_report.cpp
+    oscillators/unison_slot_test.cpp
     oscillators/waveform_test.cpp
-    resampling/oversampler_test.cpp)
+    resampling/oversampler_test.cpp
+    support/allocation_counter.cpp)
 
 # anoesis::dsp comes in through anoesis::test_support. Naming it here as well
 # makes Apple's linker warn about a duplicate library.

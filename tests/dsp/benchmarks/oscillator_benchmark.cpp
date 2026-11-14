@@ -1,6 +1,7 @@
 // CPU cost of the minBLEP oscillator (decision D6) and the PolyBLEP reference,
 // for every periodic waveform, of the oscillator slot (tuning, volume, pan,
-// invert) around it, and of retriggers and phase jumps.
+// invert) around it, of retriggers and phase jumps, and of unison (0-8
+// voices per slot, noise, and a 32-voice note).
 // The wavetable candidate's numbers (it was removed after D6) are in the
 // baselines doc.
 //
@@ -380,6 +381,90 @@ TEST_CASE("Benchmark: retrigger and phase jumps", "[!benchmark][dsp][oscillators
         {
             slot.noteOn();
             slot.process(bus.block(), 61.87f);
+            return bus.left[blockSize - 1];
+        };
+    }
+}
+
+TEST_CASE("Benchmark: unison", "[!benchmark][dsp][oscillators]")
+{
+    // OscillatorSlot with 0-8 unison voices (oscillator-unison.md): Detune
+    // 0.2 semitones, Stereo 0.5 (every voice its own gains), Retrig off.
+    // Divide a row by its voice count for the cost per voice; compare the
+    // 1-voice rows with "Oscillator slot, saw 440 Hz, settled".
+    const auto unisonSlot = [](Waveform shape, int voices)
+    {
+        Slot slot{minBlepTable64()};
+        slot.setVoices(voices);
+        slot.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+        slot.setWaveform(shape);
+        slot.setDetune(0.2f);
+        slot.setStereo(0.5f);
+        slot.setRetrigger(false);
+        slot.noteOn();
+        return slot;
+    };
+    Bus bus;
+    const float highNote = anoesis::dsp::frequencyToNote(12000.0f);
+    for (const float note : {69.0f, highNote})
+    {
+        for (const int voices : {1, 2, 4, 8})
+        {
+            auto slot = unisonSlot(Waveform::saw, voices);
+            BENCHMARK("Unison slot, saw " + std::string{note < 100.0f ? "440 Hz" : "12 kHz"} + ", " +
+                      std::to_string(voices) + (voices == 1 ? " voice" : " voices") + " x512")
+            {
+                slot.process(bus.block(), note);
+                return bus.left[blockSize - 1];
+            };
+        }
+    }
+    {
+        std::vector<float> notes(blockSize);
+        for (std::size_t i = 0; i < blockSize; ++i)
+        {
+            notes[i] = 69.0f + std::sin(static_cast<float>(i) * 0.05f);
+        }
+        auto slot = unisonSlot(Waveform::saw, 8);
+        BENCHMARK("Unison slot, saw 440 Hz, 8 voices, pitch per sample x512")
+        {
+            slot.process(bus.block(), notes);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        auto slot = unisonSlot(Waveform::saw, 0);
+        BENCHMARK("Unison slot, 0 voices x512")
+        {
+            slot.process(bus.block(), 69.0f);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        auto slot = unisonSlot(Waveform::noise, 8);
+        BENCHMARK("Unison slot, noise, 8 voices x512")
+        {
+            slot.process(bus.block(), 69.0f);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        // One note's worth: 4 slots at 110, 220, 440, and 880 Hz, 8 voices
+        // each, into one bus. The slots are in one array, allocated once.
+        std::array<Slot, 4> note{
+            unisonSlot(Waveform::saw, 8),
+            unisonSlot(Waveform::saw, 8),
+            unisonSlot(Waveform::saw, 8),
+            unisonSlot(Waveform::saw, 8),
+        };
+        BENCHMARK("Unison: 32-voice note (4 slots x 8 voices) into one bus x512")
+        {
+            bus.left.fill(0.0f);
+            bus.right.fill(0.0f);
+            for (std::size_t i = 0; i < note.size(); ++i)
+            {
+                note[i].process(bus.block(), 45.0f + (12.0f * static_cast<float>(i)));
+            }
             return bus.left[blockSize - 1];
         };
     }

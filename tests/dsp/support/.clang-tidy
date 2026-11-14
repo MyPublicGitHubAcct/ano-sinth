@@ -1,0 +1,7 @@
+# allocation_counter.cpp replaces the global operator new and delete. Their
+# definitions cannot match the parameter names of the standard library's own
+# declarations (libc++ uses reserved names such as __sz), and the check reports
+# the mismatch at the system header, where a NOLINT cannot go. So the check is
+# off for this directory only; everything else still applies.
+InheritParentConfig: true
+Checks: '-readability-inconsistent-declaration-parameter-name'

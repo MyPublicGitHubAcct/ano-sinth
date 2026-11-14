@@ -94,7 +94,7 @@ This is a **working hypothesis** (inventory O10), with low–medium confidence. 
 | `isRunning()`, `nextPhase()` | min_blep.hpp | Whether the oscillator has produced a sample since its last restart, and the phase of its next sample. |
 | `OscillatorSlot::setPhaseDegrees`, `setRetrigger`, `setRandomSeed`, `noteOn`, `stop` | [oscillator_slot.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/oscillator_slot.hpp) | The controls, and the note-on that applies them. |
 
-The oscillator API is **per oscillator**, which will mean per unison voice. The unison task loops `noteOn()`'s logic over its voices and reuses `restart` and `jumpTo` unchanged. Hard sync (Part 2) calls `jumpTo(phase, since)` with the master's sub-sample wrap time.
+The oscillator API is **per oscillator**, which means per unison voice. The slot's `noteOn()` applies the table below to every unison voice, reusing `restart` and `jumpTo` unchanged: with Retrig on, every voice restarts at Phase; with Retrig off, every voice from silence draws its own random phase, in voice order ([oscillator-unison.md](oscillator-unison.md)). Hard sync (Part 2) calls `jumpTo(phase, since)` with the master's sub-sample wrap time.
 
 ### What a note-on does
 
@@ -106,7 +106,7 @@ The oscillator API is **per oscillator**, which will mean per unison voice. The 
 - **`noteOn()` acts between two `process()` calls.** A voice splits its block at each event, so the note-on is sample-accurate. A note-on in the middle of a block gives bit for bit the same output as one at a block boundary (tested).
 - **Phase is read at the note-on.** Turning the knob during a held note changes nothing until the next retrigger.
 - **`stop()` is for a voice that has finished.** It silences the oscillator, so the next note starts from silence and not as a jump, and it finishes any gain ramp. It does *not* rewind the random sequence, so successive free-running notes draw different phases. `reset()` is `stop()` plus rewinding the sequence, so a reset slot is exactly a freshly prepared one (the lifecycle contract).
-- **Each slot needs its own seed** (`setRandomSeed`), or two free-running slots would start in step.
+- **Each slot needs its own seed** (`setRandomSeed`), or two free-running slots would start in step. Within a slot, the unison voices draw consecutive values, so they start at independent phases (tested: two free-running voices' correlation averages 0 over 64 seeds).
 - **The default is Retrig on at Phase 0**, which is how the slot behaved before Phase and Retrig existed. The patch default is the parameter table's business (M1.9).
 
 ### Inside the oscillator

@@ -44,6 +44,8 @@ How the measurements work and how to use them: [How we measure DSP quality](../d
 
 A wrong measurement makes every test built on it meaningless, so the support code has its own tests in `tests/support/test/`.
 
+One piece of support lives beside the DSP tests instead: [tests/dsp/support/allocation_counter.hpp](../../tests/dsp/support/allocation_counter.hpp), which counts heap allocations so a test can show that real-time code allocates nothing. It works by replacing the global `operator new`, so it is compiled straight into `anoesis_dsp_tests` rather than linked from a library ([processor lifecycle](../dsp/processor-lifecycle.md#tests)).
+
 ## Adding a test
 
 1. Create `tests/<lib>/<unit>_test.cpp` and add it to that folder's `CMakeLists.txt`.

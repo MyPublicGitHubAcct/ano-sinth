@@ -24,14 +24,14 @@ Four oscillators: A1, A2, B1, B2.
 
 | Control | Behavior |
 |---|---|
-| Voices | 0–8 unison voices. 0 turns the oscillator off. |
+| Voices | 0–8 unison voices. 0 turns the oscillator off. See [Unison](#unison). |
 | Waveform | 8 waveforms "emulating common analog wave shapes" (p. 14). **The manual does not name them.** Third-party sources do: see [Waveforms](#waveforms) below. |
 | Octave / Note | Coarse tuning. Centered by default (0). Octave −3 to +3, Note −7 to +7 semitones, in whole steps (see [Tuning, volume, pan, and invert](#tuning-volume-pan-and-invert)). |
 | Fine | ±1 semitone, continuous; default 0. |
 | Volume | Oscillator output level. Knob 0–10; taper unspecified. |
 | Phase | 0–360° start phase. Only has an effect when Retrigger is on. See [Phase and Retrig](#phase-and-retrig). |
-| Detune | Spreads the pitch of the unison voices around the center pitch, as in a supersaw. |
-| Stereo | Spreads unison voices across the stereo field: 0 is mono, 10 is full width. Needs more than 1 voice. |
+| Detune | Spreads the pitch of the unison voices around the center pitch, as in a supersaw. Law: see [Unison](#unison). |
+| Stereo | Spreads unison voices across the stereo field: 0 is mono, 10 is full width. Needs more than 1 voice. Law: see [Unison](#unison). |
 | Pan | Oscillator pan, 0 (left) to 10 (right), centred by default (pp. 10, 15). Law unspecified. |
 | Retrig | Restarts every voice at Phase on each note-on. Off: free-running (see [Phase and Retrig](#phase-and-retrig)). |
 | Inv | Inverts the output, for PWM-style tricks. |
@@ -52,7 +52,7 @@ The manual gives only outlines (pp. 10, 14–15). The rest comes from third-part
 | Pan | Knob 0 (left) to 10 (right), centred by default. *Hypothesis:* equal-power sin/cos, −3 dB per side at the centre, unity at the hard sides, the far side fully muted; position = knob / 5 − 1. | Manual pp. 10 and 15 for the range and the centre default. No source gives the law. | Low |
 | Inv | Exact negation of the output. | Manual p. 15: two saws, one inverted, sum to a pulse whose width is set by the phase of one. The developer (KVR thread 301405, 2010): the sum has no DC. Added in v1.20 as "Oscillator waveform inversion option for PWM effects" (KVR, 2007). | High |
 
-**For the unison task (recorded here so it is not lost).** One KVR poster, BlitBit, measured the demo in [thread 518035](https://www.kvraudio.com/forum/viewtopic.php?t=518035&start=15) (January 2019): detune is linear in semitones (not in Hz), and the outermost voice sits at about 3.32 · x² semitones for a knob position x in [0, 1] (log₂ 10 semitones at the top), with the maximum depending on the voice count. All voices have equal amplitude. At Stereo 10, every voice except the centre one is hard left or hard right, in the orders L, LR, LCR, LRLR, LRCLR, LRRLLR, LRLCRLR, and LRRLRLLR for 1 to 8 voices. A single post whose images could not be viewed: low–medium confidence.
+The unison laws (Detune, Stereo, how Pan combines with Stereo, and the level) have their own section: [Unison](#unison).
 
 **Open questions, settled by measuring the demo (M1.13).** Common setup as for W1–W9, with a Sine at A4 unless noted.
 
@@ -65,7 +65,7 @@ The manual gives only outlines (pp. 10, 14–15). The rest comes from third-part
 | O5 | Volume's default and absolute level. | Unknown; 10 = unity in our DSP | Read the Clear (init) patch's oscillator volumes. Measure the peak of a low saw at Volume 10 with Mix and Main Volume at their init values. The absolute level chain is settled with the mixer (M1.4). |
 | O6 | Pan law. | sin/cos, −3 dB at the centre | Left and right RMS of a sine at Pan 0, 2.5, 5, 7.5, 10 (1 voice, Stereo 0). The centre against the near side at hard pan gives 0, −3, −4.5, or −6 dB. Pan 2.5 separates laws that share −3 dB at the centre: sin/cos gives 0.924 / 0.383, the square-root law 0.866 / 0.500, linear 0.75 / 0.25. Check whether hard pan mutes the far side completely. |
 | O7 | Inv. | Exact negation | With Retrig on and Phase 0, a saw with Inv on against Inv off, sample by sample. Then two saws, one inverted, at Phase 90°: a 25% pulse with zero mean. |
-| O8 | How Pan combines with Stereo (unison). | Unknown | 2 voices, Stereo 10, sweep Pan: does each voice's position shift (an offset, clipping at the sides), or is the stereo pair balanced? Settled in the unison task. |
+| O8 | How Pan combines with Stereo (unison). | An **offset**, clipped at the sides (decided 2026-11-14; see [Unison](#unison)) | 2 voices, Stereo 10, Detune small enough to separate the two voices in a long FFT, a sine. Read each voice's left and right level at Pan 0, 2.5, 5, 7.5, 10. At Pan 7.5 (+0.5), the lower voice reads 0.924 / 0.383 for the offset, 0.5 / 0 for a balance on the pair, and 0.707 / 0.707 for a squeeze into the remaining width. |
 | O9 | Master tune (v3): units, range, and whether a keytracked filter follows it. | A4 reference in Hz (decided 2026-11-13); the filter follows it | Read the control's LCD at both ends. Self-oscillate the filter at Keytrack 10 and check that it stays in tune with the oscillator as master tune changes. |
 
 ### Phase and Retrig
@@ -78,15 +78,39 @@ The manual gives only the outline: Phase is a 0–360° start phase that only ha
 | Retrig on, from silence | The voice starts at Phase. | Manual | High |
 | Retrig on, while sounding (a stolen voice, a mono retrigger) | A band-limited jump to Phase at the note-on's sample, keeping what is in flight, rather than a cut to silence. | No source says how Sylenth1 handles it; a click-free jump is our choice. | Unknown (O11) |
 | Retrig off | A sounding oscillator runs on untouched; Phase is ignored. *Hypothesis:* a voice starting from silence starts at a random phase (seeded, so renders are reproducible). | Manual (Phase only matters with Retrig on). A user on the [Sonic Academy forum](https://forums.sonicacademy.com/t/phase-settings-on-oscilators/26166): with Retrig off "it starts at random start point"; MusicRadar's tutorial (search-engine excerpt): otherwise the waveform cycles "freely regardless of note input". | Low–medium (O10) |
-| Retrig with unison | Every unison voice restarts at Phase. | Manual ("every voice") | Medium: "voice" may mean the polyphonic voice. Settled with unison. |
+| Retrig with unison | Every unison voice restarts at Phase (as built, 2026-11-14). With Retrig off, each unison voice from silence draws its own seeded random phase, in voice order. | Manual ("every voice"). Two users (KVR 452081, 2015): with Retrig on and Detune 0, more voices only make it louder, which fits identical, in-phase voices. | Medium: "voice" may mean the polyphonic voice. O15's in-phase test (+6.02 dB per doubling) confirms it. |
 
 **Open questions, settled by measuring the demo (M1.13).** Common setup as for W1–W9.
 
 | # | Question | Working hypothesis | Measurement that settles it |
 |---|---|---|---|
-| O10 | Retrig off: where does a note from silence start? Random per note, or continuing a phase the voice kept running? And are unison voices' start phases independent? | A seeded random phase per start, independent per voice | Play the same note 8 times with gaps, Retrig off, a low saw (A1). Read each note's start phase from its first cycle. Uniformly scattered: random; advancing by gap × frequency: a running phase. Repeat with 2 unison voices, Detune 0, Stereo 0: equal phases sum to 2× the level, independent ones to about √2×. |
+| O10 | Retrig off: where does a note from silence start? Random per note, or continuing a phase the voice kept running? And are unison voices' start phases independent? | A seeded random phase per start, independent per voice | Play the same note 8 times with gaps, Retrig off, a low saw (A1). Read each note's start phase from its first cycle. Uniformly scattered: random; advancing by gap × frequency: a running phase. Repeat with 2 unison voices, Detune 0, Stereo 0: equal phases sum to 2× the level, independent ones to about √2×. With 8 voices, histogram the voices' start phases (separate them with a small Detune): BlitBit (KVR 518035, 2019) guesses Sylenth1 constrains the randomness, which would show as phases more evenly spread than independent uniform draws. |
 | O11 | Retrig on, a note-on while the voice sounds (mono, or a stolen voice): does the phase jump, and is the jump band-limited (no click, no aliasing) or a hard reset? | A band-limited jump | Mono mode, Retrig on, a high saw, a second note-on at the same pitch mid-note. Look at the waveform around the note-on, and at the spectrum of a fast repeated retrigger for aliases between the harmonics. |
 | O12 | Phase direction and units: is 90° a quarter cycle *into* the waveform? | Yes | With W6's setup, Phase 90 and 180 on a saw: the first sample after onset is −0.5 or 0 for "into"; +0.5 or 0 for "before". |
+
+### Unison
+
+The manual gives only the controls (pp. 14–15): Voices 0–8 (0 turns the oscillator off), Detune spreads the voices' pitch, Stereo spreads them across the stereo field and "needs more than 1 voice", and Retrig restarts "every voice". The rest comes from third-party sources. Values marked *hypothesis* are what M1.1 builds ([oscillator-unison.md](../dsp/oscillator-unison.md)), decided 2026-11-14. The DSP takes the outermost voice's offset in semitones and a width in [0, 1]; the knob laws belong to the parameter table (M1.9).
+
+| Topic | Value or law | Source | Confidence |
+|---|---|---|---|
+| Detune law | Linear in semitones; *hypothesis:* evenly spaced, voice k of N at s·(2k/(N − 1) − 1), the centre voice of an odd count in tune. | BlitBit, [KVR thread 518035](https://www.kvraudio.com/forum/viewtopic.php?t=518035&start=15) (10 Jan 2019): "linear with regards to half tones", with a 5-voice example at −2, −1, 0, +1, +2. A contrary opinion (chk071, same thread) offers no measurement. | Low–medium (one poster; graphs not viewable) |
+| Detune knob | s = 3.3219 · x² semitones for knob x ∈ [0, 1] (about 0.8 at half the knob); *hypothesis:* times a voice-count factor g(N), 1 at 2 voices to 0.66 at 8, linear in N between. At Detune 10: 3.32, 3.14, 2.95, 2.76, 2.57, 2.39, 2.20 semitones for 2 to 8 voices. | Same post for the curve. BlitBit (12 Jan 2019): "the maximum detune is dependent on the number of voices"; with 8 voices at Detune 10, the highest voice is at about 125 Hz from 110 Hz (2.2 semitones), and with 2 voices "far away" from it. g(8) = 2.2/3.32. | Low (read from graphs; which count the 3.32 belongs to is not stated) |
+| Stereo order | At Stereo 10: C, LR, LCR, LRLR, LRCLR, LRRLLR, LRLCRLR, LRRLRLLR for 1 to 8 voices. *Hypothesis:* each order lists the voices from the lowest pitch to the highest, so each pair at ±d is split left and right (every order is antisymmetric, and the first voice is always L). | BlitBit, 12 Jan 2019 | Low–medium for the orders; low for the reading by pitch |
+| Stereo width | *Hypothesis:* position = Pan + width × side, width = knob / 10. | No source. | Low |
+| Pan law per voice | *Hypothesis:* equal power (sin/cos), as for Pan (O6). | No source. | Low |
+| Pan with Stereo | *Hypothesis:* an offset, clipped at the sides (O8). | No source. | Low |
+| Level | Every voice at the same amplitude; *hypothesis:* no normalisation for the count. | BlitBit, 12 Jan 2019 ("the same amplitude"). secretfound and phreaque, [KVR thread 452081](https://www.kvraudio.com/forum/viewtopic.php?p=6319341) (Dec 2015): with Retrig on and Detune 0, "weakest with 1 voice, loudest with 8", which rules out 1/N but not 1/√N. | Medium for equal amplitude; low for no normalisation |
+| Noise | *Hypothesis:* one noise source per oscillator, mixed to the power and left/right correlation of N noise voices at the voices' gains. | No source. | Low |
+
+**Open questions, settled by measuring the demo (M1.13).** Common setup as for W1–W9.
+
+| # | Question | Working hypothesis | Measurement that settles it |
+|---|---|---|---|
+| O13 | Detune: the spacing of the inner voices, the knob curve, and the maximum for each voice count. | Even spacing; 3.3219 · x² · g(N) semitones, g(2) = 1 to g(8) = 0.66 | Sines at A2 (110 Hz), Stereo 0, Retrig off. For N = 2…8 at Detune 10, a long FFT (2¹⁸ points, interpolated peaks): each voice's offset in semitones. Even spacing gives equal gaps; the outermost offset per N gives g(N). Then N = 2 at Detune 1, 2.5, 5, 7.5, 10 for the curve (x²: 0.033, 0.21, 0.83, 1.87, 3.32 st). |
+| O14 | Stereo: which voice goes where, how positions scale with the knob, and the pan law per voice. | The reported orders, by pitch; position = width × side; equal power | As O13, with a small Detune (voices 10–20 Hz apart) and Stereo 0, 2.5, 5, 10: each voice's left and right level. The sides at Stereo 10 give the order and whether it follows pitch; Stereo 5 gives 0.924 / 0.383 for equal power and a linear width, 0.75 / 0.25 for a linear law. |
+| O15 | Level against the voice count: none, 1/√N, or 1/N? | None | Retrig on, Phase 0, Detune 0, Stereo 0, a sine: RMS at N = 1, 2, 4, 8. Each doubling adds +6.02 dB with no normalisation, +3.01 dB with 1/√N, and 0 dB with 1/N. Repeat with Retrig off and a small Detune (power adds: +3.01 dB per doubling with none). |
+| O16 | Noise with unison: do Voices and Stereo change the noise's level and width? | Yes: N voices' power, and their L/R correlation | The Noise waveform at N = 1, 2, 4, 8 and Stereo 0, 5, 10: each channel's RMS (none: +3.01 dB per doubling) and the left/right correlation (1 at Stereo 0, 0 at 10 with the voices split). Folded into W7. |
 
 ### Waveforms
 
