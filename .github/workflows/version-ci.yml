@@ -81,8 +81,11 @@ jobs:
   # only when a dispatch switches asan off. The two builds share no object
   # files (the sanitizer flags change every one), so they run side by side.
   # Inputs are empty on a tag push, so the event check comes first.
+  # The names hold no matrix expression: GitHub appends " (<preset>)" to each
+  # leg by itself, and a job skipped by its if: is never expanded, so an
+  # expression in the name would show up literally.
   macos:
-    name: macOS tests (${{ matrix.preset }})
+    name: macOS tests
     needs: checks
     if: github.event_name != 'workflow_dispatch' || inputs.macos
     runs-on: macos-latest
@@ -113,7 +116,7 @@ jobs:
   # and asan runs the tests under GCC's sanitizers with libstdc++, including
   # LeakSanitizer, which Apple Clang does not support on macOS.
   linux:
-    name: Linux tests (GCC 12, ${{ matrix.preset }})
+    name: Linux GCC 12 tests
     needs: macos
     if: ${{ !cancelled() && !failure() && (github.event_name != 'workflow_dispatch' || inputs.linux) }}
     runs-on: ubuntu-22.04
@@ -145,7 +148,7 @@ jobs:
   # Studio developer environment (vcvars64.bat), which also provides Ninja.
   # Debug only: the asan preset is not available on Windows.
   windows:
-    name: Windows tests (MSVC, debug)
+    name: Windows MSVC tests (debug)
     needs: linux
     if: ${{ !cancelled() && !failure() && (github.event_name != 'workflow_dispatch' || inputs.windows) }}
     runs-on: windows-latest

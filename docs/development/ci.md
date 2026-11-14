@@ -23,11 +23,13 @@ The jobs run as a chain. Each needs the one before it, so a failure skips everyt
 |---|---|---|---|
 | 1 | Version, format, and identity checks | ubuntu-latest | Checks that the tag equals `v` + `project(VERSION …)` in [CMakeLists.txt](../../CMakeLists.txt). Then runs the clang-format 23.1.5 check, the identity-leak check over tracked files and every commit message (with values from secrets), and the no-published-builds check. These need no compiler, so they use the cheapest runner. Always runs. |
 | 2 | macOS tests (`debug`, `asan`) | macos-latest | `cmake --workflow --preset <preset>`. The `debug` leg includes pluginval at strictness 10 on the VST3 and `auval -strict` on the AU, and runs clang-tidy 23.1.4. The `asan` leg runs the tests under ASan/UBSan (see [Why debug and asan are separate builds](#why-debug-and-asan-are-separate-builds)). Uses the placeholder identity. |
-| 3 | Linux tests (GCC 12, `debug`, `asan`) | ubuntu-22.04 | The same two presets, under `xvfb-run`. The `debug` leg includes pluginval. See [Why Linux has two legs](#why-linux-has-two-legs). Uses the placeholder identity. |
-| 4 | Windows tests (MSVC, `debug`) | windows-latest | `debug` inside `vcvars64.bat` (located with `vswhere`), including pluginval. The `asan` preset doesn't exist on Windows. Uses the placeholder identity. |
+| 3 | Linux GCC 12 tests (`debug`, `asan`) | ubuntu-22.04 | The same two presets, under `xvfb-run`. The `debug` leg includes pluginval. See [Why Linux has two legs](#why-linux-has-two-legs). Uses the placeholder identity. |
+| 4 | Windows MSVC tests (`debug`) | windows-latest | `debug` inside `vcvars64.bat` (located with `vswhere`), including pluginval. The `asan` preset doesn't exist on Windows. Uses the placeholder identity. |
 | 5 | macOS release build | macos-latest | The `release` preset (universal binary) with the real identity from secrets. The preset sets `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`, so a missing secret fails configure. Builds and tests (pluginval and auval validate the release VST3 and AU). **Uploads nothing**: the outputs are discarded with the runner. |
 
 The two-leg jobs are fail-fast matrices: if one leg fails, the other is cancelled. Jobs 3–5 run only if nothing before them failed or was cancelled.
+
+The run page shows the legs as `macOS tests (debug)`, `Linux GCC 12 tests (asan)`, and so on. The workflow's `name:` fields contain no `${{ matrix.preset }}`: GitHub appends the matrix values to each leg's name by itself. A job that its `if:` skips is never expanded, so an expression in its name is shown literally (run 43536705167 listed `macOS tests (${{ matrix.preset }})`). Without one, a skipped matrix job reads plainly as `macOS tests`.
 
 Within each job, steps stop at the first failure (the GitHub default). `concurrency` cancels an older run of the same ref if a newer one starts.
 
@@ -107,6 +109,19 @@ The first CI run (run 43498239659, from commit `2b5476c`) ran on every push and 
 - **Windows, MSVC:** failed on warning C4459. A test constant was hidden by a JUCE template parameter with the same name. That has been fixed in the test, but MSVC hasn't checked the fix yet. The first version run will show whether it worked.
 
 The first version run (run 43516389668, tag `v0.1.0`) passed the checks and both macOS legs. Linux then failed: since run 43498239659, project targets had added `-Wconversion`, and JUCE's own module sources, which compile inside our targets, are not clean under GCC's `-Wconversion`. Fail-fast cancelled Windows. The fix exempts JUCE's units from that one flag on GCC ([code-quality.md](code-quality.md)). The first version of the fix covered only the `.cpp` units. A manually dispatched run on `main` (43518674645) then failed on the bundled C libraries (`juce_graphics_libjpg_1.c`), so the `.c` units were added. A third run (43520356376) compiled all of JUCE but failed in our own `plugin_processor.cpp` and `anoesis_interop.cpp`, on a JUCE header template (`juce_UMPUtils.h`) instantiated there. So JUCE's include directories are now `SYSTEM` on GCC as well. The fourth run (43522223838) built everything on Linux and passed 94 of 95 tests. The failure was [tests/cmake/check_benchmarks_hidden.cmake](../../tests/cmake/check_benchmarks_hidden.cmake): it runs in CMake script mode without `cmake_minimum_required`, so the runner's CMake 3.x rejected `IN_LIST` (policy CMP0057). Local CMake 4.x enables those policies unconditionally, which hid the bug. The fifth run (43524447930, `main` at `6cdada5`) passed every job, including Windows MSVC, which confirmed the C4459 fix. The owner then moved the `v0.1.0` tag from `407e966` to `2ab7587`, and the tag run (43529431143) passed every job. That is the first green version run. The lesson: a warning flag added to JUCE-compiling targets is checked against GCC and MSVC only at the next version run, so check whether JUCE's own flag set for each compiler already includes it.
+
+Commit `92a62d4` made the jobs a selectable chain and took the plugin's shared code and format wrappers out of the default sanitizer build. A Linux-only dispatch on `main` at `352ab66` (run 43536705167, `-f macos=false -f windows=false -f release=false`) checked both changes. The checks job and both Linux legs ran and passed. macOS, Windows, and the release build were skipped, and Linux still ran after the skipped macOS job, as intended. The new CTest check `plugin targets are built unless sanitizing` passed in both legs (96 tests in `debug`, 95 in `asan`, which skips pluginval). Compared with the Linux legs of the `v0.1.0` tag run (43529431143):
+
+| Linux leg | Build steps (Ninja) | Build phase | Whole job |
+|---|---|---|---|
+| `asan`, before | 324 | 13m15s | 14m40s |
+| `asan`, after | 259 | 6m59s | 8m20s |
+| `debug`, before | 324 | 4m59s | 6m17s |
+| `debug`, after | 324 | 6m33s | 8m09s |
+
+The `asan` leg lost 20% of its build steps but 47% of its build time, because the removed units are JUCE's heaviest, compiled under the slowest flags. (macOS: 327 → 249.) The `debug` leg builds exactly what it built before, so its slower time is runner variance (configure alone went from 34s to 48s). The two legs now take about the same time, so the matrix's wall time is no longer set by `asan`. The skipped macOS job's name exposed the unexpanded-matrix-name problem described under [The workflow](#the-workflow-version-ciyml), and the job names were fixed afterwards.
+
+To pull a job's log, use its ID: `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs --allow-escape-sequences`. For the tag run, `gh run view --job=<id> --log` returned the `asan` leg's log for both Linux jobs. They were then named `Linux tests (GCC 12, …)`, and `gh` cut those names off at the comma.
 
 ## Not done yet
 
