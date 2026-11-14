@@ -153,21 +153,25 @@ public:
     }
 
     /// A note-on, between two process() calls (a voice splits its block at
-    /// the event, so the note-on is sample-accurate). For every unison voice:
+    /// the event, so the note-on is sample-accurate). `since`, in [0, 1),
+    /// places it that many samples before the next sample, for events finer
+    /// than a sample. For every unison voice:
     ///
-    /// - Retrig on: the oscillator restarts at Phase. From silence, that is
-    ///   the band-limited onset at Phase; while it sounds (a stolen voice, or
-    ///   a retriggered mono note), a band-limited jump to Phase.
+    /// - Retrig on: the oscillator restarts at Phase, with
+    ///   MinBlepOscillator::jumpTo(). From silence, that is the band-limited
+    ///   onset at Phase, moved on by `since` x the first sample's increment;
+    ///   while it sounds (a stolen voice, or a retriggered mono note), a
+    ///   band-limited jump to Phase at that time.
     /// - Retrig off: a sounding oscillator runs on untouched. From silence,
     ///   it starts at a random phase from this slot's Random, drawn in voice
     ///   order (a working hypothesis, inventory O10: a free-running
     ///   oscillator has been running unheard, so its phase is arbitrary).
-    void noteOn() noexcept
+    void noteOn(float since = 0.0f) noexcept
     {
         noteHeld = true;
         for (std::size_t v = 0; v < count; ++v)
         {
-            startVoice(v);
+            startVoice(v, since);
         }
     }
 
@@ -352,6 +356,12 @@ public:
         return noteToFrequency(note + tuning.offset(), referenceHz);
     }
 
+    /// A voice's oscillator, for measurement (its phase, its residuals).
+    [[nodiscard]] const MinBlepOscillator<Taps>& oscillator(std::size_t voice) const noexcept
+    {
+        return oscillators[std::min(voice, maxUnisonVoices - 1)];
+    }
+
     /// A voice's current phase step (2^32 per cycle): the pitch it is
     /// actually playing, for measurement.
     [[nodiscard]] std::uint32_t phaseIncrement(std::size_t voice = 0) const noexcept
@@ -414,11 +424,11 @@ private:
         return {((void)Index, MinBlepOscillator<Taps>{residuals})...};
     }
 
-    void startVoice(std::size_t v) noexcept
+    void startVoice(std::size_t v, float since = 0.0f) noexcept
     {
         if (retrigger)
         {
-            oscillators[v].jumpTo(startPhase);
+            oscillators[v].jumpTo(startPhase, since);
         }
         else if (!oscillators[v].isRunning())
         {

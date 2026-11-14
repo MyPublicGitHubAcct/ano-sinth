@@ -95,6 +95,13 @@ public:
         }
         WaveShape shape;
         shape.count = N;
+        double sum = 0.0;
+        for (std::size_t i = 0; i < N; ++i)
+        {
+            const double end = i + 1 < N ? segments[i + 1].start : 1.0;
+            sum += (end - segments[i].start) * 0.5 * (segments[i].from + segments[i].to); // a trapezium
+        }
+        shape.average = static_cast<float>(sum);
         for (std::size_t i = 0; i < N; ++i)
         {
             const std::size_t before = (i + N - 1) % N;
@@ -124,6 +131,14 @@ public:
     [[nodiscard]] constexpr std::span<const WaveCorner> corners() const noexcept
     {
         return {points.data(), count};
+    }
+
+    /// The waveform's mean over a cycle: its DC, and all a band-limited
+    /// version of it keeps once its fundamental is above Nyquist. The sine
+    /// part adds nothing.
+    [[nodiscard]] constexpr float mean() const noexcept
+    {
+        return average;
     }
 
     [[nodiscard]] constexpr float sineLevel() const noexcept
@@ -170,6 +185,7 @@ private:
     std::array<WaveCorner, maxCorners> points{};
     std::size_t count = 0;
     float sineAmplitude = 0.0f;
+    float average = 0.0f;
 };
 
 /// The fixed pulse widths. Provisional (inventory W2): "half" and "quarter"

@@ -28,7 +28,7 @@ Three things limit the pitch the oscillator actually plays:
   | 1 Hz | 0.018 | 0.019 |
   | 0.01 Hz | 1.8 | 1.9 |
 
-  Above about 200 Hz the float arithmetic dominates; below 20 Hz the fixed point does.
+  Above about 200 Hz the float arithmetic dominates; below 20 Hz the fixed point does. The unit grows with the rate: at 0.01 Hz the floor is 3.87 cents at 96 kHz and 7.72 at 192 kHz, measured over whole cycles in [oscillator-range.md](oscillator-range.md#the-bottom-of-the-range).
 - **Hearing.** Listeners just distinguish about 5 cents for pure tones in the midrange, so even 0.03 cents at 0.6 Hz (a sub-audio LFO rate) is 150 times finer than needed.
 
 ### Volume taper
@@ -145,7 +145,7 @@ From the `[controls-report]` run ([oscillator_controls_report.cpp](../../tests/d
 
 - **At 20 Hz and above, the worst error is 0.0013 cents**, about 4,000 times finer than the 5-cent threshold of hearing. At the bottom of that range it is the fixed-point floor (0.0009–0.0010 cents at 20 Hz) plus float rounding. Higher up, float rounding alone reaches 0.0012 cents.
 - **Below 20 Hz, the fixed-point floor takes over**, as predicted: the worst is −0.030 cents at the lowest pitch the tuning can reach (MIDI 0, −3 octaves, −7, −1 fine, about 0.64 Hz), against a floor of 0.030 cents there. It is always flat, because the increment is truncated.
-- **Pitches above Nyquist** (high notes with high tuning) clamp to a Nyquist increment, by design.
+- **Pitches above Nyquist** (high notes with high tuning) clamp to a Nyquist increment, by design. There a voice plays only its waveform's mean, faded to it from 0.45 fs ([oscillator-range.md](oscillator-range.md)), not the tone at Nyquist that a clamped increment would otherwise make.
 
 **The measured frequency of the rendered sine**, through the slot, from a least-squares fit to its upward zero crossings (`measureFrequency`, [measuring-dsp.md](measuring-dsp.md)). Fine in quarters, base notes 21, 60, and 96, targets below 5 kHz, A4 = 443.5 Hz, 0.5 s per render or 4.5 cycles if longer:
 

@@ -459,6 +459,42 @@ TEST_CASE("OscillatorSlot: a retrigger is the oscillator's restart or jump, bit 
     }
 }
 
+TEST_CASE("OscillatorSlot: a note-on at a sub-sample time is the oscillator's jump at that time, bit for bit",
+          "[dsp][oscillator][slot][phase]")
+{
+    // noteOn(since): the note-on came `since` samples, in [0, 1), before the
+    // next sample, for events finer than a sample (an arpeggiator step, a
+    // sync source). From silence, jumpTo() is restart() at the phase the
+    // next sample would have; while sounding, a jump at that time.
+    for (const auto shape : periodicShapes)
+    {
+        CAPTURE(shapeName(shape));
+        auto slot = preparedSlot(shape);
+        slot.setPhaseDegrees(77.0f);
+        routeHardLeft(slot);
+        slot.noteOn(0.375f);
+        Buffer out{2, 1500};
+        slot.process(out.block().subBlock(0, 600), 70.0f);
+        slot.noteOn(0.8125f);
+        slot.process(out.block().subBlock(600, 900), 70.0f);
+
+        auto osc = Candidate<MinBlep64>::make();
+        osc.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 1});
+        osc.setWaveform(shape);
+        osc.setFrequency(noteToFrequency(70.0f));
+        osc.jumpTo(anoesis::dsp::phaseFromDegrees(77.0f), 0.375f);
+        for (std::size_t i = 0; i < out.numSamples(); ++i)
+        {
+            if (i == 600)
+            {
+                osc.jumpTo(anoesis::dsp::phaseFromDegrees(77.0f), 0.8125f);
+            }
+            CAPTURE(i);
+            REQUIRE_THAT(out.channel(0)[i], WithinULP(osc.next(), 0));
+        }
+    }
+}
+
 TEST_CASE("OscillatorSlot: a Phase change while a note is held waits for the next retrigger",
           "[dsp][oscillator][slot][phase]")
 {

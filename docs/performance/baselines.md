@@ -6,6 +6,58 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-14: M1.1 oscillator range (the Nyquist fade, pitch steps)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark.
+- **What changed** ([oscillator-range.md](../dsp/oscillator-range.md)):
+  - `MinBlepOscillator` fades its output about the waveform's mean from 0.45 fs, through one predictable branch per sample (`finishing`) that is false below 0.45 fs once an onset has settled.
+  - `setIncrement` checks the size of the change: a pitch step of 6.1·10⁻⁵ cycles or more adds one ramp residual, at the next sample's corner scan.
+  - `addResidual()` adds in two contiguous runs instead of through a masked ring index, so clang vectorises it.
+  - New rows: a saw in the fade band (0.47 fs) and above Nyquist (0.6 fs); a 6 Hz vibrato set every sample; a pitch step every 64 samples; a sweep of 10 octaves in one block (a step on most samples).
+- **Before and after, same session:** the parent (`9fef36a`), this tree, the parent again (exported with `git archive`, `external/` and `.cache/` symlinked, built `relwithdebinfo`), then this tree twice more. The parent was also run once with this commit's benchmark file, for the new rows. The threshold was first 8 times lower; the rows marked † were measured with it, before the project owner chose the final threshold.
+
+| Benchmark (ns / sample) | parent (two runs) | this commit (two runs) | change |
+|---|---:|---:|---:|
+| minBLEP 64-tap, saw 440 Hz | 3.03, 3.06 | 2.90, 2.90 | −5% to −4% |
+| minBLEP 64-tap, triangle 440 Hz | 3.74, 3.44 | 3.31, 3.31 | −11% to −4% |
+| minBLEP 64-tap, sine 440 Hz | 8.69, 8.45 | 8.54, 8.33 | −4% to +1% |
+| minBLEP 64-tap, saw 5 kHz | 7.15, 7.52 | 5.38, 4.85 | −36% to −25% |
+| minBLEP 64-tap, saw 12 kHz | 12.43, 12.61 | 8.38, 7.94 | −37% to −33% |
+| minBLEP 64-tap, square 12 kHz | 23.93, 23.77 | 15.30, 13.87 | −42% to −36% |
+| minBLEP 64-tap, triangle 12 kHz | 24.20, 24.40 | 14.10, 13.98 | −43% to −42% |
+| minBLEP 64-tap, TriSaw 12 kHz | 33.84, 33.85 | 18.74, 19.23 | −45% to −43% |
+| minBLEP 64-tap, saw 440 Hz, pitch set every sample (±1 st at 384 Hz) | 4.23, 4.22 | 4.36, 4.25 († 17.34, 16.86) | 0% to +3% |
+| minBLEP 64-tap, 32 saws (4 osc x 8 unison) | 96.33, 94.67 | 93.32, 91.04 | −5% to −1% |
+| Oscillator slot, saw 440 Hz, settled | 3.22, 3.22 | 3.37, 3.23 | 0% to +5% |
+| Oscillator slot, saw 440 Hz, pitch per sample | 6.31, 6.19 | 6.56, 6.47 († 19.25, 19.04) | +3% to +6% |
+| Oscillator slot, TriSaw 12 kHz, settled | 33.44, 33.95 | 19.51, 18.78 | −45% to −42% |
+| Unison slot, saw 440 Hz, 8 voices | 25.86, 25.94 | 25.46, 24.88 | −4% to −2% |
+| Unison slot, saw 12 kHz, 8 voices | 107.76, 107.60 | 69.85, 68.72 | −36% to −35% |
+| Unison slot, saw 440 Hz, 8 voices, pitch per sample | 35.74, 36.08 | 41.13, 38.97 († 136.82, 134.79) | +8% to +15% |
+| Unison: 32-voice note into one bus | 102.83, 101.18 | 104.27, 104.89 | +1% to +4% |
+| minBLEP 64-tap, saw 1 kHz synced to a 1.09 kHz master | 4.77, 4.82 | 4.46, 4.58 | −7% to −4% |
+
+New rows, with the parent measured once on the same benchmark file:
+
+| Benchmark (ns / sample) | parent | this commit (two runs) |
+|---|---:|---:|
+| minBLEP 64-tap, saw at 0.47 fs (in the Nyquist fade) | 24.58 | 14.11, 14.15 |
+| minBLEP 64-tap, saw at 0.6 fs (above Nyquist: its mean; the parent plays the clamped Nyquist tone) | 22.85 | 14.71, 13.99 |
+| minBLEP 64-tap, saw 440 Hz, a 6 Hz vibrato set every sample | 4.90 | 4.77, 4.77 |
+| minBLEP 64-tap, saw 440 Hz, a pitch step every 64 samples | 3.28 | 3.54, 3.45 |
+| minBLEP 64-tap, saw, 20 Hz to 20 kHz in one block (a step on most samples) | 7.14 | 15.19, 15.23 |
+
+### Observations
+
+- **Constant pitch is unchanged below the fade band.** The fade costs one predictable branch, and the pitch-step check sits in `setIncrement`, outside the per-sample loop.
+- **High notes are 25–45% faster**, at every waveform but the sine (which has no edges), because the residual add vectorises now. That is the "masked ring index" item from D6's Phase 3 list, done with two contiguous loops rather than a double-length buffer. Unison at 12 kHz gains the same: 8 voices 108 → 69 ns.
+- **A pitch every sample costs about 0.4 ns more per voice** (+3 to +15%), for the change and fade checks in `setIncrement`. With the first, lower threshold, a fast vibrato crossed it on every sample and paid a residual there: the † figures.
+- **A pitch step costs one residual when it happens:** +0.2 ns per sample at one step every 64 samples. A sweep that steps on most samples pays it almost every sample (7.1 → 15.2 ns).
+- **A voice in the fade band or above Nyquist** costs what a Nyquist-rate saw does (14 ns), less than the parent's clamped tone (23–25 ns) thanks to the vectorised adds, although it outputs a constant. Skipping it is a Phase 3 item.
+- `Unison slot, 0 voices` reads 0.14 against 0.13 ns per sample: 5 ns per block, the resolution of the measurement.
+
+---
+
 ## 2026-11-14: M1.1 unison
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark, on the working tree of the commit that adds unison (it reports its parent, `1aa1b42`, as modified).

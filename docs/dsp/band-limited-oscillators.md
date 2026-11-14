@@ -133,6 +133,7 @@ Under a ±25% vibrato at 6.6 Hz, saw carrier at 1978 Hz and at 4945 Hz:
 | 2× | −72.0 / −69.2 | −96.1 / −92.6 | −116.6 / −113.6 | −135.2 / −131.7 | −71.4 / −67.1 |
 
 - The BLEP methods do as well under modulation as they do at a steady pitch. minBLEP times each edge with the increment that actually crossed it, so its edge positions stay exact under any modulation.
+- A pitch *step* is a different matter, found later ([oscillator-range.md](oscillator-range.md#pitch-steps-a-bend-in-time)). It bends the straight segments in time, and minBLEP's slope × delay compensation jumps with it: a click of up to slope change × 2.79. A change of 6.1·10⁻⁵ cycles or more in one sample now adds that bend as a ramp residual, on the segment of the next sample. Smooth modulation like this vibrato changes less than that per sample, so it is unchanged.
 - The wavetable's level changes are a separate problem. A glide that crosses from one level to the next (from 128 to 64 harmonics, for example) makes the output jump by up to **0.42**: a click, unless adjacent levels are crossfaded, which doubles the reads.
 
 ### Stability, DC, memory, and CPU
@@ -147,7 +148,7 @@ Under a ±25% vibrato at 6.6 Hz, saw carrier at 1978 Hz and at 4945 Hz:
 | ns per oscillator-sample, 32-saw bank | 2.5 | 2.4 | 3.0 | 2.9 | 2.4 |
 | ns per sample, 12 kHz square | 3.3 | 4.2 | 13.1 | 22.2 | 2.5 |
 
-All five stay finite, bounded, and free of denormals for every shape from 0 Hz to fs (clamped to Nyquist), at 44.1 and 48 kHz. CPU is from [baselines.md](../performance/baselines.md) (Apple M1 Ultra, virtualised). The 32-saw bank is one note's worth (4 oscillators × 8 unison voices at 110–880 Hz). At ordinary pitches the per-sample overhead dominates, so all five cost about the same. minBLEP's cost grows with the edge rate.
+All five stay finite, bounded, and free of denormals for every shape from 0 Hz to fs (clamped to Nyquist), at 44.1 and 48 kHz. Above Nyquist, the minBLEP oscillator now fades to its waveform's mean from 0.45 fs, instead of playing the clamped Nyquist increment ([oscillator-range.md](oscillator-range.md)), and the whole slot is tested across the range at 44.1 to 192 kHz. CPU is from [baselines.md](../performance/baselines.md) (Apple M1 Ultra, virtualised). The 32-saw bank is one note's worth (4 oscillators × 8 unison voices at 110–880 Hz). At ordinary pitches the per-sample overhead dominates, so all five cost about the same. minBLEP's cost grows with the edge rate.
 
 ## The choice: minBLEP, 64 taps
 
@@ -161,7 +162,7 @@ All five stay finite, bounded, and free of denormals for every shape from 0 Hz t
 - **Taps are a quality setting.** The table is built at initialisation, so 32 taps (−66.5 dB, 176 B, 16.6 KB, 13 ns at 12 kHz) stays available. Sylenth1 v3 has separate real-time and render quality settings (inventory §15), and a 32-tap real-time / 64-tap render split would mirror that.
 - **Overshoot.** Minimum phase overshoots by about 37% on a saw (9% for linear phase). That costs headroom ahead of the filter's drive stages, and drive will respond to it. Whether Sylenth1's oscillators overshoot like this is not known; M1.13 can measure it against the demo. A linear-phase BLEP with a lookahead of half the taps (about 0.7 ms at 64 taps) would remove the extra overshoot. It wasn't measured, because the aliasing would be the same.
 - **Latency.** 2.79 samples of group delay. It is the same for every oscillator, so mixing them causes no comb filtering, and it is far too small to report to the host.
-- **High-pitch cost and SIMD (Phase 3).** The residual add uses a masked ring index, which blocks vectorisation. A double-length linear buffer would let the 64 multiply-adds per edge run 4 or 8 wide. Across unison voices the edges fall at different samples, so SIMD across voices needs per-lane edge handling. The constraints found while building unison are listed in [oscillator-unison.md](oscillator-unison.md#simd-across-voices-phase-3).
+- **High-pitch cost and SIMD (Phase 3).** The residual add used a masked ring index, which blocked vectorisation. It now adds in two contiguous runs, up to the ring's end and on from its start, which clang vectorises: high notes are 25–45% faster ([oscillator-range.md](oscillator-range.md#cpu)). A double-length linear buffer would remove the split. Across unison voices the edges fall at different samples, so SIMD across voices needs per-lane edge handling. The constraints found while building unison are listed in [oscillator-unison.md](oscillator-unison.md#simd-across-voices-phase-3).
 - **Waveforms.** All 8 are built on this oscillator, as data: lists of corners with their jumps and bends, plus a sine. Noise is generated separately. See [oscillator-waveforms.md](oscillator-waveforms.md), which also reports every waveform's measurements.
 
 ## Tests

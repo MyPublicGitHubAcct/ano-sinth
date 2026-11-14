@@ -7,6 +7,8 @@
 
 #include "oscillator_support.hpp"
 
+#include <anoesis/dsp/math/random.hpp>
+
 #include <anoesis/test/measure.hpp>
 #include <anoesis/test/signals.hpp>
 #include <anoesis/test/spectrum.hpp>
@@ -23,11 +25,14 @@
 #include <cstdint>
 #include <numbers>
 #include <numeric>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 using namespace anoesis::test;
 using namespace anoesis::test::d6;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinULP;
 
 namespace
 {
@@ -368,6 +373,102 @@ TEMPLATE_TEST_CASE("Band-limited oscillators switch waveform mid-note without lo
                 ++checked;
             }
             CHECK(checked > after / 2);
+        }
+    }
+}
+
+TEMPLATE_TEST_CASE("minBLEP band-limits a pitch step: exactly a band-limited bend, so no click",
+                   "[dsp][oscillator][range]", MinBlep32, MinBlep64)
+{
+    // A pitch step at a sample changes the waveform's slope per sample there
+    // from s c0 to s c1 (s per cycle): a bend in time of b = s (c1 - c0).
+    // Band-limited, the output's deviation from the ideal waveform at the
+    // delayed phase is b (R(n) + min(n - delay, 0)) at the n-th sample from
+    // the step, R being the table's ramp residual for an edge at a sample:
+    // the minimum-phase bend, with the delay compensation in it. Without
+    // it, the output is off by b x delay at once (b x 2.79 at 64 taps).
+    // The sine is evaluated on its delayed phase trajectory, so it follows
+    // the step exactly: no deviation at all. Steps between 1e-4 and 2e-3
+    // cycles per sample, mid-segment, so no corner is within the residuals'
+    // reach (the pulses, flat between their corners, have nothing to bend).
+    const auto& table = std::is_same_v<TestType, MinBlep32> ? minBlepTable32() : minBlepTable64();
+    const double delay = table.delay();
+    constexpr double unitsPerCycle = 4294967296.0;
+    for (const auto shape : {Waveform::saw, Waveform::triangle, Waveform::trisaw, Waveform::sine})
+    {
+        for (const auto& [c0, c1] : {std::pair{1e-4, 2e-3}, std::pair{2e-3, 1e-4}, std::pair{5e-4, 1.5e-3}})
+        {
+            CAPTURE(Candidate<TestType>::name, shapeName(shape), c0, c1);
+            auto osc = prepared<TestType>(shape);
+            osc.restart(static_cast<std::uint32_t>(0.1 * unitsPerCycle));
+            const auto i0 = static_cast<std::uint32_t>(c0 * unitsPerCycle);
+            const auto i1 = static_cast<std::uint32_t>(c1 * unitsPerCycle);
+            osc.setIncrement(i0);
+            for (int n = 0; n < 100; ++n)
+            {
+                static_cast<void>(osc.next());
+            }
+            osc.setIncrement(i1);
+            const auto stepPhase = static_cast<double>(osc.nextPhase());
+            // The slope per cycle of the segment the step is in.
+            const double s = shape == Waveform::sine ? 0.0 : (idealWave(shape, 0.15) - idealWave(shape, 0.12)) / 0.03;
+            const double b = s * (static_cast<double>(i1) - static_cast<double>(i0)) / unitsPerCycle;
+            for (std::size_t n = 0; n < Candidate<TestType>::guardSamples; ++n)
+            {
+                const double x = static_cast<double>(n) - delay; // the delayed time, from the step
+                const double phase = stepPhase + ((x < 0.0 ? static_cast<double>(i0) : static_cast<double>(i1)) * x);
+                const double ideal = idealWave(shape, phase / unitsPerCycle);
+                const double expected = b * (static_cast<double>(table.ramp(0, n)) + std::min(x, 0.0));
+                CAPTURE(n);
+                REQUIRE_THAT(static_cast<double>(osc.next()) - ideal, WithinAbs(expected, 2e-6));
+            }
+        }
+    }
+    // A pitch step and a jump between the same two samples, in either order:
+    // the bend is at the next sample, on the segment the jump lands in, so
+    // the order makes no difference, bit for bit. (Bending the segment
+    // before the jump peaked at 9.0 on the triangle.)
+    anoesis::dsp::Random random{5};
+    for (const auto shape : periodicShapes)
+    {
+        auto a = prepared<TestType>(shape);
+        auto b = prepared<TestType>(shape);
+        for (int event = 0; event < 200; ++event)
+        {
+            const auto to = static_cast<std::uint32_t>(random.nextUnipolar() * 0.45f * 4294967296.0f);
+            const std::uint32_t target = random.nextUint32();
+            const float since = random.nextUnipolar();
+            a.setIncrement(to);
+            a.jumpTo(target, since);
+            b.jumpTo(target, since);
+            b.setIncrement(to);
+            for (std::uint32_t n = 0; n < 1 + (random.nextUint32() % 8U); ++n)
+            {
+                CAPTURE(Candidate<TestType>::name, shapeName(shape), event, n);
+                REQUIRE_THAT(a.next(), WithinULP(b.next(), 0));
+            }
+        }
+    }
+    // A step from 0.01 Hz to 0.42 fs, the largest, from any phase: no
+    // overshoot beyond the oscillator's own. It measured 5.4 (the
+    // triangle) when a step was not band-limited.
+    for (const auto shape : periodicShapes)
+    {
+        for (std::uint32_t k = 0; k < 16; ++k)
+        {
+            CAPTURE(Candidate<TestType>::name, shapeName(shape), k);
+            auto osc = prepared<TestType>(shape);
+            osc.restart(k << 28U);
+            osc.setFrequency(0.01f);
+            for (int n = 0; n < 100; ++n)
+            {
+                static_cast<void>(osc.next());
+            }
+            osc.setIncrement(static_cast<std::uint32_t>(0.42 * unitsPerCycle));
+            for (int n = 0; n < 200; ++n)
+            {
+                REQUIRE(std::abs(osc.next()) < Candidate<TestType>::peak);
+            }
         }
     }
 }

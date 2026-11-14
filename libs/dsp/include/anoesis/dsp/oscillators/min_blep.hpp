@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 #include <numbers>
+#include <span>
 #include <vector>
 
 /// Band-limited oscillator: minBLEP / minBLAMP (Brandt, 2001), the method
@@ -54,14 +55,66 @@
 /// so it is evaluated at the phase latencySamples() ago instead, read from a
 /// short phase history.
 ///
+/// The range, 0 Hz to beyond Nyquist (docs/dsp/oscillator-range.md):
+///
+/// - Near and above Nyquist the output fades about the waveform's mean
+///   (nyquistFadeGain()), so a voice above Nyquist plays its mean alone,
+///   the band-limited ideal. The mean switches on with the onset's
+///   band-limited step, so an onset still starts at 0.
+/// - A pitch step bends the waveform in time, and the slope's delay
+///   compensation with it: a change of bandLimitedPitchStep or more adds
+///   that bend as a ramp residual, on the next sample's segment.
+/// - Nothing accumulates: the state is the integer phase, residuals read
+///   and cleared within Taps samples, and 8 samples of sine phase history,
+///   so the output depends only on the last Taps + 8 samples' phases.
+///
 /// Docs: docs/dsp/band-limited-oscillators.md, docs/dsp/oscillator-waveforms.md,
-/// docs/dsp/oscillator-phase.md
+/// docs/dsp/oscillator-phase.md, docs/dsp/oscillator-range.md
 namespace anoesis::dsp
 {
 
 /// The residual length chosen in D6. 32 taps (-66.5 dB, half the work per
 /// edge and half the memory) is the candidate for a cheaper real-time mode.
 inline constexpr std::size_t minBlepTaps = 64;
+
+/// The smallest change of increment, in phase units (6.1e-5 cycles: 2.9 Hz
+/// at 48 kHz), that is band-limited as a bend. A pitch step changes the
+/// waveform's slope per sample at once, and the slope's delay compensation
+/// with it; band-limited, it is a ramp residual, like a corner's bend. A
+/// smaller change is left as it is, which is off by at most |slope| x
+/// change x latencySamples(): 6.8e-4 (-63 dB) at the steepest slope (the
+/// triangle's, 4 per cycle) at 64 taps, and decays within a few samples.
+/// So steps (legato, a square LFO, block-rate updates) are exact, while
+/// smooth per-sample modulation, whose changes are smaller, costs no
+/// residuals: one per sample would cost 64 multiply-adds (decided
+/// 2026-11-14; docs/dsp/oscillator-range.md).
+inline constexpr std::uint32_t bandLimitedPitchStep = 1U << 18U;
+
+/// Where the Nyquist fade starts: 0.45 cycles per sample (19.8 kHz at
+/// 44.1 kHz, 21.6 kHz at 48 kHz), as an increment.
+inline constexpr std::uint32_t nyquistFadeStart = 0x73333333U;
+
+/// The gain on a voice's waveform about its mean, for its increment: 1 up to
+/// nyquistFadeStart, then a raised cosine to 0 at Nyquist (an increment of
+/// halfCycle, or more), which it stays at above. A band-limited waveform
+/// whose fundamental is above Nyquist has nothing left below it but its
+/// mean, so that is what a voice plays there; the cosine gets it there with
+/// no step, however fast the pitch moves. Decided 2026-11-14; the
+/// alternatives and their measurements are in docs/dsp/oscillator-range.md.
+[[nodiscard]] inline float nyquistFadeGain(std::uint32_t increment) noexcept
+{
+    if (increment <= nyquistFadeStart)
+    {
+        return 1.0f;
+    }
+    if (increment >= halfCycle)
+    {
+        return 0.0f;
+    }
+    constexpr auto band = static_cast<float>(halfCycle - nyquistFadeStart);
+    const float x = static_cast<float>(increment - nyquistFadeStart) / band;
+    return 0.5f + (0.5f * std::cos(std::numbers::pi_v<float> * x));
+}
 
 /// The step and compensated ramp residual tables, laid out by phase:
 /// row p (0..phases()) holds taps 0..taps()-1 at x = tap + p / phases()
@@ -166,6 +219,10 @@ public:
         ring.fill(0.0f);
         position = 0;
         started = false;
+        onsetAge = 0;
+        finishing = true;
+        pitchStep = {};
+        onsetSince = 0.0f;
         untilCorner = 0;
         historyValid = false;
         jump = {};
@@ -183,7 +240,9 @@ public:
     ///
     /// Call it between samples, at most once per sample. Before the first
     /// sample (see isRunning()) there is nothing to jump from, and it is
-    /// restart() at the phase the next sample would have.
+    /// restart() at the phase the next sample would have: `newPhase` moved
+    /// on by `since` x the first sample's increment, whatever it is set to
+    /// before that sample.
     ///
     /// The sine's part is band-limited in value and slope too. It is delayed
     /// by evaluating it latencySamples() late, so its naive jump comes out
@@ -194,7 +253,10 @@ public:
         since = since > 0.0f ? std::min(since, almostOne) : 0.0f; // and NaN is 0
         if (!started)
         {
-            restart(newPhase + partOf(increment, since));
+            // The first sample's increment is not known yet: the onset's
+            // scan moves the phase on (scanCorners()).
+            restart(newPhase);
+            onsetSince = since;
             return;
         }
 
@@ -253,6 +315,8 @@ public:
     void setShape(const WaveShape& newShape) noexcept
     {
         shape = &newShape;
+        mean = newShape.mean();
+        updateFade();
         sineLevel = newShape.sineLevel();
         hasSine = sineLevel < 0.0f || sineLevel > 0.0f;
         untilCorner = 0; // find the segment and the next corner on the next sample
@@ -265,9 +329,28 @@ public:
         setIncrement(incrementFor(hz, sampleRate));
     }
 
+    /// Any increment; one of halfCycle (Nyquist) or more plays the
+    /// waveform's mean alone (see nyquistFadeGain()). The change takes
+    /// effect from the next sample. A change of bandLimitedPitchStep or more
+    /// while the oscillator runs is a pitch step: the slope's change there is
+    /// added as a ramp residual, like a corner's bend, so the step is
+    /// band-limited and does not click.
     void setIncrement(std::uint32_t newIncrement) noexcept
     {
-        increment = newIncrement < halfCycle ? newIncrement : halfCycle;
+        newIncrement = newIncrement < halfCycle ? newIncrement : halfCycle;
+        const std::uint32_t change = newIncrement > increment ? newIncrement - increment : increment - newIncrement;
+        if (change >= bandLimitedPitchStep && !pitchStep.pending)
+        {
+            // The bend goes in when the next sample's segment is known,
+            // after any jumpTo() before it: force the slow path there.
+            pitchStep = {.pending = true, .from = increment};
+            untilCorner = 0;
+        }
+        increment = newIncrement;
+        if (increment > nyquistFadeStart || fading)
+        {
+            updateFade();
+        }
     }
 
     /// The phase step per sample (2^32 per cycle), after clamping to Nyquist:
@@ -275,6 +358,13 @@ public:
     [[nodiscard]] std::uint32_t phaseIncrement() const noexcept
     {
         return increment;
+    }
+
+    /// The residuals in flight, for measurement (the range test checks them
+    /// for subnormals): the ring's Taps samples, in storage order.
+    [[nodiscard]] std::span<const float, Taps> residuals() const noexcept
+    {
+        return ring;
     }
 
     /// The kernel's group delay: edges and slopes come out this late.
@@ -331,7 +421,40 @@ private:
         position = (position + 1) & (Taps - 1);
         phase += increment;
         arrivedBy = increment;
+        if (finishing)
+        {
+            y = finish(y);
+        }
         return y;
+    }
+
+    // The rare samples: the Nyquist fade, within 0.05 fs of Nyquist or above
+    // it, and the first Taps samples after an onset, while the mean's own
+    // onset rings. The waveform fades about its mean, and the mean switches
+    // on with the same band-limited step as the waveform (1 + the step
+    // residual), so an onset still starts at 0.
+    [[nodiscard]] float finish(float y) noexcept
+    {
+        float offset = fadeOffset;
+        if (onsetAge < Taps)
+        {
+            offset *= 1.0f + table->step(0, onsetAge);
+            ++onsetAge;
+        }
+        if (fading)
+        {
+            y = offset + (fadeGain * y);
+        }
+        finishing = fading || onsetAge < Taps;
+        return y;
+    }
+
+    void updateFade() noexcept
+    {
+        fadeGain = nyquistFadeGain(increment);
+        fadeOffset = (1.0f - fadeGain) * mean;
+        fading = fadeGain < 1.0f;
+        finishing = fading || onsetAge < Taps;
     }
 
     // The sine is read from the phase history, wholeSamples + 1 back.
@@ -388,6 +511,13 @@ private:
     // finds the segment the phase is now in, and how far the next corner is.
     void scanCorners(std::uint32_t step) noexcept
     {
+        if (!started)
+        {
+            // The onset: a jumpTo() from silence `onsetSince` samples before
+            // this sample, at this sample's increment.
+            phase += partOf(increment, onsetSince);
+            onsetSince = 0.0f;
+        }
         const float stepCycles = toCycles(step);
         std::uint64_t nearest = std::numeric_limits<std::uint64_t>::max();
         for (const auto& corner : shape->corners())
@@ -401,15 +531,29 @@ private:
         untilCorner = nearest;
         if (shape->corners().empty())
         {
+            // The sine follows a pitch step exactly, on its phase history.
             segmentPhase = 0;
             segmentValue = 0.0f;
             segmentSlope = 0.0f;
+            pitchStep = {};
             return;
         }
         const auto& segment = shape->cornerAt(phase);
         segmentPhase = segment.phase;
         segmentValue = segment.value;
         segmentSlope = segment.slope;
+        if (pitchStep.pending)
+        {
+            // A pitch step at this sample: the slope per sample bends by the
+            // segment's slope times the change in cycles per sample. (The
+            // onset, when not started, already starts at the new slope.)
+            const float bend = segmentSlope * (toCycles(increment) - toCycles(pitchStep.from));
+            if (started && (bend < 0.0f || bend > 0.0f))
+            {
+                addResidual(&MinBlepTable::rampRow, 0.0f, bend);
+            }
+            pitchStep = {};
+        }
     }
 
     // Adds `height` x the residual `row` for an edge `since` samples ago.
@@ -422,9 +566,17 @@ private:
         const float w = scaled - static_cast<float>(p);
         const float* r0 = (table->*rowOf)(p);
         const float* r1 = (table->*rowOf)(p + 1);
-        for (std::size_t i = 0; i < Taps; ++i)
+        // Two contiguous runs, up to the ring's end and on from its start,
+        // so the loops vectorize (a wrapping index does not).
+        const std::size_t first = Taps - position;
+        float* const head = ring.data() + position;
+        for (std::size_t i = 0; i < first; ++i)
         {
-            ring[(position + i) & (Taps - 1)] += height * (r0[i] + (w * (r1[i] - r0[i])));
+            head[i] += height * (r0[i] + (w * (r1[i] - r0[i])));
+        }
+        for (std::size_t i = first; i < Taps; ++i)
+        {
+            ring[i - first] += height * (r0[i] + (w * (r1[i] - r0[i])));
         }
     }
 
@@ -540,6 +692,14 @@ private:
     float segmentSlope = 0.0f;
     std::uint64_t untilCorner = 0;
     float sineLevel = 0.0f;
+    float mean = 0.0f; // the shape's
+    // The Nyquist fade, for the current increment: y = fadeOffset + fadeGain
+    // x y while `fading`, so the output tends to the mean.
+    float fadeGain = 1.0f;
+    float fadeOffset = 0.0f;
+    bool fading = false;
+    bool finishing = false;        // fading, or the onset is still ringing: finish() runs
+    std::uint32_t onsetAge = Taps; // samples since the onset, up to Taps
     bool hasSine = false;
     bool historyValid = false;
     float sampleRate = 48000.0f;
@@ -570,6 +730,15 @@ private:
         std::uint32_t step = 0;
     };
     PendingJump jump;
+    // A change of increment of bandLimitedPitchStep or more, waiting for the
+    // next sample's segment: `from` is the increment before it.
+    struct PendingPitchStep
+    {
+        bool pending = false;
+        std::uint32_t from = 0;
+    };
+    PendingPitchStep pitchStep;
+    float onsetSince = 0.0f; // a jumpTo() from silence, before the onset
     std::array<Past, historySize> history{};
     std::array<float, Taps> ring{};
 };

@@ -1,20 +1,25 @@
-// The range report, above Nyquist: what a voice whose pitch is above Nyquist
-// plays now that it is clamped to a Nyquist increment, the level of every
-// waveform as its fundamental approaches Nyquist, and prototypes of the
-// alternatives to the clamp (muting, at once or ramped; fading near
-// Nyquist; fading to the waveform's mean), each under a sweep through
-// Nyquist, a fast vibrato across it, and, for the clamp, a driven saturator
-// at 4x oversampling downstream. Hidden from the default run; run it in an
-// optimised build (a few seconds):
+// The range report: the oscillator from 0.01 Hz to beyond Nyquist, as built.
+// Above Nyquist and through the fade band (every waveform's level and DC,
+// sweeps and a vibrato across Nyquist, a saturator downstream); the bottom
+// of the range (period and phase at 0.01 Hz at every rate, and the error of
+// the float evaluation there); and the peaks under the stress run that the
+// range test bounds. Hidden from the default run; run it in an optimised
+// build (about 10 s):
 //
 //   cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[range-report]"
 //
-// Results, and the option chosen: docs/dsp/oscillator-range.md
+// The long runs (12.4 hours of simulated time at 0.01 Hz, one hour near
+// Nyquist) are a separate hidden case, about a minute:
+//
+//   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[range-long-report]"
+//
+// The options for the behaviour above Nyquist, prototyped against the clamp
+// that came before, are measured by this report at commit 9fef36a.
+// Results: docs/dsp/oscillator-range.md
 
-#include "oscillator_support.hpp"
+#include "range_support.hpp"
 
-#include <anoesis/dsp/control/smoother.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
 #include <anoesis/dsp/math/random.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>
@@ -42,29 +47,18 @@
 
 using namespace anoesis::test;
 using namespace anoesis::test::d6;
-using anoesis::dsp::halfCycle;
+using namespace anoesis::test::range;
+using anoesis::dsp::incrementFor;
+using anoesis::dsp::waveShape;
 
 namespace
 {
 
 constexpr double rate = 48000.0;
 
-MinBlep64 preparedOscillator(Waveform shape, double sampleRate = rate)
+double meanOf(std::span<const float> x)
 {
-    auto osc = Candidate<MinBlep64>::make();
-    osc.prepare({.sampleRate = static_cast<float>(sampleRate), .maxBlockSize = 512, .numChannels = 1});
-    osc.setWaveform(shape);
-    return osc;
-}
-
-double mean(std::span<const float> x)
-{
-    double sum = 0.0;
-    for (const float v : x)
-    {
-        sum += v;
-    }
-    return sum / static_cast<double>(x.size());
+    return std::accumulate(x.begin(), x.end(), 0.0) / static_cast<double>(x.size());
 }
 
 double rmsAbout(std::span<const float> x, double centre)
@@ -75,27 +69,6 @@ double rmsAbout(std::span<const float> x, double centre)
         sum += (v - centre) * (v - centre);
     }
     return std::sqrt(sum / static_cast<double>(x.size()));
-}
-
-double peakOf(std::span<const float> x)
-{
-    double peak = 0.0;
-    for (const float v : x)
-    {
-        peak = std::max(peak, static_cast<double>(std::abs(v)));
-    }
-    return peak;
-}
-
-// The amplitude of the Nyquist component, y = dc + a (-1)^n.
-double nyquistAmplitude(std::span<const float> x)
-{
-    double sum = 0.0;
-    for (std::size_t i = 0; i < x.size(); ++i)
-    {
-        sum += (i % 2 == 0 ? 1.0 : -1.0) * x[i];
-    }
-    return std::abs(sum / static_cast<double>(x.size()));
 }
 
 std::string db(double ratio)
@@ -119,73 +92,71 @@ std::string fixed(double x, int digits = 3)
     return s.str();
 }
 
-// --- The clamp, measured ------------------------------------------------------
-
-void reportClamp(std::ostream& out)
+std::string scientific(double x, int digits = 1)
 {
-    out << "\n## A voice above Nyquist, as clamped now\n\n"
-           "Each waveform at a Nyquist increment (phase step 2^31), started at 256 phases (k/256 of a cycle) and, "
-           "separately, arrived at by a per-sample sweep from 0.45 fs to 0.55 fs over 0.1 s from 256 random phases. "
-           "Measured after 128 samples, over 4096. The output is exactly dc + a (-1)^n. "
-           "Amplitudes in dBFS (1.0 = 0 dB). The rate does not matter: in cycles, every rate is the same.\n\n"
-           "| Waveform | Ideal (band-limited) | DC | Nyquist amplitude, min / median / max (start phase) | Max (sweep) "
-           "| "
-           "Peak |\n|---|---|---:|---:|---:|---:|\n";
+    std::ostringstream s;
+    s << std::scientific << std::setprecision(digits) << x;
+    return s.str();
+}
+
+std::vector<float> renderPath(Waveform shape, std::span<const double> cycles, std::uint32_t startPhase,
+                              double sampleRate = rate)
+{
+    auto osc = preparedOscillator(shape, sampleRate);
+    osc.restart(startPhase);
+    std::vector<float> y(cycles.size());
+    for (std::size_t i = 0; i < cycles.size(); ++i)
+    {
+        osc.setFrequency(static_cast<float>(cycles[i] * sampleRate));
+        y[i] = osc.next();
+    }
+    return y;
+}
+
+// --- Above Nyquist and the fade band ----------------------------------------
+
+void reportAboveNyquist(std::ostream& out)
+{
+    out << "\n## Above Nyquist\n\n"
+           "Each waveform at 0.55 fs, after 0.3 fs, from 256 start phases; 4096 samples from the crossing. "
+           "Largest |output - mean| over all of them: 0 means the output is exactly the mean, every sample.\n\n"
+           "| Waveform | mean() | Output DC | Largest deviation from the mean |\n|---|---:|---:|---:|\n";
     for (const auto shape : periodicShapes)
     {
-        std::vector<double> amplitudes;
-        double dcMin = 1e9;
-        double dcMax = -1e9;
-        double peak = 0.0;
+        double worst = 0.0;
+        double dc = 0.0;
         for (std::uint32_t k = 0; k < 256; ++k)
         {
             auto osc = preparedOscillator(shape);
             osc.restart(k << 24U);
-            osc.setIncrement(halfCycle);
-            std::vector<float> y(128 + 4096);
-            for (auto& v : y)
+            osc.setFrequency(static_cast<float>(0.3 * rate));
+            for (int i = 0; i < 200; ++i)
             {
-                v = osc.next();
+                static_cast<void>(osc.next());
             }
-            const std::span tail{y.data() + 128, 4096};
-            amplitudes.push_back(nyquistAmplitude(tail));
-            dcMin = std::min(dcMin, mean(tail));
-            dcMax = std::max(dcMax, mean(tail));
-            peak = std::max(peak, peakOf(y));
-        }
-        double sweepMax = 0.0;
-        anoesis::dsp::Random random{7};
-        for (int k = 0; k < 256; ++k)
-        {
-            auto osc = preparedOscillator(shape);
-            osc.restart(random.nextUint32());
-            std::vector<float> y(4800 + 4096);
-            for (std::size_t i = 0; i < y.size(); ++i)
+            osc.setFrequency(static_cast<float>(0.55 * rate));
+            std::vector<float> y(4096);
+            std::ranges::generate(y, [&] { return osc.next(); });
+            const double mean = waveShape(shape).mean();
+            dc = meanOf(y);
+            for (const float v : y)
             {
-                const double f = i < 4800 ? 0.45 + (0.1 * static_cast<double>(i) / 4800.0) : 0.55;
-                osc.setFrequency(static_cast<float>(f * rate));
-                y[i] = osc.next();
+                worst = std::max(worst, std::abs(v - mean));
             }
-            sweepMax = std::max(sweepMax, nyquistAmplitude(std::span{y.data() + 4800, 4096}));
-            peak = std::max(peak, peakOf(y));
         }
-        std::ranges::sort(amplitudes);
-        out << "| " << shapeName(shape) << " | " << (std::abs(idealMean(shape)) > 0 ? "DC only" : "silence") << " | "
-            << fixed(dcMin) << (dcMax - dcMin > 1e-3 ? " to " + fixed(dcMax) : std::string{}) << " | "
-            << db(amplitudes.front()) << " / " << db(amplitudes[128]) << " / " << db(amplitudes.back()) << " | "
-            << db(sweepMax) << " | " << fixed(peak, 2) << " |\n";
+        out << "| " << shapeName(shape) << " | " << fixed(waveShape(shape).mean(), 3) << " | " << fixed(dc, 3) << " | "
+            << worst << " |\n";
     }
 }
 
-// --- Level against pitch near Nyquist ----------------------------------------
-
 void reportLevelNearNyquist(std::ostream& out)
 {
-    const std::array fractions{0.30, 0.40, 0.45, 0.47, 0.48, 0.49, 0.495, 0.499};
-    out << "\n## Level as the fundamental approaches Nyquist\n\n"
-           "RMS about the mean, relative to the ideal fundamental's RMS (the band-limited waveform above fs/4 is "
-           "its fundamental only), 48000 samples. The kernel's roll-off near Nyquist shows here; the sine is not "
-           "filtered by it.\n\n| Waveform |";
+    const std::array fractions{0.30, 0.40, 0.45, 0.46, 0.47, 0.475, 0.48, 0.49, 0.495, 0.499};
+    out << "\n## Level through the fade band\n\n"
+           "RMS about the mean relative to the ideal fundamental's RMS (above fs/4 the band-limited waveform is "
+           "its fundamental alone), 48000 samples, in dB. *Fade* is the fade's gain alone: the sine, which the "
+           "kernel does not filter, follows it; the others are the kernel's roll-off times the fade.\n\n"
+           "| Waveform |";
     for (const double f : fractions)
     {
         out << " " << f << " fs |";
@@ -195,208 +166,70 @@ void reportLevelNearNyquist(std::ostream& out)
     {
         out << "---:|";
     }
+    out << "\n| *Fade* |";
+    for (const double f : fractions)
+    {
+        out << " " << db(anoesis::dsp::nyquistFadeGain(static_cast<std::uint32_t>(f * unitsPerCycle))) << " |";
+    }
     out << "\n";
     for (const auto shape : periodicShapes)
     {
         out << "| " << shapeName(shape) << " |";
-        const double ideal = idealHarmonic(shape, 1) / std::numbers::sqrt2; // the fundamental's RMS
+        const double ideal = idealHarmonic(shape, 1) / std::numbers::sqrt2;
         for (const double f : fractions)
         {
             auto osc = preparedOscillator(shape);
             osc.setFrequency(static_cast<float>(f * rate));
             std::vector<float> y(256 + 48000);
-            for (auto& v : y)
-            {
-                v = osc.next();
-            }
+            std::ranges::generate(y, [&] { return osc.next(); });
             const std::span tail{y.data() + 256, 48000};
-            out << " " << db(rmsAbout(tail, mean(tail)) / ideal) << " |";
+            out << " " << db(rmsAbout(tail, meanOf(tail)) / ideal) << " |";
         }
         out << "\n";
     }
 }
 
-// --- The options, prototyped --------------------------------------------------
-
-enum class Option : std::uint8_t
+void reportPaths(std::ostream& out)
 {
-    clamp,
-    hardMute,
-    rampedMute,
-    fade,
-    fadeToMean,
-};
-
-const char* optionName(Option option)
-{
-    switch (option)
+    out << "\n## Sweeps and a vibrato across Nyquist\n\n"
+           "The range test's two paths at 48 kHz, "
+        << nyquistPathLength
+        << " samples each: a sweep from 0.40 fs to 0.60 fs and back, linear in pitch, and a 13 Hz vibrato of +-1 "
+           "semitone around 0.485 fs. Power from 10 Hz to 18 kHz about the mean, relative to a full-scale sine "
+           "(the tone itself is never below 18 kHz), worst of 16 start phases; the range test allows 6 dB more. "
+           "*Above Nyquist*: the largest |output - mean| once the target has been above fs/2 for 10 ms.\n\n"
+           "| Waveform | Sweep: 10 Hz-18 kHz | Vibrato: 10 Hz-18 kHz | Above Nyquist |\n|---|---:|---:|---:|\n";
+    const auto sweep = sweepThroughNyquist(nyquistPathLength);
+    const auto vibrato = vibratoAcrossNyquist(nyquistPathLength, rate);
+    for (const auto shape : periodicShapes)
     {
-    case Option::clamp:
-        return "Clamp (now)";
-    case Option::hardMute:
-        return "Mute above Nyquist, at once";
-    case Option::rampedMute:
-        return "Mute above Nyquist, 10 ms ramp";
-    case Option::fade:
-        return "Fade 0.45 fs to 0.5 fs";
-    case Option::fadeToMean:
-        return "Fade to the waveform's mean";
-    }
-    return "";
-}
-
-constexpr std::array allOptions{Option::clamp, Option::hardMute, Option::rampedMute, Option::fade, Option::fadeToMean};
-
-// A raised cosine from 1 at `lo` to 0 at 0.5 cycles per sample.
-double fadeGain(double cycles, double lo = 0.45)
-{
-    if (cycles <= lo)
-    {
-        return 1.0;
-    }
-    if (cycles >= 0.5)
-    {
-        return 0.0;
-    }
-    return 0.5 * (1.0 + std::cos(std::numbers::pi * (cycles - lo) / (0.5 - lo)));
-}
-
-// One voice with the option applied to its output; `cycles` is the target
-// pitch in cycles per sample, per sample.
-std::vector<float> renderOption(Option option, Waveform shape, std::span<const double> cycles, std::uint32_t startPhase,
-                                double sampleRate = rate)
-{
-    auto osc = preparedOscillator(shape, sampleRate);
-    osc.restart(startPhase);
-    anoesis::dsp::LinearSmoother ramp;
-    ramp.setRampTime(0.01f);
-    ramp.prepare({.sampleRate = static_cast<float>(sampleRate), .maxBlockSize = 512, .numChannels = 1});
-    ramp.setTarget(cycles.front() < 0.5 ? 1.0f : 0.0f);
-    ramp.reset();
-    const auto meanValue = static_cast<float>(idealMean(shape));
-    std::vector<float> y(cycles.size());
-    for (std::size_t i = 0; i < cycles.size(); ++i)
-    {
-        osc.setFrequency(static_cast<float>(cycles[i] * sampleRate));
-        const float x = osc.next();
-        switch (option)
+        double worstSweep = -400.0;
+        double worstVibrato = -400.0;
+        double above = 0.0;
+        for (std::uint32_t k = 0; k < 16; ++k)
         {
-        case Option::clamp:
-            y[i] = x;
-            break;
-        case Option::hardMute:
-            y[i] = cycles[i] < 0.5 ? x : 0.0f;
-            break;
-        case Option::rampedMute:
-            ramp.setTarget(cycles[i] < 0.5 ? 1.0f : 0.0f);
-            y[i] = ramp.next() * x;
-            break;
-        case Option::fade:
-            y[i] = static_cast<float>(fadeGain(cycles[i])) * x;
-            break;
-        case Option::fadeToMean:
-            y[i] = meanValue + (static_cast<float>(fadeGain(cycles[i])) * (x - meanValue));
-            break;
-        }
-    }
-    return y;
-}
-
-// Power from 10 Hz to `edgeHz`, about the mean, in dB relative to a
-// full-scale sine (0.5). 32768-point segments: 1.5 Hz bins.
-double powerBelowDb(std::span<const float> y, double edgeHz, double sampleRate = rate)
-{
-    const double centre = mean(y);
-    std::vector<float> ac(y.size());
-    std::ranges::transform(y, ac.begin(), [&](float v) { return static_cast<float>(v - centre); });
-    const auto spectrum = averagedPowerSpectrum(ac, sampleRate, blackmanHarrisWindow(32768));
-    double sum = 0.0;
-    for (std::size_t k = spectrum.nearestBin(10.0); k < spectrum.power.size() && spectrum.frequencyOf(k) < edgeHz; ++k)
-    {
-        sum += spectrum.power[k];
-    }
-    return powerToDb(sum / 0.5);
-}
-
-// Each option on one pitch trajectory (cycles per sample, per sample).
-void reportTrajectory(std::ostream& out, std::span<const double> cycles)
-{
-    out << "| Option | Saw: above Nyquist | Saw: 10 Hz-18 kHz | HPulse: above Nyquist | HPulse: 10 Hz-18 kHz | "
-           "Sine: above Nyquist | Sine: 10 Hz-18 kHz |\n|---|---:|---:|---:|---:|---:|---:|\n";
-    for (const auto option : allOptions)
-    {
-        out << "| " << optionName(option) << " |";
-        for (const auto shape : {Waveform::saw, Waveform::hpulse, Waveform::sine})
-        {
-            double above = 0.0;
-            double splatter = -400.0;
-            for (std::uint32_t k = 0; k < 16; ++k)
+            const auto a = renderPath(shape, sweep, k << 28U);
+            const auto b = renderPath(shape, vibrato, k << 28U);
+            worstSweep = std::max(worstSweep, powerBelowDb(a, 18000.0, rate));
+            worstVibrato = std::max(worstVibrato, powerBelowDb(b, 18000.0, rate));
+            std::size_t aboveFor = 0;
+            for (std::size_t i = 0; i < a.size(); ++i)
             {
-                const auto y = renderOption(option, shape, cycles, k << 28U);
-                // Every sample whose target has been above Nyquist for the
-                // last 10 ms (the ramp), about the ideal: the mean.
-                double sum = 0.0;
-                std::size_t count = 0;
-                std::size_t aboveFor = 0;
-                for (std::size_t i = 0; i < y.size(); ++i)
+                aboveFor = sweep[i] >= 0.5 ? aboveFor + 1 : 0;
+                if (aboveFor > 480)
                 {
-                    aboveFor = cycles[i] >= 0.5 ? aboveFor + 1 : 0;
-                    if (aboveFor > 480)
-                    {
-                        const double d = y[i] - idealMean(shape);
-                        sum += d * d;
-                        ++count;
-                    }
+                    above = std::max(above, static_cast<double>(std::abs(a[i] - waveShape(shape).mean())));
                 }
-                if (count > 0)
-                {
-                    above = std::max(above, std::sqrt(sum / static_cast<double>(count)));
-                }
-                splatter = std::max(splatter, powerBelowDb(y, 18000.0));
             }
-            out << " " << db(above) << " | " << fixed(splatter, 1) << " dB |";
         }
-        out << "\n";
+        out << "| " << shapeName(shape) << " | " << fixed(worstSweep, 1) << " dB | " << fixed(worstVibrato, 1)
+            << " dB | " << above << " |\n";
     }
 }
 
-void reportSweep(std::ostream& out)
-{
-    constexpr std::size_t length = std::size_t{3} * 32768;
-    std::vector<double> cycles(length);
-    // 0.40 fs -> 0.60 fs -> 0.40 fs, linear in pitch, about 1 s each way.
-    const double lo = std::log2(0.40);
-    const double hi = std::log2(0.60);
-    for (std::size_t i = 0; i < length / 2; ++i)
-    {
-        const double t = 2.0 * static_cast<double>(i) / static_cast<double>(length);
-        cycles[i] = std::exp2(lo + ((hi - lo) * t));
-        cycles[length - 1 - i] = cycles[i];
-    }
-    out << "\n## The options under a sweep through Nyquist\n\n"
-           "One voice swept from 0.40 fs to 0.60 fs and back, linear in pitch, about 1 s each way, at 48 kHz "
-           "(19.2 to 28.8 kHz), started at 16 phases; the worst of the 16. *Above Nyquist*: the RMS about the "
-           "waveform's mean once the target has been above fs/2 for 10 ms (the band-limited ideal is the mean "
-           "alone, so 0 here). *10 Hz-18 kHz*: the power in that band about the mean, relative to a full-scale "
-           "sine: what the transitions put into the audible band, where the tone itself never is. Saw, HPulse "
-           "(a DC of -0.5), and sine.\n\n";
-    reportTrajectory(out, cycles);
-
-    // A 13 Hz vibrato of +-1 semitone around 0.485 fs: 0.458 to 0.514 fs.
-    for (std::size_t i = 0; i < length; ++i)
-    {
-        const double t = static_cast<double>(i) / rate;
-        cycles[i] = 0.485 * std::exp2(std::sin(2.0 * std::numbers::pi * 13.0 * t) / 12.0);
-    }
-    out << "\n## The options under a fast vibrato across Nyquist\n\n"
-           "As above, for a 13 Hz vibrato of +-1 semitone around 0.485 fs (0.458 to 0.514 fs: in and out of "
-           "the fade band and across Nyquist 13 times a second), 2 s.\n\n";
-    reportTrajectory(out, cycles);
-}
-
-// A 220 Hz saw at full scale plus one voice whose target is above Nyquist,
-// through tanh(drive x) at 4x oversampling: the power that lands in the
-// audible band and is not a harmonic of 220 Hz.
+// A 220 Hz saw at full scale plus one voice whose target is above Nyquist (or
+// in the fade band), through tanh(drive x) at 4x oversampling: the power that
+// lands in the audible band and is not a harmonic of 220 Hz.
 void reportSaturator(std::ostream& out)
 {
     constexpr std::size_t n = 65536;
@@ -412,9 +245,8 @@ void reportSaturator(std::ostream& out)
             Buffer block{1, 512};
             std::copy_n(x.begin() + static_cast<std::ptrdiff_t>(start), 512, block.channel(0).begin());
             const auto inner = oversampler.upsample(block.block());
-            for (std::size_t i = 0; i < inner.numSamples(); ++i)
+            for (auto& s : inner.channel(0))
             {
-                auto& s = inner.channel(0)[i];
                 s = std::tanh(drive * s);
             }
             oversampler.downsample(block.block());
@@ -422,7 +254,6 @@ void reportSaturator(std::ostream& out)
         }
         return x;
     };
-    // In-band, non-harmonic power relative to the 220 Hz fundamental.
     const auto inharmonicDb = [&](std::span<const float> y)
     {
         const std::span tail{y.data() + 4096, n - 8192};
@@ -440,45 +271,35 @@ void reportSaturator(std::ostream& out)
         }
         return powerToDb(other / fundamental);
     };
-    const auto note = [&]
-    {
-        auto osc = preparedOscillator(Waveform::saw);
-        osc.setFrequency(static_cast<float>(noteHz));
-        std::vector<float> y(n);
-        for (auto& v : y)
-        {
-            v = osc.next();
-        }
-        return y;
-    }();
+    const std::vector<double> noteCycles(n, noteHz / rate);
+    const auto note = renderPath(Waveform::saw, noteCycles, 0);
 
     out << "\n## Downstream: a driven saturator at 4x oversampling\n\n"
-           "A 220 Hz saw at full scale plus one voice of the same waveform whose target is 1.1 fs/2 (above "
-           "Nyquist), summed and driven through tanh(drive x) at 4x oversampling (the library's Oversampler), "
-           "48 kHz. The figure is the power below 20 kHz that is not a harmonic of 220 Hz (intermodulation), "
-           "relative to the 220 Hz fundamental; the clamped voice's own level is its median and its loudest "
-           "start phase from the table above. *Muted* is the note alone, which the mute and fade options give.\n\n"
+           "A 220 Hz saw at full scale plus one voice, summed and driven through tanh(drive x) at 4x oversampling "
+           "(the library's Oversampler), 48 kHz. The power below 20 kHz that is not a harmonic of 220 Hz, "
+           "relative to the 220 Hz fundamental. The clamp, measured at commit 9fef36a, gave -25 to -65 dB here.\n\n"
            "| Upper voice | Drive 1 | Drive 4 | Drive 16 |\n|---|---:|---:|---:|\n";
-    const std::vector<double> cycles(n, 0.55);
     struct Row
     {
         const char* name;
         Waveform shape;
-        std::uint32_t phase;
+        double cycles;
     };
     for (const auto& row : {
-             Row{.name = "Muted (note alone)", .shape = Waveform::saw, .phase = 0},
-             Row{.name = "Saw, clamped, phase 1/4", .shape = Waveform::saw, .phase = 0x40000000U},
-             Row{.name = "Saw, clamped, phase 0", .shape = Waveform::saw, .phase = 0},
-             Row{.name = "HPulse, clamped, phase 0", .shape = Waveform::hpulse, .phase = 0},
-             Row{.name = "Sine, clamped, phase 1/4", .shape = Waveform::sine, .phase = 0x40000000U},
+             Row{.name = "None (the note alone)", .shape = Waveform::saw, .cycles = 0.0},
+             Row{.name = "Saw at 0.55 fs", .shape = Waveform::saw, .cycles = 0.55},
+             Row{.name = "HPulse at 0.55 fs", .shape = Waveform::hpulse, .cycles = 0.55},
+             Row{.name = "Sine at 0.55 fs", .shape = Waveform::sine, .cycles = 0.55},
+             Row{.name = "Sine at 0.47 fs (in the band)", .shape = Waveform::sine, .cycles = 0.47},
+             Row{.name = "Sine at 0.44 fs (below it)", .shape = Waveform::sine, .cycles = 0.44},
          })
     {
         out << "| " << row.name << " |";
         std::vector<float> mix = note;
-        if (row.name[0] != 'M')
+        if (row.cycles > 0.0)
         {
-            const auto upper = renderOption(Option::clamp, row.shape, cycles, row.phase);
+            const std::vector<double> cycles(n, row.cycles);
+            const auto upper = renderPath(row.shape, cycles, 0x40000000U);
             for (std::size_t i = 0; i < n; ++i)
             {
                 mix[i] += upper[i];
@@ -492,15 +313,275 @@ void reportSaturator(std::ostream& out)
     }
 }
 
+// --- The bottom of the range --------------------------------------------------
+
+void reportBottom(std::ostream& out)
+{
+    out << "\n## Period and phase at 0.01 Hz, through the slot\n\n"
+           "A sine at note "
+        << fixed(noteOf(0.01), 4)
+        << " (0.01 Hz at A4 = 440 Hz), Retrig on at Phase 359, hard left, rendered for 1.01 cycles in blocks of "
+           "4096: its two upward zero crossings (linear interpolation), against where the integer phase puts "
+           "them (the first after 1/360 cycle plus the kernel's delay, the second one period later). *Floor*: one "
+           "fixed-point unit, the most the truncated increment can be flat.\n\n"
+           "| Rate | Increment | Period (samples) | First crossing: error | Second: error | Measured pitch | "
+           "Error | Floor |\n|---:|---:|---:|---:|---:|---:|---:|---:|\n";
+    for (const double sampleRate : rates)
+    {
+        auto slot = preparedSlot(Waveform::sine, 1, sampleRate);
+        slot.setPan(-1.0f);
+        slot.setPhaseDegrees(359.0f);
+        slot.noteOn();
+        const auto note = static_cast<float>(noteOf(0.01));
+        const std::uint32_t increment = incrementFor(slot.frequencyFor(note), static_cast<float>(sampleRate));
+        const double period = unitsPerCycle / static_cast<double>(increment);
+        const auto length = static_cast<std::size_t>(period * 1.01);
+        Buffer buffer{2, length};
+        for (std::size_t start = 0; start < length; start += 4096)
+        {
+            slot.process(buffer.block().subBlock(start, std::min<std::size_t>(4096, length - start)), note);
+        }
+        const auto y = buffer.channel(0);
+        std::vector<double> crossings;
+        for (std::size_t i = 1; i < length; ++i)
+        {
+            if (y[i - 1] < 0.0f && y[i] >= 0.0f)
+            {
+                crossings.push_back(static_cast<double>(i - 1) + (y[i - 1] / (y[i - 1] - y[i])));
+            }
+        }
+        const auto startPhase = static_cast<double>(anoesis::dsp::phaseFromDegrees(359.0f));
+        const double first = ((unitsPerCycle - startPhase) / static_cast<double>(increment)) + slot.latencySamples();
+        const double measured = sampleRate / (crossings.at(1) - crossings.at(0));
+        const double floorCents = 1200.0 * std::log2(1.0 + (sampleRate / unitsPerCycle / 0.01));
+        out << "| " << sampleRate << " | " << increment << " | " << fixed(period, 1) << " | "
+            << fixed(crossings.at(0) - first, 3) << " | " << fixed(crossings.at(1) - first - period, 3) << " | "
+            << std::setprecision(9) << measured << " Hz | " << fixed(1200.0 * std::log2(measured / 0.01), 3)
+            << " cents | " << fixed(floorCents, 3) << " cents |\n";
+    }
+}
+
+// The output at 0.01 Hz against the waveform evaluated in double at the
+// exact delayed phase: what float evaluation of a phase near 1 costs.
+void reportFloatResolution(std::ostream& out)
+{
+    out << "\n## Float evaluation at 0.01 Hz\n\n"
+           "Bare oscillator at 0.01 Hz, 48 kHz (increment 894), one whole cycle (4.8 million samples) skipping 64 "
+           "samples around each corner: the largest |output - ideal|, the ideal evaluated in double at the exact "
+           "delayed phase (phase - delay x increment, from the integer phase).\n\n"
+           "| Waveform | Largest error | In dB re full scale |\n|---|---:|---:|\n";
+    for (const auto shape : {Waveform::saw, Waveform::triangle, Waveform::sine, Waveform::trisaw})
+    {
+        auto osc = preparedOscillator(shape);
+        osc.setFrequency(0.01f);
+        const auto increment = static_cast<double>(osc.phaseIncrement());
+        const double delay = osc.latencySamples();
+        const auto length = static_cast<std::size_t>(unitsPerCycle / increment);
+        double worst = 0.0;
+        for (std::size_t i = 0; i < length; ++i)
+        {
+            const std::uint32_t phase = osc.nextPhase();
+            const float y = osc.next();
+            const double t = (static_cast<double>(phase) - (delay * increment)) / unitsPerCycle;
+            const double cycle = t - std::floor(t);
+            if (i < 64 || distanceToEdge(shape, cycle, increment / unitsPerCycle) < 64.0)
+            {
+                continue;
+            }
+            worst = std::max(worst, std::abs(static_cast<double>(y) - idealWave(shape, cycle)));
+        }
+        out << "| " << shapeName(shape) << " | " << scientific(worst) << " | " << db(worst) << " |\n";
+    }
+}
+
+// --- Peaks under the stress run ----------------------------------------------
+
+void reportStressPeaks(std::ostream& out)
+{
+    out << "\n## Peaks under the stress run\n\n"
+           "*One voice*: a bare oscillator on the stress path at each of the three extreme detune offsets "
+           "(-3.32, 0, and +3.32 semitones), retriggered to phase 0 at each note-on event at its sub-sample time; "
+           "and again with a jump to a random phase every 1 to 16 samples. *Slot*: the range test's stress run "
+           "itself (up to 8 voices, full width). Largest |sample| over the four rates.\n\n"
+           "| Waveform | One voice, note-ons | One voice, random jumps | Slot |\n|---|---:|---:|---:|\n";
+    double worstVoice = 0.0;
+    for (const auto shape : allWaveforms)
+    {
+        double retriggered = 0.0;
+        double jumped = 0.0;
+        double slotPeak = 0.0;
+        for (const double sampleRate : rates)
+        {
+            const auto notes = stressNotes(sampleRate);
+            const auto events = stressEvents(notes.size(), static_cast<std::uint64_t>(sampleRate));
+            if (anoesis::dsp::isPeriodic(shape))
+            {
+                for (const float detune : {-3.3219f, 0.0f, 3.3219f})
+                {
+                    auto a = preparedOscillator(shape, sampleRate);
+                    auto b = preparedOscillator(shape, sampleRate);
+                    anoesis::dsp::Random random{3};
+                    std::size_t next = 0;
+                    std::uint32_t untilJump = 1;
+                    for (std::size_t i = 0; i < notes.size(); ++i)
+                    {
+                        const float hz = anoesis::dsp::noteToFrequency(notes[i] + detune);
+                        a.setFrequency(hz);
+                        b.setFrequency(hz);
+                        for (; next < events.size() && events[next].at == i; ++next)
+                        {
+                            if (events[next].kind == Event::Kind::noteOn)
+                            {
+                                a.jumpTo(0, events[next].since);
+                            }
+                        }
+                        if (--untilJump == 0)
+                        {
+                            b.jumpTo(random.nextUint32(), random.nextUnipolar());
+                            untilJump = 1 + (random.nextUint32() % 16U);
+                        }
+                        retriggered = std::max(retriggered, static_cast<double>(std::abs(a.next())));
+                        jumped = std::max(jumped, static_cast<double>(std::abs(b.next())));
+                    }
+                }
+            }
+            slotPeak =
+                std::max(slotPeak, static_cast<double>(renderStress(shape, sampleRate, 4096, notes, events).peak));
+        }
+        worstVoice = std::max({worstVoice, retriggered, jumped});
+        out << "| " << shapeName(shape) << " | " << fixed(retriggered, 2) << " | " << fixed(jumped, 2) << " | "
+            << fixed(slotPeak, 2) << " |\n";
+    }
+    out << "\nWorst single voice: " << fixed(worstVoice, 3) << ".\n";
+}
+
+// --- Long runs ----------------------------------------------------------------
+
+// Per cycle at 0.01 Hz: DC, RMS about it, and length, for every whole cycle
+// of 2^31 samples (12.4 hours at 48 kHz).
+void reportLongBottom(std::ostream& out)
+{
+    out << "\n## Hours at 0.01 Hz\n\n"
+           "Bare oscillator at 0.01 Hz, 48 kHz (increment 894: the phase sequence repeats only after 2^31 "
+           "samples), run for 2^31 samples, 12.4 hours. Each whole cycle (from one wrap of the integer phase to "
+           "the next) is measured for its DC, its RMS about that, and its length. First and last cycle, and the "
+           "largest difference between any cycle and the first.\n\n"
+           "| Waveform | Cycles | DC, first / last | RMS, first / last | Largest DC change | Largest RMS change | "
+           "Lengths (samples) |\n|---|---:|---:|---:|---:|---:|---:|\n";
+    for (const auto shape : {Waveform::saw, Waveform::sine, Waveform::hpulse})
+    {
+        auto osc = preparedOscillator(shape);
+        osc.setFrequency(0.01f);
+        constexpr std::uint64_t total = std::uint64_t{1} << 31U;
+        double sum = 0.0;
+        double sumSquares = 0.0;
+        std::uint64_t count = 0;
+        bool counting = false;
+        std::vector<double> dcs;
+        std::vector<double> rmss;
+        std::uint64_t shortest = total;
+        std::uint64_t longest = 0;
+        std::uint32_t previous = osc.nextPhase();
+        for (std::uint64_t i = 0; i < total; ++i)
+        {
+            const float y = osc.next();
+            const std::uint32_t phase = osc.nextPhase();
+            if (counting)
+            {
+                sum += y;
+                sumSquares += static_cast<double>(y) * y;
+                ++count;
+            }
+            if (phase < previous) // wrapped
+            {
+                if (counting)
+                {
+                    const double dc = sum / static_cast<double>(count);
+                    dcs.push_back(dc);
+                    rmss.push_back(std::sqrt((sumSquares / static_cast<double>(count)) - (dc * dc)));
+                    shortest = std::min(shortest, count);
+                    longest = std::max(longest, count);
+                }
+                counting = true;
+                sum = 0.0;
+                sumSquares = 0.0;
+                count = 0;
+            }
+            previous = phase;
+        }
+        double dcChange = 0.0;
+        double rmsChange = 0.0;
+        for (std::size_t c = 0; c < dcs.size(); ++c)
+        {
+            dcChange = std::max(dcChange, std::abs(dcs[c] - dcs.front()));
+            rmsChange = std::max(rmsChange, std::abs(rmss[c] - rmss.front()));
+        }
+        out << "| " << shapeName(shape) << " | " << dcs.size() << " | " << scientific(dcs.front(), 2) << " / "
+            << scientific(dcs.back(), 2) << " | " << fixed(rmss.front(), 7) << " / " << fixed(rmss.back(), 7) << " | "
+            << scientific(dcChange) << " | " << scientific(rmsChange) << " | " << shortest << "-" << longest << " |\n";
+    }
+}
+
+// One hour near Nyquist: DC, level, and pitch over the first and the last
+// second.
+void reportLongTop(std::ostream& out)
+{
+    out << "\n## An hour near Nyquist\n\n"
+           "Bare oscillator at 20 kHz, 48 kHz (0.417 fs, below the fade band), one hour (172.8 million samples): "
+           "DC, RMS about it, and the pitch measured from zero crossings (`measureFrequency`, sine only), over the "
+           "second second (the first holds the onset) and the last.\n\n"
+           "| Waveform | DC, second 2 / last | RMS, second 2 / last | Pitch, second 2 / last (Hz) | Increment's pitch "
+           "|\n|---|---:|---:|---:|---:|\n";
+    for (const auto shape : {Waveform::saw, Waveform::sine})
+    {
+        auto osc = preparedOscillator(shape);
+        osc.setFrequency(20000.0f);
+        constexpr std::size_t second = 48000;
+        constexpr std::size_t hour = 3600 * second;
+        std::vector<float> first(second);
+        std::vector<float> last(second);
+        for (std::size_t i = 0; i < second; ++i)
+        {
+            static_cast<void>(osc.next()); // past the onset
+        }
+        std::ranges::generate(first, [&] { return osc.next(); });
+        for (std::size_t i = 2 * second; i < hour - second; ++i)
+        {
+            static_cast<void>(osc.next());
+        }
+        std::ranges::generate(last, [&] { return osc.next(); });
+        const auto pitch = [&](std::span<const float> y)
+        {
+            return shape == Waveform::sine ? fixed(measureFrequency(y, rate), 6) : std::string{"-"};
+        };
+        out << "| " << shapeName(shape) << " | " << scientific(meanOf(first), 2) << " / " << scientific(meanOf(last), 2)
+            << " | " << fixed(rmsAbout(first, meanOf(first)), 7) << " / " << fixed(rmsAbout(last, meanOf(last)), 7)
+            << " | " << pitch(first) << " / " << pitch(last) << " | "
+            << fixed(static_cast<double>(osc.phaseIncrement()) * rate / unitsPerCycle, 6) << " |\n";
+    }
+}
+
 } // namespace
 
-TEST_CASE("Range report: above Nyquist and the alternatives to the clamp", "[.][range-report]")
+TEST_CASE("Range report: the oscillator from 0.01 Hz to beyond Nyquist", "[.][range-report]")
 {
     std::ostringstream out;
-    reportClamp(out);
+    reportAboveNyquist(out);
     reportLevelNearNyquist(out);
-    reportSweep(out);
+    reportPaths(out);
     reportSaturator(out);
+    reportBottom(out);
+    reportFloatResolution(out);
+    reportStressPeaks(out);
+    std::cout << out.str() << std::flush;
+    SUCCEED();
+}
+
+TEST_CASE("Range report: hours at 0.01 Hz and an hour near Nyquist", "[.][range-long-report]")
+{
+    std::ostringstream out;
+    reportLongBottom(out);
+    reportLongTop(out);
     std::cout << out.str() << std::flush;
     SUCCEED();
 }

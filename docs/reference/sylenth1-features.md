@@ -39,6 +39,12 @@ Four oscillators: A1, A2, B1, B2.
 
 Requirements: alias-free; stable from below 0.01 Hz up to Nyquist; up to 32 voices per note (4 oscillators × 8 unison voices) and 512 voices in total.
 
+**Range** ([oscillator-range.md](../dsp/oscillator-range.md)). The oscillator takes any pitch as a fractional note, so 0.01 Hz (note −115.79 at A4 = 440 Hz) and below arrive through modulation, bend, and master tune. What happens above Nyquist is our decision, not a measured behaviour: no source says what Sylenth1 plays there.
+
+| # | Question | Working hypothesis | Measurement that settles it |
+|---|---|---|---|
+| O17 | A voice pushed to or above Nyquist (a high note, Octave +3, the widest Detune): what does it play? Does its level fall as its pitch approaches Nyquist, and does a pulse keep its DC? | It fades about the waveform's mean from 0.45 fs, and above Nyquist plays the mean alone: silence for the DC-free waveforms, −0.5 and −0.75 for the HPulse and QPulse (decided 2026-11-14, from measured options) | At 44.1 kHz, a Sine with Octave +3, swept with the pitch wheel from 18 kHz to past Nyquist and back: the level against pitch, and anything left at 22.05 kHz (a fixed tone there, at a level that depends on the phase, means a clamp). Repeat with the HPulse and a DC-coupled recording for its DC. Also listen for clicks as the pitch crosses Nyquist. |
+
 ### Tuning, volume, pan, and invert
 
 The manual gives only outlines (pp. 10, 14–15). The rest comes from third-party sources, listed here with what each one says. Values marked *hypothesis* are what M1.1 builds ([oscillator-controls.md](../dsp/oscillator-controls.md)). In the DSP, every control takes physical units (semitones, a linear gain, a pan position in [−1, 1]). The knob ranges and laws below belong to the parameter table (M1.9), so a measurement that disagrees changes a mapping, not DSP code.

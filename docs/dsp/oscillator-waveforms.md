@@ -59,6 +59,7 @@ The TriSaw was chosen from three candidates (inventory W3) as the sum of a trian
 
 - **Corners.** Up to four `WaveCorner`s, each recording its phase (fixed point), the naive value and slope just after it, and its jump J and bend K. Two flags, `jumps` and `bends`, let the oscillator skip a residual that would be zero. (Comparing floats with zero would also trip `-Wfloat-equal`.)
 - **A sine level.** A sine has no corners, so it is carried as a separate term.
+- **A mean.** The waveform's mean over a cycle, `mean()`, worked out from the segments in double when the shape is built: −0.5 for the HPulse, −0.75 for the QPulse, 0 for the others. It is the DC a band-limited waveform keeps once its fundamental is above Nyquist, and what the oscillator fades to there ([oscillator-range.md](oscillator-range.md)).
 
 Shapes are written as straight segments (`WaveSegment{start, from, to}`) and converted by `WaveShape::piecewiseLinear`, a `constexpr` builder. The builder works out the slopes, jumps, and bends in double precision at compile time, treating the segment before the first as the last one (the waveform is periodic). The 8 entries sit in one `constexpr` table, `waveShapes`, indexed by `Waveform`. An out-of-range index (a corrupt parameter value) gets the saw rather than reading past the table.
 

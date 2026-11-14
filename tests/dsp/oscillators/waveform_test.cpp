@@ -152,3 +152,25 @@ TEST_CASE("An out-of-range waveform value falls back to the saw", "[dsp][oscilla
     const auto bogus = static_cast<Waveform>(200);
     CHECK(&anoesis::dsp::waveShape(bogus) == &anoesis::dsp::waveShape(Waveform::saw));
 }
+
+TEST_CASE("Every waveform knows its mean, the DC it keeps above Nyquist", "[dsp][oscillator][waveform][range]")
+{
+    // The mean of the ideal waveform over one cycle: 2w - 1 for a pulse of
+    // width w, 0 for the others (oscillator_support.hpp). Built in double
+    // from the segments, so exact for these shapes.
+    for (const auto shape : periodicShapes)
+    {
+        CAPTURE(shapeName(shape));
+        CHECK_THAT(anoesis::dsp::waveShape(shape).mean(), WithinAbs(idealMean(shape), 1e-7));
+    }
+    CHECK_THAT(anoesis::dsp::waveShape(Waveform::noise).mean(), WithinAbs(0.0, 0.0));
+
+    // A shape beyond the table: a ramp from 0 to 1 over the first quarter,
+    // then 1 to 0.5. Mean: 0.25 x 0.5 + 0.75 x 0.75 = 0.6875.
+    constexpr auto ramp = WaveShape::piecewiseLinear(std::array{
+        WaveSegment{.start = 0.0, .from = 0.0, .to = 1.0},
+        WaveSegment{.start = 0.25, .from = 1.0, .to = 0.5},
+    });
+    CHECK_THAT(ramp.mean(), WithinAbs(0.6875, 1e-7));
+    CHECK_THAT(WaveShape::sine(0.7f).mean(), WithinAbs(0.0, 0.0));
+}

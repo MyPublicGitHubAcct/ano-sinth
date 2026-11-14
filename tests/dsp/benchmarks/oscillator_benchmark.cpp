@@ -1,7 +1,8 @@
 // CPU cost of the minBLEP oscillator (decision D6) and the PolyBLEP reference,
 // for every periodic waveform, of the oscillator slot (tuning, volume, pan,
-// invert) around it, of retriggers and phase jumps, and of unison (0-8
-// voices per slot, noise, and a 32-voice note).
+// invert) around it, of retriggers and phase jumps, of unison (0-8 voices
+// per slot, noise, and a 32-voice note), and of the range (the Nyquist fade,
+// pitch steps).
 // The wavetable candidate's numbers (it was removed after D6) are in the
 // baselines doc.
 //
@@ -22,7 +23,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <numbers>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace anoesis::test::d6;
@@ -137,6 +140,89 @@ TEST_CASE("Benchmark: band-limited oscillators", "[!benchmark][dsp][oscillators]
     benchmarkCandidate<PolyBlep4>();
     benchmarkCandidate<MinBlep32>();
     benchmarkCandidate<MinBlep64>();
+}
+
+TEST_CASE("Benchmark: the oscillator's range (the Nyquist fade, pitch steps)", "[!benchmark][dsp][oscillators]")
+{
+    const std::string name = Candidate<MinBlep64>::name;
+    Block out{};
+    // In the fade band and above Nyquist: the fade's multiply-add on every
+    // sample (oscillator-range.md).
+    for (const auto& [label, hz] : {
+             std::pair{"saw at 0.47 fs (in the Nyquist fade)", 0.47f * rate},
+             std::pair{"saw at 0.6 fs (above Nyquist: its mean)", 0.6f * rate},
+         })
+    {
+        auto osc = preparedOscillator<MinBlep64>(Waveform::saw, hz);
+        BENCHMARK(name + ", " + label + " x512")
+        {
+            for (auto& sample : out)
+            {
+                sample = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    }
+    // An ordinary vibrato, set every sample: 6 Hz, +-1 semitone. Its changes
+    // per sample (about 1e-6 cycles) stay below bandLimitedPitchStep, so it
+    // adds no residuals, unlike the much faster one in the rows above
+    // (+-1 semitone at 384 Hz: 2.6e-5 cycles per sample).
+    {
+        auto osc = preparedOscillator<MinBlep64>(Waveform::saw, 440.0f);
+        std::vector<float> pitch(48000);
+        for (std::size_t i = 0; i < pitch.size(); ++i)
+        {
+            const float t = static_cast<float>(i) / rate;
+            pitch[i] = 440.0f * std::exp2(std::sin(2.0f * std::numbers::pi_v<float> * 6.0f * t) / 12.0f);
+        }
+        std::size_t at = 0;
+        BENCHMARK(name + ", saw 440 Hz, a 6 Hz vibrato set every sample x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                osc.setFrequency(pitch[at]);
+                at = at + 1 < pitch.size() ? at + 1 : 0;
+                out[i] = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    }
+    // A pitch step every 64 samples (440 <-> 660 Hz): one ramp residual each.
+    {
+        auto osc = preparedOscillator<MinBlep64>(Waveform::saw, 440.0f);
+        BENCHMARK(name + ", saw 440 Hz, a pitch step every 64 samples x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                if (i % 64 == 0)
+                {
+                    osc.setFrequency((i / 64) % 2 == 0 ? 440.0f : 660.0f);
+                }
+                out[i] = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    }
+    // A sweep of 10 octaves in a block (20 Hz to 20 kHz): a change of more
+    // than bandLimitedPitchStep on almost every sample, so a ramp residual
+    // almost every sample. The worst case of the pitch-step path.
+    {
+        auto osc = preparedOscillator<MinBlep64>(Waveform::saw, 20.0f);
+        Block pitch{};
+        for (std::size_t i = 0; i < blockSize; ++i)
+        {
+            pitch[i] = 20.0f * std::exp2(10.0f * static_cast<float>(i) / static_cast<float>(blockSize));
+        }
+        BENCHMARK(name + ", saw, 20 Hz to 20 kHz in one block (a step every sample) x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                osc.setFrequency(pitch[i]);
+                out[i] = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    }
 }
 
 namespace
