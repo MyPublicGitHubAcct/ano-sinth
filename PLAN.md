@@ -246,6 +246,7 @@ Each effect is a standalone, reusable `libs/dsp` processor. Add them to the fixe
 ### M1.12 Plugin target and validation
 - [ ] VST3, AU, and Standalone build on every platform (AU on macOS only).
 - [~] pluginval in CI, plus `auval` on macOS. Both were done in Phase 0, as CTest tests. Still to do: a manual smoke test in at least one DAW per platform.
+- [ ] Steinberg's VST3 Plugin Validator, run from pluginval. Build the `validator` tool from the VST3 SDK, pinned to a release tag; JUCE bundles only part of the SDK, without the validator. Then pass it to pluginval (`--vst3validator <path>`; confirm that pluginval v1.0.4 supports this flag) so the `pluginval:VST3` CTest test runs it on every platform, locally and in CI. Record the SDK's license and how it is fetched and cached. Update docs/development/plugin-validation.md.
 - [ ] State save and restore round-trips.
 
 ### M1.13 Parity verification and sign-off
