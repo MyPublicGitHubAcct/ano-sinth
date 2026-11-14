@@ -1,16 +1,17 @@
-// Shared test support for the anti-aliasing prototypes (decision D6): the
-// list of candidates, how to construct each, the ideal waveforms, and
-// renderers for the base rate and through the Oversampler.
+// Shared test support for the band-limited oscillators (decision D6): the
+// oscillators under test (minBLEP, the chosen method, and the PolyBLEP
+// reference), how to construct each, the ideal waveforms, and renderers for
+// the base rate and through the Oversampler.
 // Doc: docs/dsp/band-limited-oscillators.md
 
 #pragma once
 
 #include <anoesis/dsp/core/process_spec.hpp>
-#include <anoesis/dsp/oscillators/prototype/common.hpp>
-#include <anoesis/dsp/oscillators/prototype/min_blep.hpp>
-#include <anoesis/dsp/oscillators/prototype/poly_blep.hpp>
-#include <anoesis/dsp/oscillators/prototype/wavetable.hpp>
+#include <anoesis/dsp/oscillators/min_blep.hpp>
+#include <anoesis/dsp/oscillators/waveform.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>
+
+#include "reference/poly_blep.hpp"
 
 #include <anoesis/test/buffer.hpp>
 
@@ -25,31 +26,24 @@
 namespace anoesis::test::d6
 {
 
-namespace proto = anoesis::dsp::prototype;
+using dsp::Waveform;
 
-using PolyBlep2 = proto::PolyBlepOscillator<2>;
-using PolyBlep4 = proto::PolyBlepOscillator<4>;
-using MinBlep32 = proto::MinBlepOscillator<32>;
-using MinBlep64 = proto::MinBlepOscillator<64>;
-using Wavetable = proto::WavetableOscillator;
+using PolyBlep2 = reference::PolyBlepOscillator<2>;
+using PolyBlep4 = reference::PolyBlepOscillator<4>;
+using MinBlep32 = dsp::MinBlepOscillator<32>;
+using MinBlep64 = dsp::MinBlepOscillator<dsp::minBlepTaps>; // the D6 choice
 
 // The shared tables, built once (off any audio thread, as the plugin would).
-inline const proto::MinBlepTable& minBlepTable32()
+inline const dsp::MinBlepTable& minBlepTable32()
 {
-    static const proto::MinBlepTable table{32};
+    static const dsp::MinBlepTable table{32};
     return table;
 }
 
-inline const proto::MinBlepTable& minBlepTable64()
+inline const dsp::MinBlepTable& minBlepTable64()
 {
-    static const proto::MinBlepTable table{64};
+    static const dsp::MinBlepTable table{dsp::minBlepTaps};
     return table;
-}
-
-inline const proto::WavetableBank& wavetableBank()
-{
-    static const proto::WavetableBank bank;
-    return bank;
 }
 
 /// How to build each candidate, its display name, and how closely it follows
@@ -58,10 +52,10 @@ template <typename Osc>
 struct Candidate;
 
 template <int Points>
-struct Candidate<proto::PolyBlepOscillator<Points>>
+struct Candidate<reference::PolyBlepOscillator<Points>>
 {
     static constexpr const char* name = Points == 2 ? "PolyBLEP 2-point" : "PolyBLEP 4-point";
-    static proto::PolyBlepOscillator<Points> make()
+    static reference::PolyBlepOscillator<Points> make()
     {
         return {};
     }
@@ -73,12 +67,12 @@ struct Candidate<proto::PolyBlepOscillator<Points>>
 };
 
 template <std::size_t Taps>
-struct Candidate<proto::MinBlepOscillator<Taps>>
+struct Candidate<dsp::MinBlepOscillator<Taps>>
 {
     static constexpr const char* name = Taps == 32 ? "minBLEP 32-tap" : "minBLEP 64-tap";
-    static proto::MinBlepOscillator<Taps> make()
+    static dsp::MinBlepOscillator<Taps> make()
     {
-        return proto::MinBlepOscillator<Taps>{Taps == 32 ? minBlepTable32() : minBlepTable64()};
+        return dsp::MinBlepOscillator<Taps>{Taps == 32 ? minBlepTable32() : minBlepTable64()};
     }
     // The residual lasts Taps samples after each discontinuity. Beyond that
     // only table truncation (the tables end at exactly zero) and the
@@ -91,32 +85,16 @@ struct Candidate<proto::MinBlepOscillator<Taps>>
     static constexpr float peak = 2.0f;
 };
 
-template <>
-struct Candidate<proto::WavetableOscillator>
-{
-    static constexpr const char* name = "Wavetable (mipmapped)";
-    static proto::WavetableOscillator make()
-    {
-        return proto::WavetableOscillator{wavetableBank()};
-    }
-    // A truncated Fourier series rings (Gibbs) on both sides of a jump, decaying
-    // as 1 / distance: about 0.03 at 40 samples for a 100 Hz saw at 48 kHz,
-    // whose table holds harmonics up to at least 12 kHz.
-    static constexpr std::size_t guardSamples = 40;
-    static constexpr double tolerance = 0.03;
-    static constexpr float peak = 1.5f; // Gibbs overshoot, plus two saws' for a narrow pulse: 1.29 measured
-};
-
 /// The ideal (naive, continuous-time) waveforms at phase t in [0, 1).
-inline double idealWave(proto::Shape shape, double t, double width = 0.5)
+inline double idealWave(Waveform shape, double t, double width = 0.5)
 {
     switch (shape)
     {
-    case proto::Shape::saw:
+    case Waveform::saw:
         return (2.0 * t) - 1.0;
-    case proto::Shape::pulse:
+    case Waveform::pulse:
         return t < width ? 1.0 : -1.0;
-    case proto::Shape::triangle:
+    case Waveform::triangle:
         return t < 0.5 ? (4.0 * t) - 1.0 : 3.0 - (4.0 * t);
     }
     return 0.0;
@@ -124,16 +102,16 @@ inline double idealWave(proto::Shape shape, double t, double width = 0.5)
 
 /// The ideal waveform's Fourier amplitude at harmonic k (sine/cosine
 /// magnitude), for the droop measurement. Pulse: 50% duty (a square).
-inline double idealHarmonic(proto::Shape shape, std::size_t k)
+inline double idealHarmonic(Waveform shape, std::size_t k)
 {
     const auto kd = static_cast<double>(k);
     switch (shape)
     {
-    case proto::Shape::saw:
+    case Waveform::saw:
         return 2.0 / (std::numbers::pi * kd);
-    case proto::Shape::pulse:
+    case Waveform::pulse:
         return k % 2 == 1 ? 4.0 / (std::numbers::pi * kd) : 0.0;
-    case proto::Shape::triangle:
+    case Waveform::triangle:
         return k % 2 == 1 ? 8.0 / (std::numbers::pi * std::numbers::pi * kd * kd) : 0.0;
     }
     return 0.0;

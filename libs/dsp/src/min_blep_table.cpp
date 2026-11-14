@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Anoesis Audio
 //
-// Builds the minBLEP and compensated minBLAMP residual tables (D6 prototype).
+// Builds the minBLEP and compensated minBLAMP residual tables (decision D6).
 // Runs once, at initialisation, in double precision. A port to a target
 // without a double FPU would generate the tables offline instead.
 
-#include <anoesis/dsp/oscillators/prototype/min_blep.hpp>
+#include <anoesis/dsp/oscillators/min_blep.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -15,7 +15,7 @@
 #include <numbers>
 #include <vector>
 
-namespace anoesis::dsp::prototype
+namespace anoesis::dsp
 {
 
 namespace
@@ -204,4 +204,4 @@ MinBlepTable::MinBlepTable(std::size_t taps, std::size_t phases) : tapCount(taps
     }
 }
 
-} // namespace anoesis::dsp::prototype
+} // namespace anoesis::dsp

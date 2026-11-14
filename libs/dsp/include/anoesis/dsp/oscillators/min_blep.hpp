@@ -4,17 +4,21 @@
 #pragma once
 
 #include <anoesis/dsp/core/process_spec.hpp>
-#include <anoesis/dsp/oscillators/prototype/common.hpp>
+#include <anoesis/dsp/oscillators/phase.hpp>
+#include <anoesis/dsp/oscillators/waveform.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
-/// D6 prototype: minBLEP / minBLAMP (Brandt, 2001).
+/// Band-limited oscillator: minBLEP / minBLAMP (Brandt, 2001), the method
+/// chosen in decision D6 for its alias rejection (-91 dB below 20 kHz at
+/// 44.1 kHz with 64 taps, no oversampling) and flat passband.
 ///
-/// Like PolyBLEP, a residual is added at each jump, but the band-limited step
-/// comes from a long windowed sinc made *minimum phase*, so it is causal: it
+/// A residual is added at each jump: the difference between a band-limited
+/// step and the naive one. The band-limited step comes from a long windowed
+/// sinc made *minimum phase*, so it is causal: it
 /// starts at the jump and rings only afterwards. Each jump adds `Taps`
 /// residual samples into a small ring buffer; each output sample reads one.
 /// Residuals come from an oversampled table (phases() points per sample),
@@ -36,8 +40,12 @@
 /// starts at 0 and needs no history.
 ///
 /// Doc: docs/dsp/band-limited-oscillators.md
-namespace anoesis::dsp::prototype
+namespace anoesis::dsp
 {
+
+/// The residual length chosen in D6. 32 taps (-66.5 dB, half the work per
+/// edge and half the memory) is the candidate for a cheaper real-time mode.
+inline constexpr std::size_t minBlepTaps = 64;
 
 /// The step and compensated ramp residual tables, laid out by phase:
 /// row p (0..phases()) holds taps 0..taps()-1 at x = tap + p / phases()
@@ -45,7 +53,8 @@ namespace anoesis::dsp::prototype
 class MinBlepTable
 {
 public:
-    /// `taps`: residual length in samples (a power of two). The kernel is a
+    /// `taps`: residual length in samples (a power of two; minBlepTaps by
+    /// decision D6). The kernel is a
     /// Kaiser-windowed sinc, cut off at Nyquist, `taps` samples long; its
     /// transition band is about +-4.6% of the sample rate around Nyquist
     /// at 32 taps (beta 4.6) and the same at 64 taps with deeper rejection
@@ -126,9 +135,9 @@ public:
         started = false;
     }
 
-    void setShape(Shape newShape) noexcept
+    void setWaveform(Waveform newWaveform) noexcept
     {
-        shape = newShape;
+        waveform = newWaveform;
     }
 
     void setPulseWidth(float width) noexcept
@@ -161,19 +170,19 @@ public:
         const float t = toCycles(phase);
         float naive = 0.0f;
         float slope = 0.0f; // per sample
-        switch (shape)
+        switch (waveform)
         {
-        case Shape::saw:
+        case Waveform::saw:
             jumpIfCrossed(0, step, -2.0f);
             naive = naiveSaw(t);
             slope = 2.0f * dt;
             break;
-        case Shape::pulse:
+        case Waveform::pulse:
             jumpIfCrossed(0, step, 2.0f);
             jumpIfCrossed(widthPhase, step, -2.0f);
             naive = naivePulse(phase, widthPhase);
             break;
-        case Shape::triangle:
+        case Waveform::triangle:
         {
             const float slopeChange = 8.0f * toCycles(step);
             bendIfCrossed(0, step, slopeChange);
@@ -196,12 +205,6 @@ public:
         arrivedBy = increment;
         started = true;
         return y;
-    }
-
-    /// Per-oscillator state, in bytes.
-    static constexpr std::size_t stateBytes() noexcept
-    {
-        return sizeof(MinBlepOscillator);
     }
 
 private:
@@ -259,8 +262,8 @@ private:
     std::uint32_t widthPhase = halfCycle;
     std::size_t position = 0;
     bool started = false;
-    Shape shape = Shape::saw;
+    Waveform waveform = Waveform::saw;
     std::array<float, Taps> ring{};
 };
 
-} // namespace anoesis::dsp::prototype
+} // namespace anoesis::dsp

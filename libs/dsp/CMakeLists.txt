@@ -10,8 +10,7 @@ add_library(anoesis_dsp STATIC
     src/library.cpp
     src/min_blep_table.cpp
     src/oversampler.cpp
-    src/public_headers.cpp
-    src/wavetable_bank.cpp)
+    src/public_headers.cpp)
 add_library(anoesis::dsp ALIAS anoesis_dsp)
 
 target_include_directories(anoesis_dsp PUBLIC

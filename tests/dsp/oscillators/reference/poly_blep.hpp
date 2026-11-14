@@ -1,14 +1,21 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Anoesis Audio
+// Test-only reference: PolyBLEP / PolyBLAMP, the D6 runner-up family.
+//
+// Kept (not shipped) because it is the closed-form, table-free baseline the
+// minBLEP oscillator is measured against: the [d6-report] test and the
+// [oscillators] benchmarks print both side by side, so any later change to
+// minBLEP (taps, vectorisation, the 8 waveforms) can be judged against the
+// alternative D6 rejected, with the same harness. Its residuals are also an
+// independent analytic check of the BLEP/BLAMP formulation.
 
 #pragma once
 
 #include <anoesis/dsp/core/process_spec.hpp>
-#include <anoesis/dsp/oscillators/prototype/common.hpp>
+#include <anoesis/dsp/oscillators/phase.hpp>
+#include <anoesis/dsp/oscillators/waveform.hpp>
 
 #include <cstdint>
 
-/// D6 prototype: PolyBLEP / PolyBLAMP.
+/// PolyBLEP / PolyBLAMP.
 ///
 /// A naive waveform is corrected near each jump by adding a short polynomial
 /// "residual": the difference between a band-limited step and the naive one.
@@ -23,8 +30,18 @@
 ///               steeper alias rejection, more high-frequency droop.
 ///
 /// Doc: docs/dsp/band-limited-oscillators.md
-namespace anoesis::dsp::prototype
+namespace anoesis::test::reference
 {
+
+using dsp::halfCycle;
+using dsp::incrementFor;
+using dsp::naivePulse;
+using dsp::naiveSaw;
+using dsp::naiveTriangle;
+using dsp::ProcessSpec;
+using dsp::toCycles;
+using dsp::Waveform;
+using dsp::widthToPhase;
 
 namespace polyblep
 {
@@ -116,9 +133,9 @@ public:
         started = false;
     }
 
-    void setShape(Shape newShape) noexcept
+    void setWaveform(Waveform newWaveform) noexcept
     {
-        shape = newShape;
+        waveform = newWaveform;
     }
 
     void setPulseWidth(float width) noexcept
@@ -150,15 +167,15 @@ public:
     [[nodiscard]] float next() noexcept
     {
         float y = 0.0f;
-        switch (shape)
+        switch (waveform)
         {
-        case Shape::saw:
+        case Waveform::saw:
             y = naiveSaw(toCycles(phase)) + jump(0, -2.0f);
             break;
-        case Shape::pulse:
+        case Waveform::pulse:
             y = naivePulse(phase, widthPhase) + jump(0, 2.0f) + jump(widthPhase, -2.0f);
             break;
-        case Shape::triangle:
+        case Waveform::triangle:
         {
             const float slopeChange = 8.0f * toCycles(increment);
             y = naiveTriangle(toCycles(phase)) + bend(0, slopeChange) + bend(halfCycle, -slopeChange);
@@ -221,7 +238,7 @@ private:
     std::uint32_t nearAhead = 0;  // Points / 2 samples' worth of phase, at the current increment
     std::uint32_t nearBehind = 0; // ... at the increment that brought us here
     bool started = false;
-    Shape shape = Shape::saw;
+    Waveform waveform = Waveform::saw;
 };
 
-} // namespace anoesis::dsp::prototype
+} // namespace anoesis::test::reference

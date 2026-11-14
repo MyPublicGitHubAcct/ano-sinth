@@ -1,9 +1,10 @@
-// Behavioural tests shared by every anti-aliasing prototype (decision D6):
+// Behavioural tests for the band-limited oscillators: the minBLEP oscillator
+// (decision D6, at 32 and 64 taps) and the PolyBLEP reference, all held to:
 // waveform shape, aliasing, stability from 0.01 Hz to Nyquist, DC, per-sample
 // pitch changes, and reset. The measurements that decided D6 are in
 // antialiasing_report.cpp. Doc: docs/dsp/band-limited-oscillators.md
 
-#include "prototype_support.hpp"
+#include "oscillator_support.hpp"
 
 #include <anoesis/test/measure.hpp>
 #include <anoesis/test/signals.hpp>
@@ -30,7 +31,7 @@ namespace
 {
 
 constexpr double rate = 48000.0;
-constexpr std::array allShapes{proto::Shape::saw, proto::Shape::pulse, proto::Shape::triangle};
+constexpr std::array allShapes{Waveform::saw, Waveform::pulse, Waveform::triangle};
 
 anoesis::dsp::ProcessSpec specAt(double sampleRate)
 {
@@ -38,11 +39,11 @@ anoesis::dsp::ProcessSpec specAt(double sampleRate)
 }
 
 template <typename Osc>
-Osc prepared(proto::Shape shape, double sampleRate = rate)
+Osc prepared(Waveform shape, double sampleRate = rate)
 {
     auto osc = Candidate<Osc>::make();
     osc.prepare(specAt(sampleRate));
-    osc.setShape(shape);
+    osc.setWaveform(shape);
     return osc;
 }
 
@@ -59,7 +60,7 @@ std::vector<float> renderPlain(Osc& osc, std::size_t numSamples)
 
 // Distance in samples from phase t to the nearest point where `shape` jumps
 // or bends, given dt cycles per sample.
-double distanceToEdge(proto::Shape shape, double t, double dt, double width)
+double distanceToEdge(Waveform shape, double t, double dt, double width)
 {
     const auto distance = [&](double edge)
     {
@@ -68,11 +69,11 @@ double distanceToEdge(proto::Shape shape, double t, double dt, double width)
     };
     switch (shape)
     {
-    case proto::Shape::saw:
+    case Waveform::saw:
         return distance(0.0);
-    case proto::Shape::pulse:
+    case Waveform::pulse:
         return std::min(distance(0.0), distance(width));
-    case proto::Shape::triangle:
+    case Waveform::triangle:
         return std::min(distance(0.0), distance(0.5));
     }
     return 0.0;
@@ -80,8 +81,8 @@ double distanceToEdge(proto::Shape shape, double t, double dt, double width)
 
 } // namespace
 
-TEMPLATE_TEST_CASE("D6 prototypes follow the ideal waveform away from its edges", "[dsp][oscillator][d6]", PolyBlep2,
-                   PolyBlep4, MinBlep32, MinBlep64, Wavetable)
+TEMPLATE_TEST_CASE("Band-limited oscillators follow the ideal waveform away from its edges", "[dsp][oscillator][d6]",
+                   PolyBlep2, PolyBlep4, MinBlep32, MinBlep64)
 {
     // Sample n is the waveform at phase n dt, delayed by latencySamples().
     constexpr std::uint32_t increment = 1U << 22U; // 2^-10 cycles per sample: 46.9 Hz at 48 kHz
@@ -115,14 +116,14 @@ TEMPLATE_TEST_CASE("D6 prototypes follow the ideal waveform away from its edges"
     }
 }
 
-TEMPLATE_TEST_CASE("D6 prototypes attenuate aliasing of a high note", "[dsp][oscillator][d6]", PolyBlep2, PolyBlep4,
-                   MinBlep32, MinBlep64, Wavetable)
+TEMPLATE_TEST_CASE("Band-limited oscillators attenuate aliasing of a high note", "[dsp][oscillator][d6]", PolyBlep2,
+                   PolyBlep4, MinBlep32, MinBlep64)
 {
     // A saw near 5 kHz at 48 kHz: its 5th to 9th harmonics fold back into the
     // audible band. A naive saw's worst alias here is about -20 dB.
     constexpr std::size_t n = 65536;
     const auto cycles = static_cast<std::uint64_t>(std::lround(coherentFrequency(5000.0, rate, n) * n / rate));
-    auto osc = prepared<TestType>(proto::Shape::saw);
+    auto osc = prepared<TestType>(Waveform::saw);
     osc.setIncrement(coherentIncrement(cycles, n));
     const auto out = render(osc, rate, 1, 4096, n);
     const auto f0 = static_cast<double>(cycles) * rate / static_cast<double>(n);
@@ -134,8 +135,8 @@ TEMPLATE_TEST_CASE("D6 prototypes attenuate aliasing of a high note", "[dsp][osc
     CHECK(alias.worstAliasDb < -27.0);
 }
 
-TEMPLATE_TEST_CASE("D6 prototypes stay finite and bounded from 0.01 Hz to Nyquist", "[dsp][oscillator][d6]", PolyBlep2,
-                   PolyBlep4, MinBlep32, MinBlep64, Wavetable)
+TEMPLATE_TEST_CASE("Band-limited oscillators stay finite and bounded from 0.01 Hz to Nyquist", "[dsp][oscillator][d6]",
+                   PolyBlep2, PolyBlep4, MinBlep32, MinBlep64)
 {
     for (const double sampleRate : {44100.0, 48000.0})
     {
@@ -172,8 +173,8 @@ TEMPLATE_TEST_CASE("D6 prototypes stay finite and bounded from 0.01 Hz to Nyquis
     }
 }
 
-TEMPLATE_TEST_CASE("D6 prototypes add no DC offset", "[dsp][oscillator][d6]", PolyBlep2, PolyBlep4, MinBlep32,
-                   MinBlep64, Wavetable)
+TEMPLATE_TEST_CASE("Band-limited oscillators add no DC offset", "[dsp][oscillator][d6]", PolyBlep2, PolyBlep4,
+                   MinBlep32, MinBlep64)
 {
     constexpr std::size_t n = 16384;
     for (const double target : {50.0, 1000.0, 5000.0, 12000.0, 20000.0})
@@ -189,13 +190,13 @@ TEMPLATE_TEST_CASE("D6 prototypes add no DC offset", "[dsp][oscillator][d6]", Po
             const auto mean = std::accumulate(out.begin(), out.end(), 0.0) / static_cast<double>(n);
             // A 25% pulse's ideal mean is 2 w - 1 = -0.5; the others' is 0.
             // 1e-3 is -60 dB: far below anything audible as an offset.
-            CHECK_THAT(mean, WithinAbs(shape == proto::Shape::pulse ? -0.5 : 0.0, 1e-3));
+            CHECK_THAT(mean, WithinAbs(shape == Waveform::pulse ? -0.5 : 0.0, 1e-3));
         }
     }
 }
 
-TEMPLATE_TEST_CASE("D6 prototypes accept a new increment every sample", "[dsp][oscillator][d6]", PolyBlep2, PolyBlep4,
-                   MinBlep32, MinBlep64, Wavetable)
+TEMPLATE_TEST_CASE("Band-limited oscillators accept a new increment every sample", "[dsp][oscillator][d6]", PolyBlep2,
+                   PolyBlep4, MinBlep32, MinBlep64)
 {
     SECTION("re-setting the same increment changes nothing")
     {
@@ -227,7 +228,7 @@ TEMPLATE_TEST_CASE("D6 prototypes accept a new increment every sample", "[dsp][o
         constexpr std::uint64_t vibratoCycles = 9;                   // g = 6.6 Hz
         constexpr std::uint64_t carrierCycles = vibratoCycles * 300; // f0 = 1978 Hz, peaking at 2472 Hz
         const auto g = static_cast<double>(vibratoCycles) * rate / static_cast<double>(n);
-        auto osc = prepared<TestType>(proto::Shape::saw);
+        auto osc = prepared<TestType>(Waveform::saw);
         const PerSample<TestType> vibrato = [&](TestType& o, std::size_t i)
         {
             const auto phase = 2.0 * std::numbers::pi * static_cast<double>(vibratoCycles * (i % n)) / n;
@@ -248,8 +249,8 @@ TEMPLATE_TEST_CASE("D6 prototypes accept a new increment every sample", "[dsp][o
     }
 }
 
-TEMPLATE_TEST_CASE("D6 prototypes restart identically after reset", "[dsp][oscillator][d6]", PolyBlep2, PolyBlep4,
-                   MinBlep32, MinBlep64, Wavetable)
+TEMPLATE_TEST_CASE("Band-limited oscillators restart identically after reset", "[dsp][oscillator][d6]", PolyBlep2,
+                   PolyBlep4, MinBlep32, MinBlep64)
 {
     for (const auto shape : allShapes)
     {

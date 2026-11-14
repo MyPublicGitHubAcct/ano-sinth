@@ -1,8 +1,9 @@
-// Unit tests for the building blocks of each D6 prototype: the PolyBLEP and
-// PolyBLAMP residual polynomials, the minBLEP tables, and the wavetable bank.
+// Unit tests for the band-limiting building blocks: the minBLEP tables (the
+// D6 method) and the PolyBLEP/PolyBLAMP residual polynomials of the test-only
+// reference.
 // Doc: docs/dsp/band-limited-oscillators.md
 
-#include "prototype_support.hpp"
+#include "oscillator_support.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -13,9 +14,9 @@
 #include <numbers>
 
 using namespace anoesis::test::d6;
+namespace reference = anoesis::test::reference;
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
-using Catch::Matchers::WithinULP;
 
 namespace
 {
@@ -56,14 +57,14 @@ TEST_CASE("PolyBLEP residuals are the kernel's step and ramp, minus the naive on
     const auto step = [&](double x)
     {
         const auto d = static_cast<float>(std::abs(x));
-        const auto r = points == 2 ? proto::polyblep::stepResidual<2>(d) : proto::polyblep::stepResidual<4>(d);
+        const auto r = points == 2 ? reference::polyblep::stepResidual<2>(d) : reference::polyblep::stepResidual<4>(d);
         return static_cast<double>(x < 0.0 ? r : -r);
     };
     const auto ramp = [&](double x)
     {
         const auto d = static_cast<float>(std::abs(x));
-        return static_cast<double>(points == 2 ? proto::polyblep::rampResidual<2>(d)
-                                               : proto::polyblep::rampResidual<4>(d));
+        return static_cast<double>(points == 2 ? reference::polyblep::rampResidual<2>(d)
+                                               : reference::polyblep::rampResidual<4>(d));
     };
 
     // The residual cancels the naive unit step at the edge: +1/2 just before,
@@ -109,59 +110,5 @@ TEST_CASE("minBLEP tables: a minimum-phase step residual and its compensated int
         // Row p + 1 of tap i continues row p: the polyphase layout is one
         // smooth function sampled every 1 / phases() of a sample.
         CHECK_THAT(table->step(table->phases(), 3), WithinAbs(table->step(0, 4), 1e-7));
-    }
-}
-
-TEST_CASE("Wavetable bank: each level is the band-limited Fourier series", "[dsp][oscillator][d6]")
-{
-    const auto& bank = wavetableBank();
-    constexpr auto size = proto::WavetableBank::tableSize;
-
-    for (std::size_t level = 0; level < proto::WavetableBank::levels; ++level)
-    {
-        const auto harmonics = proto::WavetableBank::harmonicsAt(level);
-        CAPTURE(level, harmonics);
-        const auto* saw = bank.table(proto::Shape::saw, level);
-        const auto* triangle = bank.table(proto::Shape::triangle, level);
-        // Guard point for interpolation.
-        CHECK_THAT(saw[size], WithinULP(saw[0], 0));
-        for (const std::size_t i : {std::size_t{1}, size / 7, size / 3, size - 5})
-        {
-            const auto t = static_cast<double>(i) / static_cast<double>(size);
-            double sawSum = 0.0;
-            double triangleSum = 0.0;
-            for (std::size_t k = 1; k <= harmonics; ++k)
-            {
-                const auto w = 2.0 * std::numbers::pi * static_cast<double>(k) * t;
-                sawSum -= std::sin(w) * idealHarmonic(proto::Shape::saw, k);
-                triangleSum -= std::cos(w) * idealHarmonic(proto::Shape::triangle, k);
-            }
-            CHECK_THAT(saw[i], WithinAbs(sawSum, 1e-6));
-            CHECK_THAT(triangle[i], WithinAbs(triangleSum, 1e-6));
-        }
-    }
-}
-
-TEST_CASE("Wavetable level selection: the richest level whose harmonics stay above the audible band",
-          "[dsp][oscillator][d6]")
-{
-    // A level is safe when its top harmonic H f0 is at most fs - 20 kHz:
-    // anything above Nyquist then folds back above 20 kHz.
-    for (const double sampleRate : {44100.0, 48000.0, 96000.0})
-    {
-        const auto limit = std::max(0.5, 1.0 - (20000.0 / sampleRate));
-        for (const double hz : {10.0, 27.5, 100.0, 440.0, 1000.0, 3520.0, 8000.0, 15000.0})
-        {
-            CAPTURE(sampleRate, hz);
-            const auto level =
-                proto::WavetableOscillator::levelFor(static_cast<float>(hz / sampleRate), static_cast<float>(limit));
-            const auto top = static_cast<double>(proto::WavetableBank::harmonicsAt(level)) * hz / sampleRate;
-            CHECK(top <= limit);
-            if (level > 0)
-            {
-                // The next richer level would not be safe.
-                CHECK(2.0 * top > limit);
-            }
-        }
     }
 }

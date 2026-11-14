@@ -56,15 +56,15 @@ Any method can also run at 2× or 4× the rate and be decimated (see [oversampli
 
 ### The prototypes
 
-All five share one interface (`prepare`, `reset`, `setShape`, `setPulseWidth`, `setFrequency`, `setIncrement`, `next`, `latencySamples`) and produce a saw, a pulse, and a triangle:
+All five were built with one interface (`prepare`, `reset`, `setWaveform`, `setPulseWidth`, `setFrequency`, `setIncrement`, `next`, `latencySamples`), and each produces a saw, a pulse, and a triangle. They were measured as prototypes in commit `984d868`, in `anoesis::dsp::prototype`. After the decision, each went one of three ways:
 
-| Prototype | File | Notes |
+| Candidate | Where it is now | Notes |
 |---|---|---|
-| PolyBLEP 2-point and 4-point | [poly_blep.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/prototype/poly_blep.hpp) | `PolyBlepOscillator<Points>`. Residuals for the edges within reach, checked with integer phase compares, so samples far from any edge do no float work. |
-| minBLEP 32 and 64 taps | [min_blep.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/prototype/min_blep.hpp), [min_blep_table.cpp](../../libs/dsp/src/min_blep_table.cpp) | `MinBlepOscillator<Taps>` with a shared `MinBlepTable`. A Kaiser-windowed sinc cut off at Nyquist, with β from Kaiser's formula for a full transition width of 9.3% of the rate (20 to 24.1 kHz at 44.1 kHz): β 4.6 at 32 taps, β 9.3 at 64. |
-| Mipmapped wavetables | `wavetable.hpp`, `wavetable_bank.cpp` (removed after the measurements) | 11 levels (1024, 512, …, 1 harmonics) of 2048 samples for the saw and the triangle, with linear interpolation. The pulse is the difference of two saws, so its width can change. |
+| minBLEP 32 and 64 taps (**chosen**) | [min_blep.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/min_blep.hpp), [min_blep_table.cpp](../../libs/dsp/src/min_blep_table.cpp), in `anoesis::dsp` | `MinBlepOscillator<Taps>` with a shared `MinBlepTable`; `minBlepTaps` = 64 records the decision. The kernel is a Kaiser-windowed sinc cut off at Nyquist, with β from Kaiser's formula for a full transition width of 9.3% of the rate (20 to 24.1 kHz at 44.1 kHz): β 4.6 at 32 taps, β 9.3 at 64. |
+| PolyBLEP 2-point and 4-point | [tests/dsp/oscillators/reference/poly_blep.hpp](../../tests/dsp/oscillators/reference/poly_blep.hpp), test-only (`anoesis::test::reference`) | `PolyBlepOscillator<Points>`. Kept as the reference for minBLEP, for three reasons. It is the closed-form, table-free baseline that the report and the benchmarks print next to minBLEP, so later changes to minBLEP (the 8 waveforms, vectorisation, the tap count) are judged against the alternative D6 rejected, on the same harness. Its residual polynomials are an independent analytic check of the BLEP and BLAMP formulation. And it costs a single header with no build or runtime footprint in the library. |
+| Mipmapped wavetables | Deleted (in commit `984d868`) | 11 levels (1024, 512, …, 1 harmonics) of 2048 samples for the saw and the triangle, with linear interpolation; the pulse was the difference of two saws. Deleted because it adds nothing as a reference that its measurements here don't already record: a different structure (tables, level selection, a bank object) that no later work builds on, and 180 KB of tables built at start-up. To rerun it, check out `984d868`. |
 
-Shared details, in [common.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/prototype/common.hpp):
+Shared details, in [phase.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/phase.hpp) and [waveform.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/waveform.hpp):
 
 - **Phase is a 32-bit fixed-point accumulator** (2³² units per cycle). A float phase cannot reach 0.01 Hz: at 48 kHz the increment, 2·10⁻⁷ cycles, is only 3 or 4 float steps near t = 1, so the pitch would be off by tens of percent. Fixed point resolves 1.1·10⁻⁵ Hz, wraps by itself, and needs no double precision (a Cortex-M4F has no double FPU). The same accumulator carries over into the chosen method.
 - **A pulse edge is located with one subtraction.** In fixed point, `phase − widthPhase` wraps by itself, so the distance to the falling edge needs no modulo.
@@ -72,7 +72,13 @@ Shared details, in [common.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/p
 
 ### The measurements
 
-[antialiasing_report.cpp](../../tests/dsp/oscillators/antialiasing_report.cpp) is a hidden test (`[d6-report]`, about 40 s in `relwithdebinfo`). It measures every prototype with the harness and prints the tables below:
+[antialiasing_report.cpp](../../tests/dsp/oscillators/antialiasing_report.cpp) is a hidden test (`[d6-report]`, about 40 s in `relwithdebinfo` with all five candidates). It measures each candidate with the harness and prints the tables below. It now covers minBLEP and the PolyBLEP reference; the wavetable column comes from commit `984d868`:
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[d6-report]"
+```
+
 
 - **Aliasing:** every MIDI note 0–127 at 44.1 and 48 kHz, at 1×, 2×, and 4×. For the oversampled cases the oscillator runs at the high rate and `Oversampler::downsample` brings it back. Each render is 65,536 samples at an increment of exactly C·2¹⁶ (C odd, the nearest coherent frequency), so the render is periodic and a rectangular window has no leakage. `measureAliasing` reports the strongest non-harmonic component below 20 kHz, relative to the fundamental.
 - **Droop:** `measureHarmonics` (added to the harness for this) gives each harmonic's amplitude. Each is compared with the ideal 2/(πk).
@@ -160,11 +166,11 @@ All five stay finite, bounded, and free of denormals for every shape from 0 Hz t
 
 ## Tests
 
-- [antialiasing_methods_test.cpp](../../tests/dsp/oscillators/antialiasing_methods_test.cpp) covers the building blocks:
-  - The PolyBLEP residuals cancel the naive step (±½ at the edge), integrate to zero, and are continuous where the polynomial pieces meet, and the ramp residual is the running integral of the step residual.
+- [band_limiting_residuals_test.cpp](../../tests/dsp/oscillators/band_limiting_residuals_test.cpp) covers the building blocks:
   - The minBLEP tables start at −1, end at exactly 0, start the ramp table at the group delay, and continue smoothly from row to row.
-  - The wavetable levels match the Fourier series, and the level selection keeps folded harmonics above 20 kHz.
-- [antialiasing_prototypes_test.cpp](../../tests/dsp/oscillators/antialiasing_prototypes_test.cpp) runs the same tests on every candidate:
+  - The PolyBLEP residuals cancel the naive step (±½ at the edge), integrate to zero, and are continuous where the polynomial pieces meet, and the ramp residual is the running integral of the step residual.
+  - (Until `984d868`: the wavetable levels matched the Fourier series, and the level selection kept folded harmonics above 20 kHz.)
+- [band_limited_oscillator_test.cpp](../../tests/dsp/oscillators/band_limited_oscillator_test.cpp) runs the same tests on minBLEP (32 and 64 taps) and the PolyBLEP reference:
   - The output follows the ideal waveform away from edges (allowing for latency).
   - A 5 kHz saw's worst alias is below −27 dB.
   - The output stays finite, bounded, and denormal-free from 0 Hz to fs, for every shape, at 44.1 and 48 kHz.

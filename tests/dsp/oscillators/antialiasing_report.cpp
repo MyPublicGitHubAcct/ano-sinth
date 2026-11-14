@@ -1,14 +1,16 @@
-// The D6 measurement report: every anti-aliasing prototype, measured with the
-// test harness (measureAliasing, measureHarmonics, powerSpectrum) and printed
+// The D6 measurement report: the minBLEP oscillator (32 and 64 taps) and the
+// PolyBLEP reference, measured with the test harness (measureAliasing, measureHarmonics, powerSpectrum) and printed
 // as Markdown tables. Hidden from the default run; run it in an optimised
 // build (about a minute):
 //
 //   cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[d6-report]"
 //
-// Results and the decision: docs/dsp/band-limited-oscillators.md
+// Results and the decision: docs/dsp/band-limited-oscillators.md. The
+// mipmapped-wavetable candidate was measured too, then removed; to rerun it,
+// check out commit 984d868.
 
-#include "prototype_support.hpp"
+#include "oscillator_support.hpp"
 
 #include <anoesis/test/measure.hpp>
 #include <anoesis/test/signals.hpp>
@@ -40,15 +42,15 @@ constexpr std::size_t n = 65536;
 constexpr double audible = 20000.0;
 constexpr int topTwoOctaves = 104; // MIDI 104..127: 3.3 to 12.5 kHz
 
-const char* shapeName(proto::Shape shape)
+const char* shapeName(Waveform shape)
 {
     switch (shape)
     {
-    case proto::Shape::saw:
+    case Waveform::saw:
         return "saw";
-    case proto::Shape::pulse:
+    case Waveform::pulse:
         return "square";
-    case proto::Shape::triangle:
+    case Waveform::triangle:
         return "triangle";
     }
     return "";
@@ -74,12 +76,12 @@ std::uint64_t noteCycles(int note, double rate)
 }
 
 template <typename Osc>
-std::vector<float> renderNote(proto::Shape shape, std::uint64_t cycles, double rate, std::size_t ratio)
+std::vector<float> renderNote(Waveform shape, std::uint64_t cycles, double rate, std::size_t ratio)
 {
     auto osc = Candidate<Osc>::make();
     osc.prepare(
         {.sampleRate = static_cast<float>(rate * static_cast<double>(ratio)), .maxBlockSize = 512, .numChannels = 1});
-    osc.setShape(shape);
+    osc.setWaveform(shape);
     osc.setPulseWidth(0.5f);
     osc.setIncrement(coherentIncrement(cycles, n, ratio));
     return render(osc, rate, ratio, 4096, n);
@@ -94,7 +96,7 @@ struct AliasSweep
 };
 
 template <typename Osc>
-AliasSweep sweepAliasing(proto::Shape shape, double rate, std::size_t ratio)
+AliasSweep sweepAliasing(Waveform shape, double rate, std::size_t ratio)
 {
     AliasSweep sweep;
     const auto window = rectangularWindow(n);
@@ -129,7 +131,7 @@ Droop measureDroop(double rate, std::size_t ratio)
     const auto window = rectangularWindow(n);
     const auto errorDb = [](double measured, std::size_t k)
     {
-        const auto ratioToIdeal = measured / idealHarmonic(proto::Shape::saw, k);
+        const auto ratioToIdeal = measured / idealHarmonic(Waveform::saw, k);
         return ratioToIdeal < 1e-4 ? -std::numeric_limits<double>::infinity() : toDb(ratioToIdeal);
     };
     for (int note = 0; note <= 127; ++note)
@@ -137,7 +139,7 @@ Droop measureDroop(double rate, std::size_t ratio)
         const auto cycles = noteCycles(note, rate);
         const auto f0 = static_cast<double>(cycles) * rate / n;
         const auto harmonics =
-            measureHarmonics(renderNote<Osc>(proto::Shape::saw, cycles, rate, ratio), f0, rate, window, audible);
+            measureHarmonics(renderNote<Osc>(Waveform::saw, cycles, rate, ratio), f0, rate, window, audible);
         for (std::size_t k = 1; k <= harmonics.size(); ++k)
         {
             const auto e = errorDb(harmonics[k - 1], k);
@@ -162,7 +164,7 @@ Droop measureDroop(double rate, std::size_t ratio)
 
 // Worst alias (dB re a saw's fundamental) under a deep vibrato: linear FM,
 // f = f0 (1 + 0.25 sin(2 pi g t)), g = 6.6 Hz, every true component on a
-// multiple of g. See the vibrato test in antialiasing_prototypes_test.cpp.
+// multiple of g. See the vibrato test in band_limited_oscillator_test.cpp.
 template <typename Osc>
 double vibratoAliasing(std::uint64_t carrierMultiple, double rate, std::size_t ratio)
 {
@@ -191,7 +193,7 @@ template <typename Osc>
 double worstDc(double rate)
 {
     double worst = 0.0;
-    for (const auto shape : {proto::Shape::saw, proto::Shape::triangle})
+    for (const auto shape : {Waveform::saw, Waveform::triangle})
     {
         for (int kHz = 1; kHz < static_cast<int>(rate / 2000.0); ++kHz)
         {
@@ -227,7 +229,7 @@ void printReport()
 
     out << "## Worst alias below 20 kHz, dB re fundamental\n\nTop two octaves (MIDI 104-127, 3.3-12.5 kHz) "
            "(the note of the worst case over the whole keyboard) / MIDI 0-103.\n\n";
-    for (const auto shape : {proto::Shape::saw, proto::Shape::pulse, proto::Shape::triangle})
+    for (const auto shape : {Waveform::saw, Waveform::pulse, Waveform::triangle})
     {
         out << "### " << shapeName(shape) << "\n\n" << header << "\n" << rule << "\n";
         for (const double rate : {44100.0, 48000.0})
@@ -306,37 +308,15 @@ void printReport()
         }(),
         ...);
     out << "\n\nShared tables: minBLEP 32-tap " << minBlepTable32().bytes() << " bytes, 64-tap "
-        << minBlepTable64().bytes() << " bytes; wavetable bank " << wavetableBank().bytes() << " bytes.\n";
+        << minBlepTable64().bytes() << " bytes.\n";
     out << std::fixed << std::setprecision(3) << "minBLEP group delay: 32-tap " << minBlepTable32().delay()
         << " samples, 64-tap " << minBlepTable64().delay() << " samples.\n";
-
-    // A glide that crosses a mipmap boundary switches tables mid-cycle: the
-    // output jumps by the difference of the two levels at that phase.
-    double worstSwitch = 0.0;
-    std::size_t worstLevel = 0;
-    for (std::size_t level = 0; level + 1 < proto::WavetableBank::levels; ++level)
-    {
-        const auto* richer = wavetableBank().table(proto::Shape::saw, level);
-        const auto* poorer = wavetableBank().table(proto::Shape::saw, level + 1);
-        for (std::size_t i = 0; i < proto::WavetableBank::tableSize; ++i)
-        {
-            const auto jump = std::abs(static_cast<double>(richer[i]) - static_cast<double>(poorer[i]));
-            if (jump > worstSwitch)
-            {
-                worstSwitch = jump;
-                worstLevel = level;
-            }
-        }
-    }
-    out << "Wavetable saw: largest jump when the level changes: " << worstSwitch << " (levels " << worstLevel << " -> "
-        << worstLevel + 1 << ", " << proto::WavetableBank::harmonicsAt(worstLevel) << " -> "
-        << proto::WavetableBank::harmonicsAt(worstLevel + 1) << " harmonics).\n";
 }
 
 } // namespace
 
-TEST_CASE("D6 report: measure every anti-aliasing prototype", "[.][d6-report]")
+TEST_CASE("D6 report: measure minBLEP against the PolyBLEP reference", "[.][d6-report]")
 {
-    printReport<PolyBlep2, PolyBlep4, MinBlep32, MinBlep64, Wavetable>();
+    printReport<PolyBlep2, PolyBlep4, MinBlep32, MinBlep64>();
     SUCCEED();
 }
