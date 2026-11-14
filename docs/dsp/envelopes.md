@@ -5,7 +5,7 @@ An envelope generator gives a note its shape over time. It rises when a key goes
 - what an ADSR is, and the ways to draw its segments;
 - what is known about Sylenth1's envelopes;
 - the segment models prototyped here, and what each one measured: shape, timing at every rate, discontinuities and clicks, stages of 0, control changes mid-stage, block sizes, denormals, and CPU;
-- the decision, and how it is built.
+- the decision, how it is built, and the tests that pin it down.
 
 Read [parameter-smoothing.md](parameter-smoothing.md) (the one-pole approach and landing exactly), [denormals.md](denormals.md), and [processor-lifecycle.md](processor-lifecycle.md) first.
 
@@ -75,13 +75,7 @@ The full source table, with confidence ratings and the open questions, is in the
 
 ## The candidates and what they measured
 
-Measured by the hidden `[envelope-report]` ([envelope_report.cpp](../../tests/dsp/control/envelope_report.cpp)) and the `[envelope]` benchmarks ([envelope_benchmark.cpp](../../tests/dsp/benchmarks/envelope_benchmark.cpp)), on test-only prototypes ([envelope_candidates.hpp](../../tests/dsp/control/envelope_candidates.hpp)):
-
-```sh
-cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
-build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[envelope-report]"   # about 4 s
-tools/bench.sh "[envelope]"
-```
+Measured at commit `c8c1ab1` by the hidden `[envelope-report]` and the `[envelope]` benchmarks, on test-only prototypes (`tests/dsp/control/envelope_candidates.hpp` at that commit). The prototypes were removed once the choice was built. The report and the benchmarks now measure `Adsr` (**Results, as built** below), and checking out that commit reruns every figure in this section.
 
 Every prototype shares one stage machine and one set of rules, so the tables compare curves and arithmetic and nothing else:
 
@@ -215,11 +209,11 @@ Nanoseconds per sample, one 512-sample block in each stage, 48 kHz, `relwithdebi
 - **The flush costs about 2.5 ns per sample** in a moving stage (a compare and a branch the loop cannot hide). The overshoot model does not need it, since its segments end in finite time.
 - **The counted exponential is as cheap as double recursion** and nearly as cheap as linear, though it calls `fastExp2` every sample. The multiply chain of a recursion is serial, while each counted sample is independent, so the built version can compute a block of a stage in a vectorized loop.
 
-## The recommendation
+### The decision
 
-*To be decided by the project owner. The decision and its date go here and in PLAN.md's Decisions log.*
+Chosen by the project owner on 2026-11-14, each the recommended option (PLAN.md, Decisions log):
 
-| Question | Recommendation | Why |
+| Question | Decision | Why |
 |---|---|---|
 | **Model** | **Exponential towards an overshoot target, attack ratio 0.3, decay and release ratio 0.001, counted in float** (closed form through `fastExp2`, stages ended by sample count) | Exponential, as the one Sylenth1 test reports. Its release is a near-straight line in dB that stays audible for 90% of its time, so a long release lasts about as long as it is set. Exact timing at every rate and length in float only (fit for STM32). Ends at exactly 0, so the end of a note is exact. Never goes subnormal, so it needs no flush. 2.8 ns per sample, and it can vectorize. |
 | **Retrigger while sounding** | **From the current level** (the attack re-entered where its curve passes the current level) | A restart from 0 clicks in proportion to the level it cuts (−12 dB from a quarter). The one user report says Sylenth1 doesn't click (E5). |
@@ -231,11 +225,98 @@ Nanoseconds per sample, one 512-sample block in each stage, 48 kHz, `relwithdebi
 
 ## How it is applied here
 
-*Written once the model is built (M1.2).*
+### The envelope
+
+`Adsr` ([adsr.hpp](../../libs/dsp/include/anoesis/dsp/control/adsr.hpp)) is the whole of it: four settings, a stage, the current segment's four floats and two counts, and a `LinearSmoother` for sustain changes. It is about 80 bytes, with no tables and no allocation.
+
+- **A segment** is set up whenever a stage is entered, in double (a few logs, at events only): the overshoot target T = e + r(e − s), the starting distance d₀ = level − T, the exponent per sample log₂c = log₂(r / (1 + r)) / N, and the samples left on the full-scale curve from the current level, round(log₂(−r(e − s) / d₀) / log₂c). That is N from the start of the curve, and fewer part-way. These are the constant-rate rule and the exact end, in one formula.
+- **Each sample** is level = T + d₀ · `fastExp2`(log₂c · k), with k counted from the stage's start, and the stage's last sample is its end level exactly. Nothing accumulates. The count is exact in float up to 2²⁴. Above that (a stage longer than 87 s at 192 kHz, or 22 s at 768 kHz), rounding the count changes the exponent by at most 2⁻²⁴ · |log₂ q|, the same as the product's own rounding. So stages up to `maxStageSeconds` (60 s) are as exact at 768 kHz as at 48 kHz (tested at 25 s and 768 kHz, 19.2 million samples).
+- **Stages of 0 are skipped at once.** An attack of 0 makes the gate's own sample the decay's first. A decay of 0 puts the sustain level on the sample after the peak (no ramp). A release of 0 outputs 0 on the note-off's sample, and the envelope is idle.
+- **The gate.** `gateOn()` attacks from the current level (from idle, that is 0). `legatoGateOn()` does nothing while the gate is on (attack, decay, sustain) and is `gateOn()` otherwise. `gateOff()` releases from the current level, and does nothing in the release or when idle. `isActive()` is false from the sample the release reaches 0. `isGateOn()` tells the voice whether the key is down.
+- **Controls** are seconds (clamped to [0, 60]) and a linear sustain level (clamped to [0, 1], a subnormal value is 0). NaN is ignored. A time changed mid-stage re-enters the stage at once, at the new rate. A sustain change while sustaining starts a 10 ms linear ramp, which lands exactly. During the decay, the decay re-aims at the new level, or ramps to it if the level is already past it.
+- **Two ways to render, the same output.** `next()` gives one sample. `process(out)` writes a block, a run of a stage at a time: the run's samples in a loop with no recursion, which clang vectorizes, and then the stage's last sample through the same step as `next()`. `process(out, events)` applies gate events at their sample offsets. Both evaluate the same expression from the same count, so they are bit-identical however a render is split.
+- **Never subnormal.** Every segment ends at its end level in finite time, so the level never approaches 0 asymptotically, and the sustain level is flushed. No `flushDenormal()` is needed per sample.
+
+### How a voice uses it
+
+```cpp
+// The voice's block: gates at their sample offsets, from the MIDI events.
+std::array<AdsrEvent, 2> gates{{{.offset = 17, .gate = AdsrGate::off},
+                                {.offset = 300, .gate = legato ? AdsrGate::legatoOn : AdsrGate::on}}};
+ampEnvelope.process(levels, gates);  // levels[n] multiplies the part's audio
+if (!ampEnvelopeA.isActive() && !ampEnvelopeB.isActive())
+    freeVoice();                     // M1.4
+```
+
+Control changes (sample-accurate automation, M1.8) split the block at their sample: process up to it, set the control, process on. The knob laws live in the parameter table (M1.9): times t = 25 s · x^4.64 for knob x ∈ [0, 1] and sustain = knob / 10, both working hypotheses (E1, E4).
+
+## Results, as built
+
+From the `[envelope-report]` ([envelope_report.cpp](../../tests/dsp/control/envelope_report.cpp)), which now measures `Adsr` through the candidates' interface, and the `[envelope]` benchmarks ([envelope_benchmark.cpp](../../tests/dsp/benchmarks/envelope_benchmark.cpp)):
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[envelope-report]"   # under a second
+tools/bench.sh "[envelope]"
+```
+
+Every figure matches the chosen prototype's: attack 0.399 / 0.676 / 0.867 at its quarters, decay and release −15.0 / −30.3 / −46.7 dB, 90% of a release above −60 dB. Every stage is exact to the sample at 44.1–192 kHz from 1 ms to 25 s, with the attack within 4.2·10⁻⁷ of its ideal curve. A release from 0.5 takes 0.900 of its time. The click of a retrigger from the current level is −34.7 dB. Stages of 0 are as described. Output is bit-identical in blocks of 1, 37, and 4096, and there are no subnormals. One figure changed, as decided: **a sustain change from 0.5 to 0.25 now measures −50.3 dB** (a 10 ms ramp), where the prototype jumped (−12.0 dB).
+
+CPU, nanoseconds per sample, 48 kHz ([baselines](../performance/baselines.md)):
+
+| Stage | `process()` | `next()` per sample |
+|---|---:|---:|
+| Attack | 0.52 | 2.65 |
+| Decay | 0.49 | 2.69 |
+| Sustain | 0.08 | 1.27 |
+| Release | 0.52 | 2.75 |
+| **64 envelopes (16 voices × 4), a quarter in each stage** | **25.3** | |
+
+`process()` is 5× faster than `next()` because each sample of a stage depends only on its count, so a run vectorizes. A 16-voice synth's 64 envelopes cost 0.12% of a core.
 
 ## Tests
 
-*Written once the model is built (M1.2).* The report's measurements become tests with derived tolerances: the timing of each stage, the shape against the chosen curve, retrigger and release from every stage, stages of 0, sample-accurate gates, block-size invariance, control changes mid-stage, denormals, allocation, and a randomized stress test.
+[adsr_test.cpp](../../tests/dsp/control/adsr_test.cpp) (`[adsr]`). The reference is the model's closed form in double. Each segment's tolerance is derived in `segmentTolerance()` from `fastExp2`'s documented bound (5·10⁻⁷ relative) and float rounding: three roundings of the exponent at 2⁻²⁴ · |log₂ q| each, and three of the level at 2⁻²⁴ · (1 + r). That is 1.2·10⁻⁶ for the attack and 1.9·10⁻⁶ for decay and release.
+
+- **Lifecycle and defaults.** `Preparable`. `reset()` and a second `prepare()` reproduce a fresh envelope bit for bit. By default it is a plain gate (0, 0, 1, 0), idle and silent until a gate.
+- **Timing.** At 44.1, 48, 96, and 192 kHz, for 1 ms, 100 ms, and 1 s, each stage ends exactly on sample round(time × rate), at exactly its end level, and not before. Long stages: 25 s at 44.1 and 192 kHz and at 768 kHz (19.2 million samples, past 2²⁴) stay within the tolerance and end exactly.
+- **Shape.** Every sample of attack, decay, and release against the model, at four rates and two sets of times, and the attack at half its time against 1.3(1 − √(0.3/1.3)).
+- **Constant rate.** A release from 0.9, 0.5, 0.1, and 0.001 follows the full-scale curve from that level, and ends after the samples the model counts. From 0.5 that is 0.900 of the time.
+- **Retrigger and release from every stage.** A gate-on in the attack, decay, sustain, release, and idle continues from the current level along the attack curve. A note-off in the attack, decay, and sustain releases from the current level. A legato gate-on in a held stage changes nothing, bit for bit. In the release or idle it is a gate-on. A note-off in the release or idle changes nothing.
+- **Stages of 0** as described above, and a time under half a sample is 0.
+- **Sample-accurate gates.** A gate-on at offset 0, 1, 200, or 511 of a block is the same note delayed, bit for bit, with zeros before it. A note-off at an offset takes effect on that sample.
+- **Block sizes.** A script of gates, legato gates, and control changes rendered in blocks of 1, 37, and 4096 through `process(out, events)` equals `next()` per sample, bit for bit, at four rates.
+- **Control changes mid-stage.** An attack, decay, or release time changed mid-stage continues from the level at the new rate. Half-way up a 100 ms attack, 10 ms leaves exactly 240 samples. A time of 0 ends the stage at once. A sustain change while sustaining is a straight line over exactly round(10 ms × rate) samples, landing exactly. In the decay it re-aims (or ramps up if the level is already below the new level). In the attack the decay goes to the new level.
+- **Controls** clamp, ignore NaN, and flush a subnormal sustain to 0.
+- **No subnormals** at four rates and sustain levels 0, 10⁻³⁰, 10⁻⁶, 0.5, and 1, held and released. **No allocation** in any control, gate, or process call.
+- **Stress.** At each rate, 400,000 samples of random gates, legato gates, note-offs, and control changes (times of 0, one sample, NaN, and up to 0.5 s; sustain levels including 0): finite, within [0, 1], free of subnormals, and bit-identical in blocks of 1, 37, and 4096 against `next()` per sample.
+
+**Every test was checked to fail first.** Against an inert stub with the same interface, 12 of the 18 tests failed. The other 6 pin properties that silence also has (the lifecycle, legato as a no-op, no allocation, no subnormals, stability, block sizes), and the breaks below check them. Then 22 deliberate breaks in `Adsr`, each caught and each restored. Every test fails under at least one break.
+
+| Break | Tests that failed |
+|---|---|
+| a retrigger restarts from 0 | retrigger |
+| constant time instead of constant rate | 7, including part-way release, note-off, retrigger, time changes, curves, stress |
+| a sustain change jumps instead of ramping | sustain change |
+| each stage one sample too long | 10, including timing, long stages, curves, stages of 0, stress |
+| the coefficient quantized to float (as a float recursion would be) | 7, including timing, long stages, curves |
+| legato retriggers | legato |
+| a note-off in the attack is ignored | note-off; stages of 0 |
+| events applied one sample late | sample-accurate gates; block sizes; stress |
+| `process()` computes a run differently from `next()` (a product of two powers) | sample-accurate gates; block sizes; stress |
+| a decay of 0 ramps to the sustain level | stages of 0; sustain change; time changes; part-way release |
+| the attack ratio 0.5 instead of 0.3 | curves; long stages; retrigger; time changes |
+| the decay and release ratio 0.01 instead of 0.001 | 7, including curves, long stages, part-way release |
+| NaN times not ignored; no upper clamp on times; a subnormal sustain kept | controls (each) |
+| a sustain change during the decay does not re-aim it | sustain change |
+| a time change mid-stage waits for the next stage | time changes; sample-accurate gates |
+| an allocation at a gate-on | no allocation |
+| the stage's last sample returns the next stage's level | stages of 0 |
+| `reset()` keeps the level | lifecycle |
+| a pure-exponential tail (ratio 10⁻³⁹, passing through subnormals) | 10, including no subnormals |
+| the default sustain 0 instead of 1 | defaults |
+
+The first build had one bug that these tests caught. With a decay of 0, the attack's last sample returned the sustain level instead of 1, because the instant decay overwrote the level before it was returned ("stages of 0").
 
 ## References
 

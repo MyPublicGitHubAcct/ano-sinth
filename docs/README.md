@@ -51,7 +51,7 @@ This section fills up during Phase 1 (oscillators, filters, envelopes, effects, 
 
 **Envelopes and LFOs (M1.2)**
 
-16. [Envelopes: the ADSR](dsp/envelopes.md): the four stages; linear, analog RC, and overshoot-target exponential segments; constant rate against constant time; why float recursion fails on long stages and counting fixes it; clicks at retriggers and sustain changes; denormals in analog-style tails; what is known about Sylenth1's envelopes; six models measured.
+16. [Envelopes: the ADSR](dsp/envelopes.md): the four stages; linear, analog RC, and overshoot-target exponential segments; constant rate against constant time; why float recursion fails on long stages and counting fixes it; clicks at retriggers and sustain changes; denormals in analog-style tails; what is known about Sylenth1's envelopes; six models measured, and the counted overshoot-target exponential chosen and built.
 
 ### 3. Performance
 

@@ -1,9 +1,12 @@
-// CPU cost of the candidate ADSR segment models (envelope_candidates.hpp,
-// docs/dsp/envelopes.md): one 512-sample block in each stage. Tagged
-// [!benchmark][envelope]: run with tools/bench.sh "[envelope]" in
-// relwithdebinfo. Results: docs/dsp/envelopes.md
+// CPU cost of the ADSR envelope (Adsr, docs/dsp/envelopes.md): one
+// 512-sample block in each stage, through process() (a run of a stage at a
+// time) and through next() per sample, and a 16-voice synth's 64 envelopes.
+// Tagged [!benchmark][envelope]: run with tools/bench.sh "[envelope]" in
+// relwithdebinfo. The candidate models it was chosen from are benchmarked at
+// commit c8c1ab1. Results: docs/dsp/envelopes.md,
+// docs/performance/baselines.md
 
-#include "../control/envelope_candidates.hpp"
+#include <anoesis/dsp/control/adsr.hpp>
 
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -12,100 +15,94 @@
 #include <cstddef>
 #include <string>
 
-using namespace anoesis::test::envelope;
+using anoesis::dsp::Adsr;
+using anoesis::dsp::AdsrStage;
 
 namespace
 {
 
 constexpr std::size_t blockSize = 512;
 constexpr float rate = 48000.0f;
+using Block = std::array<float, blockSize>;
 
-// One block in each stage. Times are long enough that a block never leaves
-// its stage; sustain 0.5.
-template <typename Model>
-void benchmarkModel(const std::string& name, Ratios ratios)
+// Times long enough that a block never leaves its stage; sustain 0.5.
+Adsr preparedIn(AdsrStage stage)
 {
-    std::array<float, blockSize> out{};
-    const auto prepared = [&]
+    Adsr adsr;
+    adsr.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
+    adsr.setAttack(stage == AdsrStage::attack ? 50.0f : 0.0f);
+    adsr.setDecay(stage == AdsrStage::decay ? 50.0f : 0.0f);
+    adsr.setSustain(0.5f);
+    adsr.setRelease(50.0f);
+    adsr.gateOn();
+    if (stage == AdsrStage::release)
     {
-        Model m{ratios};
-        m.prepare(rate);
-        m.setAttack(10.0f);
-        m.setDecay(10.0f);
-        m.setSustain(0.5f);
-        m.setRelease(10.0f);
-        return m;
-    };
-    const auto run = [&](Model& m)
+        adsr.gateOff();
+    }
+    return adsr;
+}
+
+void benchmarkStage(AdsrStage stage, const std::string& name)
+{
+    Block out{};
+    auto blocks = preparedIn(stage);
+    BENCHMARK("Envelope: " + name + ", process() x512")
     {
-        for (auto& y : out)
+        if (blocks.stage() != stage)
         {
-            y = m.next();
+            blocks = preparedIn(stage);
         }
+        blocks.process(out);
         return out[blockSize - 1];
     };
 
-    auto attack = prepared();
-    attack.gateOn();
-    BENCHMARK("Envelope: " + name + ", attack x512")
+    auto samples = preparedIn(stage);
+    BENCHMARK("Envelope: " + name + ", next() per sample x512")
     {
-        if (attack.stage() != Stage::attack)
+        if (samples.stage() != stage)
         {
-            attack.reset();
-            attack.gateOn();
+            samples = preparedIn(stage);
         }
-        return run(attack);
-    };
-
-    auto decay = prepared();
-    decay.setAttack(0.0f);
-    decay.gateOn();
-    BENCHMARK("Envelope: " + name + ", decay x512")
-    {
-        if (decay.stage() != Stage::decay)
+        for (auto& y : out)
         {
-            decay.reset();
-            decay.gateOn();
+            y = samples.next();
         }
-        return run(decay);
-    };
-
-    auto sustain = prepared();
-    sustain.setAttack(0.0f);
-    sustain.setDecay(0.0f);
-    sustain.gateOn();
-    BENCHMARK("Envelope: " + name + ", sustain x512")
-    {
-        return run(sustain);
-    };
-
-    auto release = prepared();
-    release.setAttack(0.0f);
-    release.setDecay(0.0f);
-    release.gateOn();
-    release.gateOff();
-    BENCHMARK("Envelope: " + name + ", release x512")
-    {
-        if (!release.isActive())
-        {
-            release.gateOn();
-            release.gateOff();
-        }
-        return run(release);
+        return out[blockSize - 1];
     };
 }
 
 } // namespace
 
-TEST_CASE("Envelope candidates: CPU", "[!benchmark][envelope]")
+TEST_CASE("Envelope: CPU", "[!benchmark][envelope]")
 {
-    benchmarkModel<LinearAccumulated>("linear, accumulated", Ratios{});
-    benchmarkModel<LinearCounted>("linear, counted", Ratios{});
-    benchmarkModel<ExponentialFloat>("exponential r 0.3 / 0.001", Ratios{.attack = 0.3, .decayRelease = 0.001});
-    benchmarkModel<ExponentialDouble>("exponential r 0.3 / 0.001, double",
-                                      Ratios{.attack = 0.3, .decayRelease = 0.001});
-    benchmarkModel<ExponentialCounted>("exponential r 0.3 / 0.001, counted",
-                                       Ratios{.attack = 0.3, .decayRelease = 0.001});
-    benchmarkModel<AnalogRc>("analog RC", Ratios{});
-    benchmarkModel<AnalogRcFlushed>("analog RC, state flushed", Ratios{});
+    benchmarkStage(AdsrStage::attack, "attack");
+    benchmarkStage(AdsrStage::decay, "decay");
+    benchmarkStage(AdsrStage::sustain, "sustain");
+    benchmarkStage(AdsrStage::release, "release");
+
+    // A 16-voice synth: two amp and two mod envelopes per voice, in mixed
+    // stages, one block each.
+    // Each is put back in its stage if a long run of the benchmark ends it.
+    std::array<Adsr, 64> envelopes{};
+    std::array<AdsrStage, 64> stages{};
+    for (std::size_t i = 0; i < envelopes.size(); ++i)
+    {
+        stages[i] = static_cast<AdsrStage>(1 + (i % 4));
+        envelopes[i] = preparedIn(stages[i]);
+    }
+    Block out{};
+    BENCHMARK("Envelope: 64 envelopes (16 voices x 4), a quarter in each stage, process() x512")
+    {
+        float sum = 0.0f;
+        for (std::size_t i = 0; i < envelopes.size(); ++i)
+        {
+            if (envelopes[i].stage() != stages[i])
+            {
+                envelopes[i] = preparedIn(stages[i]);
+            }
+            envelopes[i].process(out);
+            sum += out[blockSize - 1];
+        }
+        return sum;
+    };
 }

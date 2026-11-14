@@ -6,6 +6,27 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-14: M1.2 ADSR envelope
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[envelope]"`, 100 samples per benchmark.
+- **What changed** ([envelopes.md](../dsp/envelopes.md)): a new `Adsr` (exponential segments towards an overshoot target, counted in float as a closed form through `fastExp2`). No existing code changed, so no existing row is re-measured. New rows: one 512-sample block in each stage, through `process()` (a run of a stage at a time) and through `next()` per sample, and 64 envelopes (16 voices × 4) a quarter in each stage.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| Envelope: attack, `process()` / `next()` per sample | 0.52 / 2.65 |
+| Envelope: decay, `process()` / `next()` per sample | 0.49 / 2.69 |
+| Envelope: sustain, `process()` / `next()` per sample | 0.08 / 1.27 |
+| Envelope: release, `process()` / `next()` per sample | 0.52 / 2.75 |
+| Envelope: 64 envelopes (16 voices × 4), a quarter in each stage, `process()` | 25.25 (0.39 per envelope) |
+
+### Observations
+
+- **`process()` vectorizes a stage: 0.5 ns per sample**, 5× faster than `next()`. Each sample of a stage is computed from its own count, with no recursion, so clang runs `fastExp2` across lanes. The two give bit-identical output (tested).
+- **A 16-voice synth's 64 envelopes cost 25 ns per sample, 0.12% of a core**, a quarter of one note's 32 oscillator voices (about 100 ns).
+- The candidate models' costs (per sample through `next()`, measured at `c8c1ab1`) are in [envelopes.md](../dsp/envelopes.md#cpu). The counted exponential measured 2.8 ns there, as `next()` does here.
+
+---
+
 ## 2026-11-14: M1.1 oscillator drift
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark.

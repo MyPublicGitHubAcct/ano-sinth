@@ -9,6 +9,7 @@ add_executable(anoesis_dsp_tests
     core/audio_block_test.cpp
     core/denormals_test.cpp
     core/processor_test.cpp
+    control/adsr_test.cpp
     control/envelope_report.cpp
     control/smoother_test.cpp
     control/stereo_gain_test.cpp

@@ -1,6 +1,6 @@
-// The envelope report: candidate ADSR segment models, prototyped in
-// envelope_candidates.hpp and measured to choose one (docs/dsp/envelopes.md).
-// For each model:
+// The envelope report: Adsr as built (docs/dsp/envelopes.md). The candidate
+// segment models it was chosen from were measured by this report at commit
+// c8c1ab1 (envelope_candidates.hpp at that commit). It measures:
 //
 // - the shape of each stage (levels at a quarter, half, and three quarters
 //   of the stage's time; the release in dB, and how long it stays above
@@ -18,15 +18,14 @@
 // - independence from the block size;
 // - denormals in long tails.
 //
-// Hidden from the default run; run it in an optimised build (about 5 s):
+// Hidden from the default run; run it in an optimised build (under a second):
 //
 //   cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[envelope-report]"
 //
 // CPU: the "[envelope]" benchmarks (tools/bench.sh "[envelope]").
 
-#include "envelope_candidates.hpp"
-
+#include <anoesis/dsp/control/adsr.hpp>
 #include <anoesis/dsp/control/smoother.hpp>
 
 #include <anoesis/test/spectrum.hpp>
@@ -49,10 +48,95 @@
 #include <vector>
 
 using namespace anoesis::test;
-using namespace anoesis::test::envelope;
 
 namespace
 {
+
+using Stage = anoesis::dsp::AdsrStage;
+
+/// The curve's overshoot ratios: attack, then decay and release.
+struct Ratios
+{
+    double attack = static_cast<double>(anoesis::dsp::Adsr::attackRatio);
+    double decayRelease = static_cast<double>(anoesis::dsp::Adsr::decayReleaseRatio);
+};
+
+/// The built Adsr behind the interface the candidates had, so every table
+/// below reads as it did for them. A "retrigger from 0" is emulated by a
+/// reset() before the gate.
+class Built
+{
+public:
+    explicit Built(Ratios /*ratios*/ = {}) noexcept {}
+
+    void prepare(float rate) noexcept
+    {
+        adsr.prepare({.sampleRate = rate, .maxBlockSize = 4096, .numChannels = 1});
+    }
+
+    void setAttack(float seconds) noexcept
+    {
+        adsr.setAttack(seconds);
+    }
+
+    void setDecay(float seconds) noexcept
+    {
+        adsr.setDecay(seconds);
+    }
+
+    void setSustain(float level) noexcept
+    {
+        adsr.setSustain(level);
+    }
+
+    void setRelease(float seconds) noexcept
+    {
+        adsr.setRelease(seconds);
+    }
+
+    void setRetriggerFromCurrent(bool value) noexcept
+    {
+        fromCurrent = value;
+    }
+
+    void gateOn() noexcept
+    {
+        if (!fromCurrent)
+        {
+            adsr.reset();
+        }
+        adsr.gateOn();
+    }
+
+    void gateOff() noexcept
+    {
+        adsr.gateOff();
+    }
+
+    [[nodiscard]] float next() noexcept
+    {
+        return adsr.next();
+    }
+
+    [[nodiscard]] Stage stage() const noexcept
+    {
+        return adsr.stage();
+    }
+
+    [[nodiscard]] bool isActive() const noexcept
+    {
+        return adsr.isActive();
+    }
+
+    [[nodiscard]] double state() const noexcept
+    {
+        return static_cast<double>(adsr.level());
+    }
+
+private:
+    anoesis::dsp::Adsr adsr;
+    bool fromCurrent = true;
+};
 
 constexpr std::array<float, 4> sampleRates{44100.0f, 48000.0f, 96000.0f, 192000.0f};
 
@@ -77,16 +161,7 @@ std::string decibels(double x, int digits = 1)
 template <typename F>
 void forEachCandidate(const F& f)
 {
-    f.template operator()<LinearAccumulated>("Linear, accumulated", Ratios{});
-    f.template operator()<LinearCounted>("Linear, counted", Ratios{});
-    f.template operator()<ExponentialFloat>("Exponential r 0.3 / 0.3", Ratios{.attack = 0.3, .decayRelease = 0.3});
-    f.template operator()<ExponentialFloat>("Exponential r 0.3 / 0.01", Ratios{.attack = 0.3, .decayRelease = 0.01});
-    f.template operator()<ExponentialFloat>("Exponential r 0.3 / 0.001", Ratios{.attack = 0.3, .decayRelease = 0.001});
-    f.template operator()<ExponentialDouble>("Exponential r 0.3 / 0.001, double",
-                                             Ratios{.attack = 0.3, .decayRelease = 0.001});
-    f.template operator()<ExponentialCounted>("Exponential r 0.3 / 0.001, counted",
-                                              Ratios{.attack = 0.3, .decayRelease = 0.001});
-    f.template operator()<AnalogRc>("Analog RC", Ratios{});
+    f.template operator()<Built>("Adsr (as built)", Ratios{});
 }
 
 struct Adsr
@@ -266,14 +341,9 @@ void reportShape(std::ostringstream& out)
 // --- Timing ----------------------------------------------------------------
 
 // The ideal attack level after k samples of an N-sample attack.
-double idealAttack(const char* name, Ratios ratios, double k, double n)
+double idealAttack(Ratios ratios, double k, double n)
 {
-    const std::string s{name};
-    if (s.starts_with("Linear"))
-    {
-        return k / n;
-    }
-    const double r = s.starts_with("Analog") ? rcAttackRatio : ratios.attack;
+    const double r = ratios.attack;
     const double c = std::pow(r / (1.0 + r), 1.0 / n);
     return (1.0 + r) * (1.0 - std::pow(c, k));
 }
@@ -282,7 +352,7 @@ void reportTiming(std::ostringstream& out)
 {
     out << "\n## Timing\n\n"
         << "Each stage's length in samples against round(time x rate), at 44.1, 48, 96, and 192 kHz: the worst "
-           "error over the four rates, attack / release (release from 1; the analog RC's to its -80 dB end). "
+           "error over the four rates, attack / release (release from 1). "
            "Then the worst deviation of the attack from its ideal curve (computed in double), over the four "
            "rates.\n\n"
         << "| Model | 1 ms | 100 ms | 1 s | 25 s | Attack curve error at 1 s / 25 s |\n"
@@ -314,7 +384,7 @@ void reportTiming(std::ostringstream& out)
                         if (n + 1 < static_cast<std::size_t>(expected))
                         {
                             const double ideal =
-                                idealAttack(name, ratios, static_cast<double>(n + 1), static_cast<double>(expected));
+                                idealAttack(ratios, static_cast<double>(n + 1), static_cast<double>(expected));
                             worstCurve = std::max(worstCurve, std::abs(static_cast<double>(y) - ideal));
                         }
                         if (y >= 1.0f)
@@ -488,8 +558,8 @@ void reportDiscontinuities(std::ostringstream& out)
 
     out << "\n### Retrigger mid-release, and a sustain change\n\n"
         << "The retrigger comes 25 ms into the release from 0.5 (at a level between 0.03 and 0.25, by model). The "
-           "sustain change is 0.5 -> 0.25 in the sustain stage: the prototypes jump, except the analog RC, whose "
-           "decay runs on to the new level. For comparison, the same jump ramped linearly over 10 ms "
+           "sustain change is 0.5 -> 0.25 in the sustain stage, which the envelope ramps over 10 ms. For comparison, "
+           "the same jump ramped linearly over 10 ms "
            "(`LinearSmoother`) measures "
         <<
         [&]
@@ -723,7 +793,6 @@ void reportDenormals(std::ostringstream& out)
         << "| Model | Decay to 0, held | Decay to 0.5, held | Release |\n"
         << "|---|---|---|---|\n";
     forEachCandidate([&]<typename Model>(const char* name, Ratios ratios) { denormalRow<Model>(out, name, ratios); });
-    denormalRow<AnalogRcFlushed>(out, "Analog RC, state flushed", Ratios{});
 }
 
 } // namespace
