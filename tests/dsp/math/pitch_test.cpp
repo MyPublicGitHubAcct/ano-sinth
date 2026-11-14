@@ -11,6 +11,7 @@ using anoesis::dsp::centsToRatio;
 using anoesis::dsp::frequencyToNote;
 using anoesis::dsp::noteToFrequency;
 using anoesis::dsp::referenceFromCents;
+using anoesis::dsp::Tuning;
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
 using Catch::Matchers::WithinULP;
@@ -70,5 +71,28 @@ TEST_CASE("frequencyToNote: inverse of noteToFrequency", "[dsp][math]")
         const auto n = static_cast<float>(note);
         CAPTURE(n);
         CHECK_THAT(frequencyToNote(noteToFrequency(n, 443.0f), 443.0f), WithinAbs(n, 1e-4));
+    }
+}
+
+TEST_CASE("Tuning: octave, note, and fine add up to one offset in semitones", "[dsp][math][tuning]")
+{
+    CHECK_THAT(Tuning{}.offset(), WithinULP(0.0f, 0));
+    CHECK_THAT((Tuning{.octaves = 1}.offset()), WithinULP(12.0f, 0));
+    CHECK_THAT((Tuning{.semitones = -7}.offset()), WithinULP(-7.0f, 0));
+    CHECK_THAT((Tuning{.fine = -0.09f}.offset()), WithinULP(-0.09f, 0));
+    // Sylenth1's extremes (inventory O1-O3): +-(3 octaves + 7 semitones + 1).
+    CHECK_THAT((Tuning{.octaves = -3, .semitones = -7, .fine = -1.0f}.offset()), WithinULP(-44.0f, 0));
+    CHECK_THAT((Tuning{.octaves = 3, .semitones = 7, .fine = 1.0f}.offset()), WithinULP(44.0f, 0));
+    // The coarse part is summed as integers, so only fine can round, once.
+    CHECK_THAT((Tuning{.octaves = 2, .semitones = -5, .fine = 0.25f}.offset()), WithinULP(19.25f, 0));
+}
+
+TEST_CASE("Tuning: whole octaves are exact frequency ratios", "[dsp][math][tuning]")
+{
+    for (int octaves = -3; octaves <= 3; ++octaves)
+    {
+        CAPTURE(octaves);
+        const auto expected = std::ldexp(440.0f, octaves);
+        CHECK_THAT(noteToFrequency(69.0f + Tuning{.octaves = octaves}.offset()), WithinULP(expected, 0));
     }
 }

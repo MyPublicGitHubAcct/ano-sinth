@@ -1,4 +1,5 @@
-// Test support: DSP quality measurements (THD, aliasing, frequency response).
+// Test support: DSP quality measurements (THD, aliasing, frequency response,
+// the frequency of a periodic signal).
 // How they work and how to use them: docs/dsp/measuring-dsp.md
 
 #pragma once
@@ -50,6 +51,16 @@ struct AliasingResult
 [[nodiscard]] std::vector<double> measureHarmonics(std::span<const float> signal, double fundamentalHz,
                                                    double sampleRate, const Window& window,
                                                    double maxFrequencyHz = std::numeric_limits<double>::infinity());
+
+/// The frequency of a periodic signal that crosses zero upwards once per
+/// cycle (a sine, or a DC-free saw), in Hz. Each upward crossing is located
+/// to a fraction of a sample by linear interpolation, and the period is the
+/// least-squares slope of crossing time against crossing count, so the
+/// interpolation errors of individual crossings average out rather than
+/// landing on the two end points. Accurate to about 1e-9 relative over a
+/// second or two of a sine up to 5 kHz at 48 kHz (its test). Needs at least
+/// two crossings; throws std::invalid_argument otherwise.
+[[nodiscard]] double measureFrequency(std::span<const float> signal, double sampleRate);
 
 /// A mono process under test: takes a whole input signal, returns the output
 /// (same length and rate).

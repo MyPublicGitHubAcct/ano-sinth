@@ -7,14 +7,18 @@ add_executable(anoesis_dsp_tests
     core/denormals_test.cpp
     core/processor_test.cpp
     control/smoother_test.cpp
+    control/stereo_gain_test.cpp
     generators/white_noise_test.cpp
     math/decibels_test.cpp
     math/fast_math_test.cpp
+    math/pan_test.cpp
     math/pitch_test.cpp
     math/random_test.cpp
     oscillators/antialiasing_report.cpp
     oscillators/band_limited_oscillator_test.cpp
     oscillators/band_limiting_residuals_test.cpp
+    oscillators/oscillator_controls_report.cpp
+    oscillators/oscillator_slot_test.cpp
     oscillators/waveform_test.cpp
     resampling/oversampler_test.cpp)
 

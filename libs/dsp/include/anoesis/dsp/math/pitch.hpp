@@ -44,4 +44,26 @@ inline constexpr float referenceNote = 69.0f;
     return concertPitchHz * centsToRatio(cents);
 }
 
+/// An oscillator's tuning: coarse steps of octaves and semitones, plus a fine
+/// offset in (fractional) semitones. A pitch is one fractional note,
+/// `note + offset()`, converted once by noteToFrequency(), so every pitch
+/// source (key, bend, glide, modulation, detune) adds in the same unit.
+///
+/// No ranges are enforced here. Sylenth1's controls are octaves -3..3,
+/// semitones -7..7, and fine -1..1 (inventory §2, O1-O3); the parameter
+/// table maps the knobs.
+struct Tuning
+{
+    int octaves = 0;
+    int semitones = 0;
+    float fine = 0.0f; ///< semitones; 0.01 is one cent
+
+    /// The offset in semitones: 12 x octaves + semitones + fine. The coarse
+    /// part is summed as integers, so the only rounding is adding `fine`.
+    [[nodiscard]] constexpr float offset() const noexcept
+    {
+        return static_cast<float>((12 * octaves) + semitones) + fine;
+    }
+};
+
 } // namespace anoesis::dsp

@@ -8,6 +8,7 @@
 // Add every new public header here.
 
 #include <anoesis/dsp/control/smoother.hpp>
+#include <anoesis/dsp/control/stereo_gain.hpp>
 #include <anoesis/dsp/core/audio_block.hpp>
 #include <anoesis/dsp/core/denormals.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
@@ -16,9 +17,11 @@
 #include <anoesis/dsp/library.hpp>
 #include <anoesis/dsp/math/decibels.hpp>
 #include <anoesis/dsp/math/fast_math.hpp>
+#include <anoesis/dsp/math/pan.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
 #include <anoesis/dsp/math/random.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
+#include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 #include <anoesis/dsp/resampling/halfband.hpp>

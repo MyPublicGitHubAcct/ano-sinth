@@ -1,6 +1,6 @@
 # Oscillator waveforms: the 8 shapes as data
 
-Sylenth1's oscillators offer 8 waveforms: Saw, Pulse, HPulse, QPulse, Triangle, Sine, Noise, and TriSaw. This page explains how they are built on the band-limited minBLEP oscillator chosen in D6 ([band-limited-oscillators.md](band-limited-oscillators.md); read that first). Every periodic waveform is a short list of *corners*, so adding one is a row of data rather than new code. The page then lists each waveform's corners and reports how every waveform measures.
+Sylenth1's oscillators offer 8 waveforms: Saw, Pulse, HPulse, QPulse, Triangle, Sine, Noise, and TriSaw. This page explains how they are built on the band-limited minBLEP oscillator chosen in D6 ([band-limited-oscillators.md](band-limited-oscillators.md); read that first). Every periodic waveform is a short list of *corners*, so adding one is a row of data rather than new code. The page then lists each waveform's corners and reports how every waveform measures. The controls around the oscillator (tuning, volume, pan, and invert) are in [oscillator-controls.md](oscillator-controls.md).
 
 ## Theory
 
@@ -91,7 +91,7 @@ Whether Sylenth1's noise is white, uniform, and independent of the note is still
 
 ### No pulse-width parameter
 
-Sylenth1 has no pulse-width control. Its pulse widths are fixed per waveform, and PWM is done by summing a saw and an inverted saw (manual p. 15). So `setPulseWidth()` and `widthToPhase()` were removed. A variable-width pulse in Part 2 ("true PWM" is in its backlog) would be a shape built at run time and passed to `setShape()`.
+Sylenth1 has no pulse-width control. Its pulse widths are fixed per waveform, and PWM is done by summing a saw and an inverted saw (manual p. 15). So `setPulseWidth()` and `widthToPhase()` were removed. The two-saw trick is tested in [oscillator-controls.md](oscillator-controls.md#invert-and-pwm-from-two-saws). A variable-width pulse in Part 2 ("true PWM" is in its backlog) would be a shape built at run time and passed to `setShape()`.
 
 ### Beyond straight lines (Part 2)
 

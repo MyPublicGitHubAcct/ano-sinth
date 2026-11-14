@@ -26,18 +26,47 @@ Four oscillators: A1, A2, B1, B2.
 |---|---|
 | Voices | 0–8 unison voices. 0 turns the oscillator off. |
 | Waveform | 8 waveforms "emulating common analog wave shapes" (p. 14). **The manual does not name them.** Third-party sources do: see [Waveforms](#waveforms) below. |
-| Octave / Note | Coarse tuning. Centered by default (0). |
-| Fine | ±1 semitone. |
-| Volume | Oscillator output level. |
+| Octave / Note | Coarse tuning. Centered by default (0). Octave −3 to +3, Note −7 to +7 semitones, in whole steps (see [Tuning, volume, pan, and invert](#tuning-volume-pan-and-invert)). |
+| Fine | ±1 semitone, continuous; default 0. |
+| Volume | Oscillator output level. Knob 0–10; taper unspecified. |
 | Phase | 0–360° start phase. Only has an effect when Retrigger is on. |
 | Detune | Spreads the pitch of the unison voices around the center pitch, as in a supersaw. |
 | Stereo | Spreads unison voices across the stereo field: 0 is mono, 10 is full width. Needs more than 1 voice. |
-| Pan | Oscillator pan. |
+| Pan | Oscillator pan, 0 (left) to 10 (right), centred by default (pp. 10, 15). Law unspecified. |
 | Retrig | Restarts every voice at Phase on each note-on. |
 | Inv | Inverts the output, for PWM-style tricks. |
 | C / P | Copy and paste oscillator settings, including between presets. |
 
 Requirements: alias-free; stable from below 0.01 Hz up to Nyquist; up to 32 voices per note (4 oscillators × 8 unison voices) and 512 voices in total.
+
+### Tuning, volume, pan, and invert
+
+The manual gives only outlines (pp. 10, 14–15). The rest comes from third-party sources, listed here with what each one says. Values marked *hypothesis* are what M1.1 builds ([oscillator-controls.md](../dsp/oscillator-controls.md)). In the DSP, every control takes physical units (semitones, a linear gain, a pan position in [−1, 1]). The knob ranges and laws below belong to the parameter table (M1.9), so a measurement that disagrees changes a mapping, not DSP code.
+
+| Control | Value or law | Source | Confidence |
+|---|---|---|---|
+| Octave | Whole octaves, −3 to +3. Default 0. | [MusicRadar, parts and oscillators](https://www.musicradar.com/tuition/tech/how-to-master-sylenth1s-parts-and-oscillators-630710): Octave "jumps the tuning up or down by 1, 2 or 3 octaves". The page body does not load in a fetcher, so this is read from search-engine excerpts of it. Manual p. 14: defaults to 0. [Electronomist tutorial](https://electronomist.com/tutorials/sylenth1-tutorial-pt1/): drag "until it displays +1", a signed whole number. | Medium |
+| Note | Whole semitones, −7 to +7. Default 0. | MusicRadar (as above): "up to 7 semitones of shift in either direction, in semitone steps". A [Lynda course](https://www.lynda.com/Sylenth-tutorials/Understanding-oscillator-controls/585214/625369-4.html) summary: "minus seven to plus seven". The manual's default CC table (pp. 31–32) gives Volume, Detune, and Pan a CC but not Octave, Note, or Fine, which fits stepped controls (weak). | Medium |
+| Fine | Continuous, ±1 semitone. *Hypothesis:* linear in cents, reaching exactly ±100 cents; the LCD shows semitones (0.09 = 9 cents). | Manual p. 14: "between two half notes", and double-click resets it to 0. MusicRadar: "smoothly slides up or down by up to a semitone". Tutorials quote values such as 0.09, −0.09, and 0.15. | High for the range; medium that it reaches ±1.00 exactly; low–medium for linearity (Detune is measured as x², below, so a curved Fine is not ruled out). |
+| Volume | Knob 0–10 (the LCD shows other knobs as 0.00–10.00, e.g. "LFO 2 Gain 10.00" in the manual's p. 14 screenshot). *Hypothesis:* linear gain = knob / 10, so 10 is unity. Default: no source. | No source describes the taper. The only Sylenth1-specific hint is the v1.20 changelog line "Knob behavior changed to linear" ([KVR, 2007](https://www.kvraudio.com/news/lennardigital_releases_sylenth1_v1_20_6809)), which does not say whether it means mouse dragging or the gain curve. | Low |
+| Pan | Knob 0 (left) to 10 (right), centred by default. *Hypothesis:* equal-power sin/cos, −3 dB per side at the centre, unity at the hard sides, the far side fully muted; position = knob / 5 − 1. | Manual pp. 10 and 15 for the range and the centre default. No source gives the law. | Low |
+| Inv | Exact negation of the output. | Manual p. 15: two saws, one inverted, sum to a pulse whose width is set by the phase of one. The developer (KVR thread 301405, 2010): the sum has no DC. Added in v1.20 as "Oscillator waveform inversion option for PWM effects" (KVR, 2007). | High |
+
+**For the unison task (recorded here so it is not lost).** One KVR poster, BlitBit, measured the demo in [thread 518035](https://www.kvraudio.com/forum/viewtopic.php?t=518035&start=15) (January 2019): detune is linear in semitones (not in Hz), and the outermost voice sits at about 3.32 · x² semitones for a knob position x in [0, 1] (log₂ 10 semitones at the top), with the maximum depending on the voice count. All voices have equal amplitude. At Stereo 10, every voice except the centre one is hard left or hard right, in the orders L, LR, LCR, LRLR, LRCLR, LRRLLR, LRLCRLR, and LRRLRLLR for 1 to 8 voices. A single post whose images could not be viewed: low–medium confidence.
+
+**Open questions, settled by measuring the demo (M1.13).** Common setup as for W1–W9, with a Sine at A4 unless noted.
+
+| # | Question | Working hypothesis | Measurement that settles it |
+|---|---|---|---|
+| O1 | Octave range and step. | −3 to +3, whole octaves | Read the LCD at both ends. Render A4 at ±3: 55 Hz and 3520 Hz. |
+| O2 | Note range and step. | −7 to +7, whole semitones | Read the LCD at both ends; render A4 at ±7 and measure the frequency. |
+| O3 | Fine's law and end points. | Linear: display × 100 = cents, reaching ±1.00 | Render a long A4 at displayed values −1.00, −0.50, −0.09, 0, 0.09, 0.50, 1.00 and measure each frequency (zero-crossing fit or a long FFT with peak interpolation). Fit cents against the display: a slope of 100 and no curvature. Also note the display's step size. |
+| O4 | Volume taper. | Linear gain | RMS of a sine, in dB, at knob 0, 1, 2.5, 5, 7.5, 10. At knob 5: linear gives −6.02 dB, quadratic −12.04 dB, and a dB taper gives a straight line in dB. |
+| O5 | Volume's default and absolute level. | Unknown; 10 = unity in our DSP | Read the Clear (init) patch's oscillator volumes. Measure the peak of a low saw at Volume 10 with Mix and Main Volume at their init values. The absolute level chain is settled with the mixer (M1.4). |
+| O6 | Pan law. | sin/cos, −3 dB at the centre | Left and right RMS of a sine at Pan 0, 2.5, 5, 7.5, 10 (1 voice, Stereo 0). The centre against the near side at hard pan gives 0, −3, −4.5, or −6 dB. Pan 2.5 separates laws that share −3 dB at the centre: sin/cos gives 0.924 / 0.383, the square-root law 0.866 / 0.500, linear 0.75 / 0.25. Check whether hard pan mutes the far side completely. |
+| O7 | Inv. | Exact negation | With Retrig on and Phase 0, a saw with Inv on against Inv off, sample by sample. Then two saws, one inverted, at Phase 90°: a 25% pulse with zero mean. |
+| O8 | How Pan combines with Stereo (unison). | Unknown | 2 voices, Stereo 10, sweep Pan: does each voice's position shift (an offset, clipping at the sides), or is the stereo pair balanced? Settled in the unison task. |
+| O9 | Master tune (v3): units, range, and whether a keytracked filter follows it. | A4 reference in Hz (decided 2026-11-13); the filter follows it | Read the control's LCD at both ends. Self-oscillate the filter at Keytrack 10 and check that it stays in tune with the oscillator as master tune changes. |
 
 ### Waveforms
 

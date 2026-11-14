@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <numeric>
 #include <stdexcept>
 
 namespace anoesis::test
@@ -136,6 +137,39 @@ std::vector<double> measureHarmonics(std::span<const float> signal, double funda
         amplitudes.push_back(std::sqrt(2.0 * spectrum.powerAround(f, spectrum.mainLobeBins)));
     }
     return amplitudes;
+}
+
+double measureFrequency(std::span<const float> signal, double sampleRate)
+{
+    // Upward crossings: a sample below zero followed by one at or above.
+    std::vector<double> crossings;
+    for (std::size_t n = 1; n < signal.size(); ++n)
+    {
+        const auto before = static_cast<double>(signal[n - 1]);
+        const auto after = static_cast<double>(signal[n]);
+        if (before < 0.0 && after >= 0.0)
+        {
+            crossings.push_back(static_cast<double>(n - 1) + (before / (before - after)));
+        }
+    }
+    if (crossings.size() < 2)
+    {
+        throw std::invalid_argument("measureFrequency needs at least two upward zero crossings");
+    }
+
+    // Least squares: crossing k at time a + k P. P = cov(k, t) / var(k).
+    const auto count = static_cast<double>(crossings.size());
+    const double meanIndex = (count - 1.0) / 2.0;
+    const double meanTime = std::accumulate(crossings.begin(), crossings.end(), 0.0) / count;
+    double covariance = 0.0;
+    double variance = 0.0;
+    for (std::size_t k = 0; k < crossings.size(); ++k)
+    {
+        const double dk = static_cast<double>(k) - meanIndex;
+        covariance += dk * (crossings[k] - meanTime);
+        variance += dk * dk;
+    }
+    return sampleRate * variance / covariance;
 }
 
 ResponsePoint measureResponseAt(const MonoProcess& process, double frequencyHz, double sampleRate, double amplitude,

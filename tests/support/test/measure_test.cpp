@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <numbers>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 using namespace anoesis::test;
@@ -224,4 +225,46 @@ TEST_CASE("Decibel conversions", "[support][measure]")
     CHECK_THAT(toDb(0.1), WithinAbs(-20.0, 1e-12));
     CHECK_THAT(powerToDb(0.01), WithinAbs(-20.0, 1e-12));
     CHECK(std::isinf(toDb(0.0)));
+}
+
+TEST_CASE("Frequency from zero crossings: a pure sine reads its frequency", "[support][measure]")
+{
+    // Tolerance 1e-9 relative (1.7e-6 cents). measureFrequency fits a line
+    // through every upward crossing, so the per-crossing errors average out:
+    // float rounding (6e-8 / w samples, about 1e-6 at 440 Hz) and the linear
+    // interpolation's bias (up to about 0.01 samples at 5 kHz, w = 0.65 rad,
+    // spread evenly over the sub-sample positions). Over 2 s and N crossings
+    // a least-squares slope is about sqrt(12 / N) / N_samples times that:
+    // below 1e-10.
+    for (const double hz : {27.5, 440.0, 1234.5678, 5000.0})
+    {
+        CAPTURE(hz);
+        const auto x = sine(hz, rate, 96000, 0.8, 0.3);
+        CHECK_THAT(measureFrequency(x, rate), WithinRel(hz, 1e-9));
+    }
+}
+
+TEST_CASE("Frequency from zero crossings: below 1 Hz, and with a DC-free saw", "[support][measure]")
+{
+    const auto slow = sine(0.61, rate, std::size_t{6} * 48000, 1.0, 1.0); // about 3.6 cycles
+    CHECK_THAT(measureFrequency(slow, rate), WithinRel(0.61, 1e-9));
+
+    // A rising saw crosses zero once per cycle, mid-ramp, where it is a
+    // straight line: linear interpolation is exact there.
+    std::vector<float> saw(48000);
+    const double hz = 123.0;
+    for (std::size_t i = 0; i < saw.size(); ++i)
+    {
+        const auto t = (hz * static_cast<double>(i) / rate) + 0.1;
+        saw[i] = static_cast<float>((2.0 * (t - std::floor(t))) - 1.0);
+    }
+    CHECK_THAT(measureFrequency(saw, rate), WithinRel(hz, 1e-9));
+}
+
+TEST_CASE("Frequency from zero crossings: too few crossings is an error", "[support][measure]")
+{
+    CHECK_THROWS_AS(measureFrequency(sine(1.0, rate, 48000), rate), std::invalid_argument); // none
+    CHECK_THROWS_AS(measureFrequency(sine(1.0, rate, 48000, 1.0, std::numbers::pi), rate),
+                    std::invalid_argument); // one, halfway
+    CHECK_THROWS_AS(measureFrequency(constant(1000, 0.0f), rate), std::invalid_argument);
 }

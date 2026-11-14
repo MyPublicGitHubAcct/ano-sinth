@@ -180,6 +180,13 @@ public:
         increment = newIncrement < halfCycle ? newIncrement : halfCycle;
     }
 
+    /// The phase step per sample (2^32 per cycle), after clamping to Nyquist:
+    /// the exact pitch, phaseIncrement() x sampleRate / 2^32 Hz.
+    [[nodiscard]] std::uint32_t phaseIncrement() const noexcept
+    {
+        return increment;
+    }
+
     /// The kernel's group delay: edges and slopes come out this late.
     [[nodiscard]] float latencySamples() const noexcept
     {

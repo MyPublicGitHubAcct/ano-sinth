@@ -1,5 +1,6 @@
 // CPU cost of the minBLEP oscillator (decision D6) and the PolyBLEP reference,
-// for every periodic waveform.
+// for every periodic waveform, and of the oscillator slot (tuning, volume,
+// pan, invert) around it.
 // The wavetable candidate's numbers (it was removed after D6) are in the
 // baselines doc.
 //
@@ -8,6 +9,11 @@
 // decision: docs/performance/baselines.md, docs/dsp/band-limited-oscillators.md
 
 #include "../oscillators/oscillator_support.hpp"
+
+#include <anoesis/dsp/core/audio_block.hpp>
+#include <anoesis/dsp/math/pan.hpp>
+#include <anoesis/dsp/math/pitch.hpp>
+#include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -130,4 +136,180 @@ TEST_CASE("Benchmark: band-limited oscillators", "[!benchmark][dsp][oscillators]
     benchmarkCandidate<PolyBlep4>();
     benchmarkCandidate<MinBlep32>();
     benchmarkCandidate<MinBlep64>();
+}
+
+namespace
+{
+
+using Slot = anoesis::dsp::OscillatorSlot<anoesis::dsp::minBlepTaps>;
+
+Slot preparedSlot(Waveform shape)
+{
+    Slot slot{minBlepTable64()};
+    slot.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+    slot.setWaveform(shape);
+    slot.setTuning({.octaves = 1, .semitones = -5, .fine = 0.13f});
+    slot.setPan(0.3f);
+    slot.setVolume(0.8f);
+    slot.reset();
+    return slot;
+}
+
+// A stereo voice bus.
+struct Bus
+{
+    Block left{};
+    Block right{};
+    std::array<float*, 2> pointers{left.data(), right.data()};
+
+    [[nodiscard]] anoesis::dsp::AudioBlock block() noexcept
+    {
+        return {pointers.data(), 2, blockSize};
+    }
+};
+
+} // namespace
+
+TEST_CASE("Benchmark: oscillator slot (tuning, volume, pan, invert)", "[!benchmark][dsp][oscillators]")
+{
+    // The slot's tuning is +7.13 semitones (preparedSlot), so note 61.87
+    // plays 440 Hz: an ordinary pitch. The bare oscillator runs at exactly
+    // the slot's frequency, in the same run, both as it is (mono out) and
+    // with the same stereo gain written inline: the fair baseline for the
+    // slot, which must produce two channels.
+    constexpr float note = 61.87f;
+    const float hz = preparedSlot(Waveform::saw).frequencyFor(note);
+    const auto gains = anoesis::dsp::panGains(0.3f);
+    const float gainLeft = 0.8f * gains.left;
+    const float gainRight = 0.8f * gains.right;
+    const auto bareOscillator = [](Waveform shape, float frequency)
+    {
+        auto osc = Candidate<MinBlep64>::make();
+        osc.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
+        osc.setWaveform(shape);
+        osc.setFrequency(frequency);
+        return osc;
+    };
+    Block out{};
+    Bus bus;
+    {
+        auto osc = bareOscillator(Waveform::saw, hz);
+        BENCHMARK("minBLEP 64-tap, saw 440 Hz, bare oscillator (mono) x512")
+        {
+            for (auto& sample : out)
+            {
+                sample = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    }
+    {
+        auto osc = bareOscillator(Waveform::saw, hz);
+        BENCHMARK("minBLEP 64-tap, saw 440 Hz, bare oscillator + inline stereo gain x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                const float x = osc.next();
+                bus.left[i] += gainLeft * x;
+                bus.right[i] += gainRight * x;
+            }
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        auto slot = preparedSlot(Waveform::saw);
+        BENCHMARK("Oscillator slot, saw 440 Hz, settled x512")
+        {
+            slot.process(bus.block(), note);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        // A new volume every block, so nearly every sample is mid-ramp.
+        auto slot = preparedSlot(Waveform::saw);
+        float volume = 0.8f;
+        BENCHMARK("Oscillator slot, saw 440 Hz, volume ramping x512")
+        {
+            volume = volume > 0.5f ? 0.4f : 0.8f;
+            slot.setVolume(volume);
+            slot.process(bus.block(), note);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        // Vibrato, +-1 semitone: a note per sample, so one noteToFrequency
+        // (exp2) per sample. Its baseline converts the same notes inline.
+        Block notes{};
+        for (std::size_t i = 0; i < blockSize; ++i)
+        {
+            notes[i] = note + std::sin(static_cast<float>(i) * 0.05f);
+        }
+        const auto slot0 = preparedSlot(Waveform::saw);
+        auto osc = bareOscillator(Waveform::saw, hz);
+        BENCHMARK("minBLEP 64-tap, saw 440 Hz, noteToFrequency every sample + inline stereo gain x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                osc.setFrequency(slot0.frequencyFor(notes[i]));
+                const float x = osc.next();
+                bus.left[i] += gainLeft * x;
+                bus.right[i] += gainRight * x;
+            }
+            return bus.left[blockSize - 1];
+        };
+        auto slot = preparedSlot(Waveform::saw);
+        BENCHMARK("Oscillator slot, saw 440 Hz, pitch per sample x512")
+        {
+            slot.process(bus.block(), notes);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        // Where corners come every few samples. No tuning here, so the note
+        // is the pitch.
+        const float highNote = anoesis::dsp::frequencyToNote(12000.0f);
+        auto osc = bareOscillator(Waveform::trisaw, anoesis::dsp::noteToFrequency(highNote));
+        BENCHMARK("minBLEP 64-tap, TriSaw 12 kHz, bare oscillator + inline stereo gain x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                const float x = osc.next();
+                bus.left[i] += gainLeft * x;
+                bus.right[i] += gainRight * x;
+            }
+            return bus.left[blockSize - 1];
+        };
+        auto slot = preparedSlot(Waveform::trisaw);
+        slot.setTuning({});
+        BENCHMARK("Oscillator slot, TriSaw 12 kHz, settled x512")
+        {
+            slot.process(bus.block(), highNote);
+            return bus.left[blockSize - 1];
+        };
+    }
+    {
+        // One note's worth, as the 32-saw bank above: 4 oscillators at
+        // 110, 220, 440, and 880 Hz (notes 45, 57, 69, 81), each with 8
+        // voices fined over +-20 cents, all into one bus.
+        std::vector<Slot> bank;
+        std::array<float, 32> notes{};
+        for (std::size_t i = 0; i < notes.size(); ++i)
+        {
+            bank.push_back(preparedSlot(Waveform::saw));
+            const auto voice = static_cast<float>(i % 8);
+            bank.back().setTuning({.fine = -0.2f + (0.4f * voice / 7.0f)});
+            const std::size_t oscillator = i / 8;
+            notes[i] = 45.0f + (12.0f * static_cast<float>(oscillator));
+        }
+        BENCHMARK("Oscillator slot, 32 saws (4 osc x 8 unison) into one bus x512")
+        {
+            bus.left.fill(0.0f);
+            bus.right.fill(0.0f);
+            for (std::size_t i = 0; i < bank.size(); ++i)
+            {
+                bank[i].process(bus.block(), notes[i]);
+            }
+            return bus.left[blockSize - 1];
+        };
+    }
 }

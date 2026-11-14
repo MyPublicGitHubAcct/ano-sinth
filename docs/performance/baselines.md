@@ -6,6 +6,124 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-13: M1.1 oscillator controls (tuning, volume, pan, invert)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark, on the working tree of the commit that adds the controls (it reports its parent, `1fae0ad`, as modified).
+- **What changed:** a new layer, `OscillatorSlot` ([oscillator-controls.md](../dsp/oscillator-controls.md)), around an unchanged oscillator (it only gained a `phaseIncrement()` getter). New rows: the slot settled, mid-ramp, with a pitch per sample, at 12 kHz, and as a 32-oscillator bank; and in the same benchmark case, the bare oscillator at exactly the slot's pitch, both as it is (mono) and with the same stereo gain written inline. The inline version is the fair baseline, because the slot must produce two channels.
+- **Before and after, same session:** the parent commit (exported with `git archive`, `external/` symlinked, built `relwithdebinfo`) was benchmarked straight after this run, and once earlier in the session. Every oscillator row is within −3% to +5% of the parent's, which is within noise.
+
+| Benchmark | parent (ns / sample) | this commit | change |
+|---|---:|---:|---:|
+| minBLEP 64-tap, saw 440 Hz | 3.20 | 3.16 | −1% |
+| minBLEP 64-tap, square 12 kHz | 22.54 | 23.49 | +4% |
+| minBLEP 64-tap, sine 440 Hz | 8.10 | 8.48 | +5% |
+| minBLEP 64-tap, TriSaw 12 kHz | 32.49 | 32.63 | 0% |
+| minBLEP 64-tap, saw 440 Hz, pitch set every sample | 4.19 | 4.34 | +4% |
+| minBLEP 64-tap, 32 saws (4 osc x 8 unison) | 93.50 | 96.75 | +3% |
+
+**The slot against the bare oscillator**, same run (and the range over three runs in this session):
+
+| Case | Bare oscillator, mono out | Bare + the same stereo gain inline | Oscillator slot |
+|---|---:|---:|---:|
+| Saw 440 Hz, settled | 3.10 (3.04–3.26) | 3.53 (3.53–4.01) | 3.40 (3.24–3.43) |
+| Saw 440 Hz, volume ramping | | | 4.65 (4.65–5.14) |
+| Saw 440 Hz, pitch per sample (one `noteToFrequency` each) | | 9.51 (9.15–9.51) | 9.13 (8.39–9.13) |
+| TriSaw 12 kHz, settled | | 33.93 (32.63–33.93) | 32.44 (32.10–33.58) |
+| 32 saws into one bus | 96.75 (mono sum, row above) | | 105.13 (103.99–112.73) |
+
+- **At ordinary pitches the slot costs about 0.2–0.3 ns per sample over the bare mono oscillator** (+6–10%), for two output channels with volume, pan, and polarity. It is **cheaper than writing the same stereo gain inline** (3.40 against 3.53 ns). The slot stages 64 samples on the stack and then applies the gains in a separate loop, which clang vectorizes (width 4, interleaved twice: `-Rpass=loop-vectorize` on `stereo_gain.hpp`). The inline loop is tied to the oscillator's sample-by-sample state and is not vectorized.
+- **A volume ramp adds about 1.3–1.7 ns per sample** while it lasts (10 ms): two `LinearSmoother` steps, about 0.8 ns each in the M1.0 baseline, in a loop that cannot vectorize because each step advances the smoother.
+- **A pitch per sample costs about 6 ns more than a pitch per block**, almost all of it the `std::exp2` in `noteToFrequency` (the bare oscillator's "pitch set every sample" row uses precomputed frequencies). `fastExp2` (3·10⁻⁷ relative, 5·10⁻⁴ cents) would save most of it. A Phase 3 candidate: it would make the per-sample path differ from the per-block one by that much.
+- **512 voices** of the settled slot would take 512 × 3.40 = 1,741 ns of every 20,833 ns sample period at 48 kHz: 8.4% of a core, against 7.6% for bare mono oscillators.
+
+Full run:
+
+| Benchmark | ns / block | ns / sample | % of one core at 48 kHz (1 channel) |
+|---|---:|---:|---:|
+| minBLEP 64-tap, saw 440 Hz, bare oscillator (mono) x512 | 1,589 | 3.10 | 0.015 |
+| minBLEP 64-tap, saw 440 Hz, bare oscillator + inline stereo gain x512 | 1,805 | 3.53 | 0.017 |
+| Oscillator slot, saw 440 Hz, settled x512 | 1,742 | 3.40 | 0.016 |
+| Oscillator slot, saw 440 Hz, volume ramping x512 | 2,380 | 4.65 | 0.022 |
+| minBLEP 64-tap, saw 440 Hz, noteToFrequency every sample + inline stereo gain x512 | 4,869 | 9.51 | 0.046 |
+| Oscillator slot, saw 440 Hz, pitch per sample x512 | 4,676 | 9.13 | 0.044 |
+| minBLEP 64-tap, TriSaw 12 kHz, bare oscillator + inline stereo gain x512 | 17,374 | 33.93 | 0.163 |
+| Oscillator slot, TriSaw 12 kHz, settled x512 | 16,612 | 32.44 | 0.156 |
+| Oscillator slot, 32 saws (4 osc x 8 unison) into one bus x512 | 53,826 | 105.13 | 0.505 |
+| PolyBLEP 2-point, saw 440 Hz x512 | 1,736 | 3.39 | 0.016 |
+| PolyBLEP 2-point, saw 5 kHz x512 | 1,823 | 3.56 | 0.017 |
+| PolyBLEP 2-point, saw 12 kHz x512 | 1,724 | 3.37 | 0.016 |
+| PolyBLEP 2-point, square 440 Hz x512 | 2,621 | 5.12 | 0.025 |
+| PolyBLEP 2-point, square 5 kHz x512 | 3,020 | 5.90 | 0.028 |
+| PolyBLEP 2-point, square 12 kHz x512 | 2,887 | 5.64 | 0.027 |
+| PolyBLEP 2-point, HPulse 440 Hz x512 | 2,619 | 5.11 | 0.025 |
+| PolyBLEP 2-point, HPulse 12 kHz x512 | 2,870 | 5.61 | 0.027 |
+| PolyBLEP 2-point, QPulse 440 Hz x512 | 2,809 | 5.49 | 0.026 |
+| PolyBLEP 2-point, QPulse 12 kHz x512 | 2,834 | 5.53 | 0.027 |
+| PolyBLEP 2-point, triangle 440 Hz x512 | 2,908 | 5.68 | 0.027 |
+| PolyBLEP 2-point, triangle 12 kHz x512 | 2,977 | 5.81 | 0.028 |
+| PolyBLEP 2-point, sine 440 Hz x512 | 2,382 | 4.65 | 0.022 |
+| PolyBLEP 2-point, sine 12 kHz x512 | 2,026 | 3.96 | 0.019 |
+| PolyBLEP 2-point, TriSaw 440 Hz x512 | 3,588 | 7.01 | 0.034 |
+| PolyBLEP 2-point, TriSaw 12 kHz x512 | 3,251 | 6.35 | 0.030 |
+| PolyBLEP 2-point, saw 440 Hz, pitch set every sample x512 | 2,998 | 5.86 | 0.028 |
+| PolyBLEP 2-point, 32 saws (4 osc x 8 unison) x512 | 54,680 | 106.80 | 0.513 |
+| PolyBLEP 4-point, saw 440 Hz x512 | 2,439 | 4.76 | 0.023 |
+| PolyBLEP 4-point, saw 5 kHz x512 | 2,893 | 5.65 | 0.027 |
+| PolyBLEP 4-point, saw 12 kHz x512 | 3,199 | 6.25 | 0.030 |
+| PolyBLEP 4-point, square 440 Hz x512 | 3,509 | 6.85 | 0.033 |
+| PolyBLEP 4-point, square 5 kHz x512 | 3,904 | 7.62 | 0.037 |
+| PolyBLEP 4-point, square 12 kHz x512 | 3,767 | 7.36 | 0.035 |
+| PolyBLEP 4-point, HPulse 440 Hz x512 | 3,217 | 6.28 | 0.030 |
+| PolyBLEP 4-point, HPulse 12 kHz x512 | 3,857 | 7.53 | 0.036 |
+| PolyBLEP 4-point, QPulse 440 Hz x512 | 4,499 | 8.79 | 0.042 |
+| PolyBLEP 4-point, QPulse 12 kHz x512 | 4,124 | 8.06 | 0.039 |
+| PolyBLEP 4-point, triangle 440 Hz x512 | 4,001 | 7.81 | 0.038 |
+| PolyBLEP 4-point, triangle 12 kHz x512 | 5,156 | 10.07 | 0.048 |
+| PolyBLEP 4-point, sine 440 Hz x512 | 2,759 | 5.39 | 0.026 |
+| PolyBLEP 4-point, sine 12 kHz x512 | 2,388 | 4.66 | 0.022 |
+| PolyBLEP 4-point, TriSaw 440 Hz x512 | 4,384 | 8.56 | 0.041 |
+| PolyBLEP 4-point, TriSaw 12 kHz x512 | 5,604 | 10.95 | 0.053 |
+| PolyBLEP 4-point, saw 440 Hz, pitch set every sample x512 | 3,336 | 6.52 | 0.031 |
+| PolyBLEP 4-point, 32 saws (4 osc x 8 unison) x512 | 82,671 | 161.47 | 0.775 |
+| minBLEP 32-tap, saw 440 Hz x512 | 1,543 | 3.01 | 0.014 |
+| minBLEP 32-tap, saw 5 kHz x512 | 2,661 | 5.20 | 0.025 |
+| minBLEP 32-tap, saw 12 kHz x512 | 4,511 | 8.81 | 0.042 |
+| minBLEP 32-tap, square 440 Hz x512 | 1,799 | 3.51 | 0.017 |
+| minBLEP 32-tap, square 5 kHz x512 | 4,083 | 7.98 | 0.038 |
+| minBLEP 32-tap, square 12 kHz x512 | 7,941 | 15.51 | 0.074 |
+| minBLEP 32-tap, HPulse 440 Hz x512 | 1,691 | 3.30 | 0.016 |
+| minBLEP 32-tap, HPulse 12 kHz x512 | 7,869 | 15.37 | 0.074 |
+| minBLEP 32-tap, QPulse 440 Hz x512 | 1,669 | 3.26 | 0.016 |
+| minBLEP 32-tap, QPulse 12 kHz x512 | 7,950 | 15.53 | 0.075 |
+| minBLEP 32-tap, triangle 440 Hz x512 | 1,717 | 3.35 | 0.016 |
+| minBLEP 32-tap, triangle 12 kHz x512 | 7,956 | 15.54 | 0.075 |
+| minBLEP 32-tap, sine 440 Hz x512 | 4,405 | 8.60 | 0.041 |
+| minBLEP 32-tap, sine 12 kHz x512 | 3,739 | 7.30 | 0.035 |
+| minBLEP 32-tap, TriSaw 440 Hz x512 | 1,806 | 3.53 | 0.017 |
+| minBLEP 32-tap, TriSaw 12 kHz x512 | 9,758 | 19.06 | 0.091 |
+| minBLEP 32-tap, saw 440 Hz, pitch set every sample x512 | 2,148 | 4.19 | 0.020 |
+| minBLEP 32-tap, 32 saws (4 osc x 8 unison) x512 | 61,712 | 120.53 | 0.579 |
+| minBLEP 64-tap, saw 440 Hz x512 | 1,615 | 3.16 | 0.015 |
+| minBLEP 64-tap, saw 5 kHz x512 | 3,679 | 7.19 | 0.034 |
+| minBLEP 64-tap, saw 12 kHz x512 | 6,483 | 12.66 | 0.061 |
+| minBLEP 64-tap, square 440 Hz x512 | 1,838 | 3.59 | 0.017 |
+| minBLEP 64-tap, square 5 kHz x512 | 5,935 | 11.59 | 0.056 |
+| minBLEP 64-tap, square 12 kHz x512 | 12,027 | 23.49 | 0.113 |
+| minBLEP 64-tap, HPulse 440 Hz x512 | 1,853 | 3.62 | 0.017 |
+| minBLEP 64-tap, HPulse 12 kHz x512 | 11,489 | 22.44 | 0.108 |
+| minBLEP 64-tap, QPulse 440 Hz x512 | 1,838 | 3.59 | 0.017 |
+| minBLEP 64-tap, QPulse 12 kHz x512 | 12,084 | 23.60 | 0.113 |
+| minBLEP 64-tap, triangle 440 Hz x512 | 1,844 | 3.60 | 0.017 |
+| minBLEP 64-tap, triangle 12 kHz x512 | 11,987 | 23.41 | 0.112 |
+| minBLEP 64-tap, sine 440 Hz x512 | 4,340 | 8.48 | 0.041 |
+| minBLEP 64-tap, sine 12 kHz x512 | 3,758 | 7.34 | 0.035 |
+| minBLEP 64-tap, TriSaw 440 Hz x512 | 2,032 | 3.97 | 0.019 |
+| minBLEP 64-tap, TriSaw 12 kHz x512 | 16,706 | 32.63 | 0.157 |
+| minBLEP 64-tap, saw 440 Hz, pitch set every sample x512 | 2,223 | 4.34 | 0.021 |
+| minBLEP 64-tap, 32 saws (4 osc x 8 unison) x512 | 49,538 | 96.75 | 0.464 |
+
+---
+
 ## 2026-11-13: M1.1 the 8 waveforms, as data
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[oscillators]"`, 100 samples per benchmark, on the working tree of the commit that adds the waveforms (it reports its parent, `35460ca`, as modified).

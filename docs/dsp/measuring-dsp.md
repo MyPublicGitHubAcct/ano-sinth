@@ -40,6 +40,7 @@ The spectrum is reported as **power per bin**, normalised as P[k] = c·|X[k]|² 
   - the total non-harmonic power relative to the harmonic power;
   - the **worst single alias** relative to the fundamental, which is the figure that predicts audibility.
 - **Frequency response, by sine.** Feed a sine, let transients settle, then correlate input and output with e^(−iωn) under the same window. The ratio of the two correlations is H(e^(iω)): magnitude and phase. Any window bias appears in both and cancels. A Kaiser β = 20 window keeps the sine's own negative-frequency image (at −ω) from leaking in. It works for any process, linear or not.
+- **Frequency of a periodic signal, by zero crossings.** A sine (or any signal that crosses zero upwards once per cycle) is located at each upward crossing by linear interpolation between the two samples around it. The period is then the least-squares slope of crossing time against crossing count, not the distance from the first crossing to the last. Each crossing carries a small interpolation bias (up to about 0.01 samples at 5 kHz and 48 kHz) that varies with its sub-sample position, and the fit averages it over every crossing instead of letting the two end points set the answer. Over two seconds this resolves 10⁻⁹ relative (2·10⁻⁶ cents), far finer than an FFT peak without long interpolation. It is used to check that an oscillator plays the pitch it was asked for.
 - **Frequency response, by impulse.** For a linear time-invariant system, the FFT of its impulse response *is* its frequency response, at every bin at once. This is the fastest way to measure passband ripple over thousands of points.
 
 ### Golden files
@@ -56,7 +57,7 @@ All of this lives in `anoesis_test_support` ([tests/support/](../../tests/suppor
 | [fft.hpp](../../tests/support/include/anoesis/test/fft.hpp) | `fftInPlace` (radix-2, iterative, twiddles from `std::polar` so their error doesn't grow with N) and `realFft`. Decision D5: hand-written, no dependency. |
 | [window.hpp](../../tests/support/include/anoesis/test/window.hpp) | `rectangularWindow`, `hannWindow`, `blackmanHarrisWindow`, `kaiserWindow(n, β)`. Each returns its samples and its main-lobe half-width. All are periodic. |
 | [spectrum.hpp](../../tests/support/include/anoesis/test/spectrum.hpp) | `powerSpectrum` and `averagedPowerSpectrum` (Welch) with the normalisation above; `Spectrum::powerAround(f, bins)` |
-| [measure.hpp](../../tests/support/include/anoesis/test/measure.hpp) | `measureThd`, `measureAliasing` (with an optional upper frequency, for example 20 kHz), `measureHarmonics` (each harmonic's amplitude, for droop against an ideal waveform), `measureResponseAt`, `impulseResponseSpectrum`, `toDb`, `powerToDb` |
+| [measure.hpp](../../tests/support/include/anoesis/test/measure.hpp) | `measureThd`, `measureAliasing` (with an optional upper frequency, for example 20 kHz), `measureHarmonics` (each harmonic's amplitude, for droop against an ideal waveform), `measureResponseAt`, `impulseResponseSpectrum`, `measureFrequency` (zero-crossing fit), `toDb`, `powerToDb` |
 | [golden.hpp](../../tests/support/include/anoesis/test/golden.hpp) | `writeWav`/`readWav` (32-bit float WAV) and `compareWithGolden` |
 
 A typical spectral test:
@@ -107,6 +108,7 @@ The measurement code has its own executable, `anoesis_test_support_tests`, becau
   | worst alias of a naive sawtooth at 2.5 kHz | the 10th harmonic folded: −20 dB at 22.98 kHz | −20.00 dB at 22,980 Hz |
   | an injected non-harmonic tone | −80 dB | −80 ± 0.01 dB, at the right frequency; excluded by a 5 kHz upper limit |
   | response of y = (x[n] + x[n−1])/2 | cos(πf/fs), phase −πf/fs | to 1e-6 by sine; to 1e-7 by impulse at all 513 bins |
+  | frequency of sines at 27.5 Hz to 5 kHz (2 s), 0.61 Hz (6 s), and a saw | the generated frequency | to 1e-9 relative; fewer than two crossings throws |
 
 - [tests/support/test/golden_test.cpp](../../tests/support/test/golden_test.cpp): WAV round-trips bit for bit; missing and malformed files are rejected. The golden flow is tested end to end: a missing file fails with instructions; update mode writes the file; an identical render matches; a difference within tolerance passes; one beyond it fails, reporting "channel 1, sample 50" and saving the actual output; a different shape or rate fails.
 
