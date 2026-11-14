@@ -24,11 +24,10 @@ The working plan for the project. [CLAUDE.md](CLAUDE.md) holds the rules: stack,
 
 ## Current status
 
-**Phase 0: Foundation, done.** The only thing left is to see the CI workflow pass on the first version tag. The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: macOS first, then Linux and Windows, then the macOS release build.
+**Phase 0: Foundation, done.** Version CI passed on the `v0.1.0` tag (run 43529431143), on macOS, Linux, and Windows. The skeleton builds, and all 7 tests pass on macOS (Apple Clang) under `debug`, `asan`, and `release` (universal binary, real identity). Format and clang-tidy are clean. The repo is public on GitHub and MIT-licensed (D1). Commits are tested locally with `tools/check.sh`. GitHub Actions runs only on `vX.Y.0` tags, as a fail-fast chain: macOS first, then Linux and Windows, then the macOS release build.
 
 Still open:
 
-- **M0.6:** Version CI passes on all three platforms (run 43524447930, on `main`). The `v0.1.0` tag still marks an earlier commit that fails on Linux (see **Linux and Windows**). Plugin validation is complete locally: pluginval passes on the VST3 (strictness 10), and `auval -strict` passes on the AU.
 - **Linux and Windows:** tested in Version CI after macOS. Not built locally. See the section below.
 - **Distribution:** GitHub never hosts compiled builds. See **Distribution** below.
 
@@ -72,7 +71,7 @@ Goal: an empty but complete skeleton. It builds on all three platforms, runs one
   - Add `.clang-format` and `.clang-tidy` (Core Guidelines checks).
   - Add an optional sanitizer preset (ASan/UBSan) for Clang and GCC.
   - Add a pre-commit format check or a script that does the same.
-- [~] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Passed in full on run 43524447930, after four Linux fixes found by the first version runs (see docs/development/ci.md, History). **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. **auval** runs as a CTest test on macOS: it installs the AU temporarily, runs `auval -strict`, then always uninstalls and restores. Still open: the `v0.1.0` tag must mark a passing commit.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
+- [x] **M0.6 CI.** *[version-ci.yml](.github/workflows/version-ci.yml) runs only on `vX.Y.0` tags or manual dispatch, as a fail-fast chain: macOS tests, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Day-to-day testing is local (`tools/check.sh`). Secrets are set. Passed in full on run 43524447930, after four Linux fixes found by the first version runs (see docs/development/ci.md, History). **pluginval** runs as a CTest test (strictness 10, VST3, pinned v1.0.4 with SHA-256 checks), so it runs locally and in every CI test leg. **auval** runs as a CTest test on macOS: it installs the AU temporarily, runs `auval -strict`, then always uninstalls and restores. The `v0.1.0` tag run (43529431143) passed every job.* A 3-platform matrix that configures, builds, runs tests, and runs a format check. Later, add plugin validation (pluginval; `auval` on macOS).
   - The test jobs use the placeholder identity.
   - Release jobs read `BRUTALIS_MANUFACTURER_CODE`, `BRUTALIS_PLUGIN_CODE`, and `BRUTALIS_BUNDLE_ID` from GitHub Actions secrets and set `BRUTALIS_REQUIRE_REAL_IDENTITY=ON`.
   - Add a CI check that fails if the real values appear in tracked files. Keep the values for this check in a secret too.
@@ -107,7 +106,7 @@ The first version run (`v0.1.0`, run 43516389668):
 Still to do:
 
 - [x] A green Version CI run with Linux and Windows. *Run 43524447930 (manual dispatch on `main` at `6cdada5`) passed every job: macOS `debug` and `asan`, Linux GCC 12 `debug` and `asan`, Windows MSVC `debug` (95/95, which confirms the C4459 fix), and the macOS release build.*
-- [ ] Point the `v0.1.0` tag at a commit that passes. It currently marks `407e966`, which fails on Linux. This is the owner's call: move the tag, or cut `v0.2.0` instead.
+- [x] Point the `v0.1.0` tag at a commit that passes. *The owner moved it from `407e966` to `2ab7587`. Its run, 43529431143, passed every job.*
 
 ## Distribution
 
