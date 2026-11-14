@@ -85,7 +85,7 @@ tools/bench.sh ["[area]"]               # [!benchmark] tests in relwithdebinfo -
 
 **Git workflow.** Commit directly to `main`. Do not create feature or work branches, in this repo or on GitHub. Run `tools/check.sh` and make sure it passes before every commit.
 
-**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is fail-fast: macOS tests first, then Linux (GCC 12) and Windows (MSVC) tests, then the macOS release build. Do not add per-push or per-PR CI.
+**Testing and CI policy.** Run `tools/check.sh` locally on macOS and make sure it passes before every commit. Only local macOS builds are used for pre-commit testing (for now). GitHub Actions runs only for major and minor versions: push a `vX.Y.0` tag that matches `project(VERSION)`. It is fail-fast: macOS tests first, then Linux (GCC 12) tests, then Windows (MSVC) tests, then the macOS release build. A manual dispatch can select which of those jobs run. Do not add per-push or per-PR CI.
 
 **No downloadable builds on GitHub.** GitHub hosts source only. Never add workflow artifacts, releases or release assets, packages, or Pages deploys, and never upload binaries by hand. CI builds and tests, then discards the output. `tools/check-no-published-builds.sh` enforces this for workflows. Details: [docs/development/ci.md](docs/development/ci.md).
 

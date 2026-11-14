@@ -48,7 +48,7 @@ All configurations live in [CMakePresets.json](../../CMakePresets.json). Every p
 | `debug` | Debug | Day-to-day development and CI. |
 | `relwithdebinfo` | RelWithDebInfo | Profiling and benchmarks. Placeholder identity allowed. |
 | `release` | Release | Shippable builds. Universal binary (arm64 + x86_64) on macOS. **Requires the real identity** (see [product-identity.md](product-identity.md)). |
-| `asan` | Debug + ASan/UBSan | Memory and undefined-behavior checking. macOS and Linux only. |
+| `asan` | Debug + ASan/UBSan | Memory and undefined-behavior checking. macOS and Linux only. Builds the libraries and test runners but not the plugin itself (shared code and format wrappers): no host can load an ASan plugin, and `brutalis_plugin_tests` compiles the plugin's sources anyway. Build them by name if you need them (`cmake --build --preset asan --target brutalis_VST3`). |
 
 Each name works as a configure, build, test, and **workflow** preset:
 

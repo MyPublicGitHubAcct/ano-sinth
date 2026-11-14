@@ -45,3 +45,14 @@ juce_add_plugin(brutalis
 
 target_link_libraries(brutalis PRIVATE brutalis_plugin_common)
 anoesis_configure_juce_target(brutalis)
+
+# Sanitizer builds leave the plugin out of the default build. No host can load
+# an ASan-instrumented plugin, so pluginval and auval are skipped there, and
+# brutalis_plugin_tests already compiles the plugin's sources (through
+# brutalis_plugin_common) under the sanitizers. Building the shared code and
+# the format wrappers would only compile JUCE once more, under the slowest
+# flags, for nothing. They can still be built by name.
+if(BRUTALIS_SANITIZERS)
+    get_target_property(brutalis_format_targets brutalis JUCE_ACTIVE_PLUGIN_TARGETS)
+    set_target_properties(brutalis ${brutalis_format_targets} PROPERTIES EXCLUDE_FROM_ALL TRUE)
+endif()

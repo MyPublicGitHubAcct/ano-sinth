@@ -23,6 +23,7 @@ Why it matters here: DSP bugs are often *quiet*. A filter that is 3 dB off, an e
 | `brutalis_plugin_tests` | `plugin/` | JUCE console app + the plugin's own sources (see [project-structure.md](project-structure.md#how-the-plugin-and-its-tests-share-code)) |
 | `pluginval:VST3` (CTest only) | the built VST3, in a host | pluginval at strictness 10 ([plugin-validation.md](plugin-validation.md)). Skipped in `asan`. |
 | `auval:AU` (CTest only, macOS) | the built AU, installed temporarily | `auval -strict` ([plugin-validation.md](plugin-validation.md#auval-audio-units-macos)). Skipped in `asan`. |
+| `brutalis_plugin_tests:plugin targets are built unless sanitizing` (CTest only) | the build itself | The plugin's shared code and format wrappers are in the default build, except in `asan`, which leaves them out ([tests/cmake/check_plugin_targets_in_all.cmake](../../tests/cmake/check_plugin_targets_in_all.cmake)). |
 
 Name test files `<unit>_test.cpp`. Tag test cases with the library (`[dsp]`) plus a category, such as `[smoke]`, and later `[spectral]`, `[timing]`, or `[!benchmark]`.
 
