@@ -18,6 +18,8 @@ add_executable(anoesis_dsp_tests
     oscillators/band_limited_oscillator_test.cpp
     oscillators/band_limiting_residuals_test.cpp
     oscillators/oscillator_controls_report.cpp
+    oscillators/oscillator_phase_report.cpp
+    oscillators/oscillator_phase_test.cpp
     oscillators/oscillator_slot_test.cpp
     oscillators/waveform_test.cpp
     resampling/oversampler_test.cpp)

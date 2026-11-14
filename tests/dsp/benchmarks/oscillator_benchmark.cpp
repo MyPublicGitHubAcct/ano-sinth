@@ -1,6 +1,6 @@
 // CPU cost of the minBLEP oscillator (decision D6) and the PolyBLEP reference,
-// for every periodic waveform, and of the oscillator slot (tuning, volume,
-// pan, invert) around it.
+// for every periodic waveform, of the oscillator slot (tuning, volume, pan,
+// invert) around it, and of retriggers and phase jumps.
 // The wavetable candidate's numbers (it was removed after D6) are in the
 // baselines doc.
 //
@@ -309,6 +309,77 @@ TEST_CASE("Benchmark: oscillator slot (tuning, volume, pan, invert)", "[!benchma
             {
                 bank[i].process(bus.block(), notes[i]);
             }
+            return bus.left[blockSize - 1];
+        };
+    }
+}
+
+TEST_CASE("Benchmark: retrigger and phase jumps", "[!benchmark][dsp][oscillators]")
+{
+    // The band-limited jump (oscillator-phase.md). Each row has a twin
+    // without jumps in the benchmark case above (same waveform and pitch),
+    // so the cost of one jump is (this - that) x 512 / the jumps per block.
+    Block out{};
+    const auto withJumps = [&](const char* label, Waveform shape, float hz, std::size_t every)
+    {
+        auto osc = Candidate<MinBlep64>::make();
+        osc.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
+        osc.setWaveform(shape);
+        osc.setFrequency(hz);
+        BENCHMARK(std::string{"minBLEP 64-tap, "} + label + " x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                if (i % every == 0)
+                {
+                    osc.jumpTo(0);
+                }
+                out[i] = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    };
+    withJumps("saw 440 Hz, retrigger every 64 samples", Waveform::saw, 440.0f, 64);
+    withJumps("square 440 Hz, retrigger every 64 samples", Waveform::pulse, 440.0f, 64);
+    withJumps("triangle 440 Hz, retrigger every 64 samples", Waveform::triangle, 440.0f, 64);
+    withJumps("sine 440 Hz, retrigger every 64 samples", Waveform::sine, 440.0f, 64);
+    withJumps("TriSaw 440 Hz, retrigger every 64 samples", Waveform::trisaw, 440.0f, 64);
+
+    // Hard sync: a jump every 43.97 samples (a 1.09 kHz master), so the
+    // jumps fall between samples, as Part 2's sync will make them.
+    {
+        auto osc = Candidate<MinBlep64>::make();
+        osc.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
+        osc.setWaveform(Waveform::saw);
+        osc.setFrequency(1000.0f);
+        constexpr double period = 43.97; // samples: a 1091.6 Hz master
+        double nextSync = 0.0;
+        double time = 0.0;
+        BENCHMARK("minBLEP 64-tap, saw 1 kHz synced to a 1.09 kHz master x512")
+        {
+            for (std::size_t i = 0; i < blockSize; ++i)
+            {
+                if (nextSync <= time)
+                {
+                    osc.jumpTo(0, static_cast<float>(time - nextSync));
+                    nextSync += period;
+                }
+                time += 1.0;
+                out[i] = osc.next();
+            }
+            return out[blockSize - 1];
+        };
+    }
+
+    // The slot: a note-on at the start of every block (Retrig on), against
+    // the settled row in the slot benchmark case.
+    {
+        auto slot = preparedSlot(Waveform::saw);
+        Bus bus;
+        BENCHMARK("Oscillator slot, saw 440 Hz, retriggered every block x512")
+        {
+            slot.noteOn();
+            slot.process(bus.block(), 61.87f);
             return bus.left[blockSize - 1];
         };
     }

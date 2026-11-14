@@ -43,13 +43,19 @@
 /// the jump and the bend from silence added like any other edge. The output
 /// starts at 0 and needs no history.
 ///
+/// restart() starts that onset at any phase. A retrigger while the oscillator
+/// sounds, or hard sync, is jumpTo(): the jump between the old and the new
+/// phase is one more edge, at its sub-sample time, and what is in flight
+/// stays.
+///
 /// The waveform is data (a WaveShape: corners with jumps and bends, see
 /// waveform.hpp), so the per-sample loop is the same for every waveform. A
 /// sine part has no edges; slope x delay would only delay it to first order,
 /// so it is evaluated at the phase latencySamples() ago instead, read from a
 /// short phase history.
 ///
-/// Docs: docs/dsp/band-limited-oscillators.md, docs/dsp/oscillator-waveforms.md
+/// Docs: docs/dsp/band-limited-oscillators.md, docs/dsp/oscillator-waveforms.md,
+/// docs/dsp/oscillator-phase.md
 namespace anoesis::dsp
 {
 
@@ -145,12 +151,95 @@ public:
     /// Restarts at phase 0, from silence (a band-limited onset).
     void reset() noexcept
     {
-        phase = 0;
+        restart(0);
+    }
+
+    /// Restarts from silence at `startPhase` (2^32 per cycle): the next
+    /// sample is a band-limited onset at that phase, and starts at exactly 0.
+    /// Corners behind the start are not edges; a corner exactly at it is
+    /// behind it (the square restarted at 1/2 starts low). Residuals in
+    /// flight are dropped, so this is for an oscillator that is silent (a new
+    /// voice). A note-on while it sounds is jumpTo().
+    void restart(std::uint32_t startPhase) noexcept
+    {
+        phase = startPhase;
         ring.fill(0.0f);
         position = 0;
         started = false;
         untilCorner = 0;
         historyValid = false;
+        jump = {};
+    }
+
+    /// Moves the phase to `newPhase` with a band-limited jump: a retrigger
+    /// while the oscillator sounds, or hard sync. The jump happens `since`
+    /// samples, in [0, 1), before the next sample, so the next sample is
+    /// `newPhase` plus that much of a step. The jump in value and in slope
+    /// between the old and the new phase are added as a step and a ramp
+    /// residual at that sub-sample time, exactly like a corner's, and the
+    /// residuals already in flight are kept: nothing is cut short, and the
+    /// output never drops to silence. Corners the old phase crosses before
+    /// the jump are edges as usual; corners at or behind `newPhase` are not.
+    ///
+    /// Call it between samples, at most once per sample. Before the first
+    /// sample (see isRunning()) there is nothing to jump from, and it is
+    /// restart() at the phase the next sample would have.
+    ///
+    /// The sine's part is band-limited in value and slope too. It is delayed
+    /// by evaluating it latencySamples() late, so its naive jump comes out
+    /// that much later than the straight segments' (see the doc).
+    void jumpTo(std::uint32_t newPhase, float since = 0.0f) noexcept
+    {
+        constexpr float almostOne = 0x1.fffffep-1f;
+        since = since > 0.0f ? std::min(since, almostOne) : 0.0f; // and NaN is 0
+        if (!started)
+        {
+            restart(newPhase + partOf(increment, since));
+            return;
+        }
+
+        // The phase moves by `step` between the last sample and the next.
+        // The jump splits that step: the old phase moves on to `jumpedFrom`,
+        // then the new one from `newPhase` to the next sample's phase.
+        const std::uint32_t step = arrivedBy;
+        const float stepCycles = toCycles(step);
+        const std::uint32_t after = partOf(step, since);
+        const std::uint32_t jumpedFrom = phase - after;
+        addCrossings(jumpedFrom, step - after, step, since);
+
+        const Point lineBefore = linearAt(jumpedFrom);
+        const Point lineAfter = linearAt(newPhase);
+        addEdge(since, lineAfter.value - lineBefore.value, (lineAfter.slope - lineBefore.slope) * stepCycles, false);
+        if (hasSine)
+        {
+            const Point sineBefore = sineAt(jumpedFrom);
+            const Point sineAfter = sineAt(newPhase);
+            addEdge(since, sineAfter.value - sineBefore.value, (sineAfter.slope - sineBefore.slope) * stepCycles, true);
+            // The history keeps the old trajectory up to the jump, so the
+            // delayed sine switches when the jump comes out of the delay.
+            jump = {.pending = true, .since = since, .oldPhase = phase, .step = step};
+        }
+
+        phase = newPhase + after;
+        addCrossings(phase, after, step, 0.0f);
+
+        // The next sample has nothing left to cross in this step. It finds
+        // its segment and the next corner from the new phase.
+        arrivedBy = 0;
+        untilCorner = 0;
+    }
+
+    /// False from a reset() or restart() until the first sample: the
+    /// oscillator is silent and has nothing in flight.
+    [[nodiscard]] bool isRunning() const noexcept
+    {
+        return started;
+    }
+
+    /// The phase of the next sample, before the kernel's delay.
+    [[nodiscard]] std::uint32_t nextPhase() const noexcept
+    {
+        return phase;
     }
 
     /// One of the periodic waveforms. Noise is not generated here (see
@@ -168,6 +257,7 @@ public:
         hasSine = sineLevel < 0.0f || sineLevel > 0.0f;
         untilCorner = 0; // find the segment and the next corner on the next sample
         historyValid = false;
+        jump = {};
     }
 
     void setFrequency(float hz) noexcept
@@ -260,24 +350,37 @@ private:
             // As if it had run at this pitch forever.
             for (std::uint32_t k = 1; k < historySize; ++k)
             {
-                history[(historyIndex - k) & (historySize - 1)] = phase - (k * increment);
+                const std::uint32_t then = phase - (k * increment);
+                history[(historyIndex - k) & (historySize - 1)] = {.phase = then, .oldPhase = then, .step = increment};
             }
             historyValid = true;
         }
-        history[historyIndex & (historySize - 1)] = phase;
+        auto& now = history[historyIndex & (historySize - 1)];
+        if (jump.pending)
+        {
+            // The step into this sample held a jump.
+            now = {.phase = phase, .oldPhase = jump.oldPhase, .step = jump.step, .jumpedAt = jump.since};
+            jump = {};
+        }
+        else
+        {
+            const std::uint32_t previous = history[(historyIndex - 1) & (historySize - 1)].phase;
+            now = {.phase = phase, .oldPhase = phase, .step = phase - previous};
+        }
         const float sine = sineLevel * std::sin(2.0f * std::numbers::pi_v<float> * toCycles(delayedPhase()));
         ++historyIndex;
         return sine;
     }
 
     // The phase latencySamples() before this sample. The phase moves
-    // linearly between samples, so this interpolates between the two
-    // samples around it, exactly.
+    // linearly between samples, so this goes back from the sample after that
+    // time, exactly. If a jump came in between, a time before it is on the
+    // old trajectory: back from where the old phase would have been.
     [[nodiscard]] std::uint32_t delayedPhase() const noexcept
     {
-        const std::uint32_t later = history[(historyIndex - sineDelayWhole) & (historySize - 1)];
-        const std::uint32_t earlier = history[(historyIndex - sineDelayWhole - 1) & (historySize - 1)];
-        return later - static_cast<std::uint32_t>(sineDelayFraction * static_cast<float>(later - earlier));
+        const Past& later = history[(historyIndex - sineDelayWhole) & (historySize - 1)];
+        const std::uint32_t from = sineDelayFraction <= later.jumpedAt ? later.phase : later.oldPhase;
+        return from - static_cast<std::uint32_t>(sineDelayFraction * static_cast<float>(later.step));
     }
 
     // The slow path, on a sample where `step` crossed a corner (or after a
@@ -289,18 +392,7 @@ private:
         std::uint64_t nearest = std::numeric_limits<std::uint64_t>::max();
         for (const auto& corner : shape->corners())
         {
-            float since = 0.0f;
-            if (crossed(corner.phase, step, since))
-            {
-                if (corner.jumps)
-                {
-                    addResidual(&MinBlepTable::stepRow, since, corner.jump);
-                }
-                if (corner.bends)
-                {
-                    addResidual(&MinBlepTable::rampRow, since, corner.bend * stepCycles);
-                }
-            }
+            addCrossing(corner, phase, step, stepCycles, 0.0f);
             // A corner exactly here has just been crossed (or is part of the
             // onset): the next time it comes round is a whole cycle away.
             const std::uint32_t ahead = corner.phase - phase;
@@ -336,16 +428,106 @@ private:
         }
     }
 
-    // `stepTaken` moved the phase onto this sample; did it cross `edgePhase`?
-    [[nodiscard]] bool crossed(std::uint32_t edgePhase, std::uint32_t stepTaken, float& since) const noexcept
+    // If the last `span` units of phase before `end` crossed `corner`, adds
+    // its residuals. The phase moves `stepCycles` per sample, and reached
+    // `end` `offset` samples before the next sample: offset is 0 on the
+    // per-sample path, and the jump's time when a jump splits the step.
+    void addCrossing(const WaveCorner& corner, std::uint32_t end, std::uint32_t span, float stepCycles,
+                     float offset) noexcept
     {
-        const std::uint32_t past = phase - edgePhase;
-        if (stepTaken == 0 || past >= stepTaken)
+        const std::uint32_t past = end - corner.phase;
+        if (past >= span)
         {
-            return false;
+            return; // includes span == 0: no movement crosses nothing
         }
-        since = toCycles(past) / toCycles(stepTaken);
-        return true;
+        const float since = offset + (toCycles(past) / stepCycles);
+        if (corner.jumps)
+        {
+            addResidual(&MinBlepTable::stepRow, since, corner.jump);
+        }
+        if (corner.bends)
+        {
+            addResidual(&MinBlepTable::rampRow, since, corner.bend * stepCycles);
+        }
+    }
+
+    // addCrossing() for every corner.
+    void addCrossings(std::uint32_t end, std::uint32_t span, std::uint32_t step, float offset) noexcept
+    {
+        const float stepCycles = toCycles(step);
+        for (const auto& corner : shape->corners())
+        {
+            addCrossing(corner, end, span, stepCycles, offset);
+        }
+    }
+
+    // The part of `step` covered in the last `since` samples of it, rounded
+    // down. Integer arithmetic: since x 2^32 is exact for since >= 2^-8 (a
+    // float has 24 bits), and the product fits in 64 bits.
+    [[nodiscard]] static std::uint32_t partOf(std::uint32_t step, float since) noexcept
+    {
+        const auto fraction = static_cast<std::uint64_t>(since * 4294967296.0f);
+        return static_cast<std::uint32_t>((fraction * step) >> 32U);
+    }
+
+    // A point on the naive waveform, undelayed: its value, and its slope per
+    // cycle, just after any corner there.
+    struct Point
+    {
+        float value = 0.0f;
+        float slope = 0.0f;
+    };
+
+    // The straight segments' part.
+    [[nodiscard]] Point linearAt(std::uint32_t at) const noexcept
+    {
+        if (shape->corners().empty())
+        {
+            return {};
+        }
+        const auto& corner = shape->cornerAt(at);
+        return {.value = corner.value + (corner.slope * toCycles(at - corner.phase)), .slope = corner.slope};
+    }
+
+    // The sine's part.
+    [[nodiscard]] Point sineAt(std::uint32_t at) const noexcept
+    {
+        constexpr float twoPi = 2.0f * std::numbers::pi_v<float>;
+        const float angle = twoPi * toCycles(at);
+        return {.value = sineLevel * std::sin(angle), .slope = twoPi * sineLevel * std::cos(angle)};
+    }
+
+    // An edge `since` samples before this sample, with a jump in value and
+    // a bend (the jump in slope, per sample). The straight segments jump at
+    // once, which the table's residuals assume. The sine is evaluated
+    // latencySamples() late, so its naive jump and bend come out that late:
+    // until then each residual tap is 1 (the step) or x - delay (the ramp)
+    // higher, x being the tap's time since the edge.
+    void addEdge(float since, float jumpBy, float bendBy, bool delayedNaive) noexcept
+    {
+        const bool jumps = jumpBy < 0.0f || jumpBy > 0.0f;
+        const bool bends = bendBy < 0.0f || bendBy > 0.0f;
+        if (jumps)
+        {
+            addResidual(&MinBlepTable::stepRow, since, jumpBy);
+        }
+        if (bends)
+        {
+            addResidual(&MinBlepTable::rampRow, since, bendBy);
+        }
+        if (!delayedNaive || !(jumps || bends))
+        {
+            return;
+        }
+        for (std::size_t i = 0; i < Taps; ++i)
+        {
+            const float x = since + static_cast<float>(i);
+            if (x >= delay)
+            {
+                break;
+            }
+            ring[(position + i) & (Taps - 1)] += jumpBy + (bendBy * (x - delay));
+        }
     }
 
     const MinBlepTable* table;
@@ -369,7 +551,26 @@ private:
     float sineDelayFraction = 0.0f;
     std::size_t position = 0;
     bool started = false;
-    std::array<std::uint32_t, historySize> history{};
+    // A sample's phase in the history, with the step that led to it. When a
+    // jump came `jumpedAt` samples before it, `oldPhase` is where the old
+    // trajectory would have been; otherwise it is `phase`.
+    struct Past
+    {
+        std::uint32_t phase = 0;
+        std::uint32_t oldPhase = 0;
+        std::uint32_t step = 0;
+        float jumpedAt = 0.0f;
+    };
+    // A jump waiting to be recorded in the history by the next sample.
+    struct PendingJump
+    {
+        bool pending = false;
+        float since = 0.0f;
+        std::uint32_t oldPhase = 0;
+        std::uint32_t step = 0;
+    };
+    PendingJump jump;
+    std::array<Past, historySize> history{};
     std::array<float, Taps> ring{};
 };
 

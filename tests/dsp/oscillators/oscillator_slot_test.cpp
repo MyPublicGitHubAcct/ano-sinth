@@ -7,7 +7,9 @@
 
 #include <anoesis/dsp/math/pan.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
+#include <anoesis/dsp/math/random.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
+#include <anoesis/dsp/oscillators/phase.hpp>
 
 #include <anoesis/test/buffer.hpp>
 #include <anoesis/test/lifecycle.hpp>
@@ -268,14 +270,14 @@ TEST_CASE("OscillatorSlot: volume scales, pan follows the equal-power law, inver
     }
 }
 
-TEST_CASE("Two saws, one inverted and a quarter cycle ahead, sum to a DC-free 25% pulse",
-          "[dsp][oscillator][slot][invert]")
+TEST_CASE("Two saws, one inverted and retriggered at Phase 90, sum to a DC-free 25% pulse",
+          "[dsp][oscillator][slot][invert][phase]")
 {
     // Manual p. 15: a saw plus an inverted saw is a pulse whose width is
-    // their phase offset. Retrigger/phase is not built yet, so the offset is
-    // set by starting the inverted slot early: A4 = 46.875 Hz makes note 69
-    // exactly 2^-10 cycles per sample at 48 kHz (increment 2^22), so 256
-    // samples ahead is exactly a quarter cycle in fixed point.
+    // their phase offset, with both oscillators retriggered (inventory O7).
+    // A4 = 46.875 Hz makes note 69 exactly 2^-10 cycles per sample at
+    // 48 kHz (increment 2^22), and Phase 90 is exactly a quarter cycle in
+    // fixed point.
     //
     // For a rising saw s(t) = 2t - 1, s(t) - s(t + d) is -2d for
     // t in [0, 1 - d) and 2 - 2d for t in [1 - d, 1): a pulse of width d,
@@ -283,7 +285,6 @@ TEST_CASE("Two saws, one inverted and a quarter cycle ahead, sum to a DC-free 25
     constexpr float reference = 46.875f;
     constexpr float note = 69.0f;
     constexpr std::size_t cycle = 1024;
-    constexpr std::size_t ahead = cycle / 4;
     constexpr double width = 0.25;
 
     auto plain = preparedSlot(Waveform::saw);
@@ -291,17 +292,20 @@ TEST_CASE("Two saws, one inverted and a quarter cycle ahead, sum to a DC-free 25
     for (auto* slot : {&plain, &inverted})
     {
         slot->setReferenceHz(reference);
+        slot->setRetrigger(true);
         routeHardLeft(*slot);
     }
     inverted.setInverted(true);
-    inverted.reset();
-    static_cast<void>(render(inverted, note, ahead)); // the phase offset
-    REQUIRE(inverted.phaseIncrement() == (1U << 22U));
+    inverted.setPhaseDegrees(90.0f);
+    inverted.reset(); // finishes the polarity ramp
+    plain.noteOn();
+    inverted.noteOn();
 
     constexpr std::size_t length = 9 * cycle;
     Buffer sum{2, length};
     plain.process(sum.block(), note);
     inverted.process(sum.block(), note);
+    REQUIRE(inverted.phaseIncrement() == (1U << 22U));
     const auto out = sum.channel(0);
 
     // Away from the edges (64 taps after each, plus the delay), the sum is
@@ -343,6 +347,330 @@ TEST_CASE("Two saws, one inverted and a quarter cycle ahead, sum to a DC-free 25
     CHECK(toDb(harmonics[7] / harmonics[0]) < -80.0);
     // ...and its fundamental is (4 / pi) sin(pi / 4) for a 2-unit swing.
     CHECK_THAT(harmonics[0], WithinRel(4.0 / std::numbers::pi * std::sin(std::numbers::pi * width), 1e-4));
+
+    // Retriggering both mid-note restores the same pulse: the offset comes
+    // from the phases, not from when the oscillators started.
+    Buffer more{2, 3 * cycle};
+    plain.process(more.block().subBlock(0, 333), note);
+    inverted.process(more.block().subBlock(0, 333), note);
+    plain.noteOn();
+    inverted.noteOn();
+    plain.process(more.block().subBlock(333, (3 * cycle) - 333), note);
+    inverted.process(more.block().subBlock(333, (3 * cycle) - 333), note);
+    std::size_t checkedAfter = 0;
+    for (std::size_t n = 333; n < 3 * cycle; ++n)
+    {
+        const auto position = (static_cast<double>(n - 333) - delay) * dt;
+        const auto t = position - std::floor(position);
+        const auto fromRise = std::abs(t - (1.0 - width)) / dt;
+        const auto fromFall = std::min(t, 1.0 - t) / dt;
+        if (static_cast<double>(n - 333) <= guard + delay || fromRise <= guard || fromFall <= guard)
+        {
+            continue;
+        }
+        const double ideal = t >= 1.0 - width ? 2.0 - (2.0 * width) : -2.0 * width;
+        CAPTURE(n, t);
+        REQUIRE_THAT(more.channel(0)[n], WithinAbs(ideal, 2e-4));
+        ++checkedAfter;
+    }
+    CHECK(checkedAfter > cycle);
+}
+
+TEST_CASE("OscillatorSlot: with Retrig on, a note-on starts every waveform at Phase", "[dsp][oscillator][slot][phase]")
+{
+    // From silence, the note-on is the onset at Phase; while sounding, a
+    // band-limited jump to it. Either way the first cycle after it is the
+    // waveform shifted by Phase, delayed by latencySamples(). A4 = 46.875 Hz
+    // makes note 69 exactly 1024 samples per cycle at 48 kHz.
+    constexpr std::size_t cycle = 1024;
+    const double dt = 1.0 / static_cast<double>(cycle);
+    constexpr std::size_t held = 1500; // the second note-on comes at phase 0.46 of the first note
+    for (const float degrees : {0.0f, 90.0f, 180.0f, 270.0f})
+    {
+        for (const auto shape : periodicShapes)
+        {
+            CAPTURE(degrees, shapeName(shape));
+            auto slot = preparedSlot(shape);
+            slot.setReferenceHz(46.875f);
+            slot.setRetrigger(true);
+            slot.setPhaseDegrees(degrees);
+            routeHardLeft(slot);
+            const double start = static_cast<double>(degrees) / 360.0;
+            const auto delay = static_cast<double>(slot.latencySamples());
+
+            slot.noteOn();
+            const auto first = render(slot, 69.0f, held + (2 * cycle));
+            const auto fromSilence =
+                compareWithIdeal(first.channel(0).first(2 * cycle), shape, start, 0.0, 0, delay, dt, 64.0);
+            CAPTURE(fromSilence.worstAt);
+            CHECK(fromSilence.worstError < 1e-4);
+            CHECK(fromSilence.checked > cycle);
+            CHECK_THAT(first.channel(0)[0], WithinAbs(0.0, 1e-6));
+
+            // A second note-on while it sounds: the same waveform from Phase.
+            Buffer second{2, held + (2 * cycle)};
+            auto again = preparedSlot(shape);
+            again.setReferenceHz(46.875f);
+            again.setRetrigger(true);
+            again.setPhaseDegrees(degrees);
+            routeHardLeft(again);
+            again.noteOn();
+            again.process(second.block().subBlock(0, held), 69.0f);
+            again.noteOn();
+            again.process(second.block().subBlock(held, 2 * cycle), 69.0f);
+            const auto whileSounding =
+                compareWithIdeal(second.channel(0), shape, start, static_cast<double>(held), held, delay, dt, 64.0);
+            CAPTURE(whileSounding.worstAt);
+            CHECK(whileSounding.worstError < 1e-4);
+            CHECK(whileSounding.checked > cycle);
+        }
+    }
+}
+
+TEST_CASE("OscillatorSlot: a retrigger is the oscillator's restart or jump, bit for bit",
+          "[dsp][oscillator][slot][phase]")
+{
+    for (const auto shape : periodicShapes)
+    {
+        CAPTURE(shapeName(shape));
+        auto slot = preparedSlot(shape);
+        slot.setPhaseDegrees(123.0f);
+        routeHardLeft(slot);
+        slot.noteOn();
+        Buffer out{2, 2000};
+        slot.process(out.block().subBlock(0, 700), 64.0f);
+        slot.noteOn();
+        slot.process(out.block().subBlock(700, 1300), 64.0f);
+
+        auto osc = Candidate<MinBlep64>::make();
+        osc.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 1});
+        osc.setWaveform(shape);
+        osc.setFrequency(noteToFrequency(64.0f));
+        osc.restart(anoesis::dsp::phaseFromDegrees(123.0f));
+        for (std::size_t i = 0; i < out.numSamples(); ++i)
+        {
+            if (i == 700)
+            {
+                osc.jumpTo(anoesis::dsp::phaseFromDegrees(123.0f));
+            }
+            CAPTURE(i);
+            REQUIRE_THAT(out.channel(0)[i], WithinULP(osc.next(), 0));
+        }
+    }
+}
+
+TEST_CASE("OscillatorSlot: a Phase change while a note is held waits for the next retrigger",
+          "[dsp][oscillator][slot][phase]")
+{
+    auto changed = preparedSlot(Waveform::saw);
+    auto unchanged = preparedSlot(Waveform::saw);
+    for (auto* slot : {&changed, &unchanged})
+    {
+        slot->setPhaseDegrees(30.0f);
+        routeHardLeft(*slot);
+        slot->noteOn();
+    }
+    const auto a = render(changed, 60.0f, 512);
+    const auto b = render(unchanged, 60.0f, 512);
+    changed.setPhaseDegrees(200.0f);
+    const auto c = render(changed, 60.0f, 512);
+    const auto d = render(unchanged, 60.0f, 512);
+    CHECK(bitIdentical(a.channel(0), b.channel(0)));
+    CHECK(bitIdentical(c.channel(0), d.channel(0)));
+
+    // The next note-on uses it: the saw from 200 degrees, as a jump.
+    auto reference = preparedSlot(Waveform::saw);
+    reference.setPhaseDegrees(30.0f);
+    routeHardLeft(reference);
+    reference.noteOn();
+    static_cast<void>(render(reference, 60.0f, 1024));
+    reference.setPhaseDegrees(200.0f);
+    reference.noteOn();
+    changed.noteOn();
+    unchanged.noteOn();
+    const auto e = render(changed, 60.0f, 512);
+    const auto f = render(reference, 60.0f, 512);
+    const auto g = render(unchanged, 60.0f, 512);
+    CHECK(bitIdentical(e.channel(0), f.channel(0)));
+    CHECK_FALSE(bitIdentical(e.channel(0), g.channel(0)));
+}
+
+TEST_CASE("OscillatorSlot: with Retrig off, a note-on leaves a sounding oscillator alone",
+          "[dsp][oscillator][slot][phase]")
+{
+    // Free-running: no jump, no discontinuity, and Phase is ignored.
+    for (const auto shape : periodicShapes)
+    {
+        CAPTURE(shapeName(shape));
+        auto slot = preparedSlot(shape);
+        slot.setRetrigger(false);
+        slot.setPhaseDegrees(90.0f);
+        slot.noteOn();
+        static_cast<void>(render(slot, 57.0f, 1000));
+        auto twin = slot;
+        Buffer a{2, 3000};
+        Buffer b{2, 3000};
+        for (std::size_t start = 0; start < a.numSamples(); start += 500)
+        {
+            slot.noteOn(); // every 500 samples
+            slot.process(a.block().subBlock(start, 500), 57.0f);
+            twin.process(b.block().subBlock(start, 500), 57.0f);
+        }
+        CHECK(bitIdentical(a.channel(0), b.channel(0)));
+        CHECK(bitIdentical(a.channel(1), b.channel(1)));
+    }
+}
+
+TEST_CASE("OscillatorSlot: with Retrig off, a note from silence starts at a seeded random phase",
+          "[dsp][oscillator][slot][phase]")
+{
+    // The working hypothesis for M1.13 (inventory O10): a free-running
+    // oscillator has been running unheard, so where it starts is arbitrary.
+    // The phase comes from the slot's Random, so a render is reproducible:
+    // reset() restarts the sequence, and each later start from silence (after
+    // stop(), when a voice has finished) draws the next value.
+    const auto startOf = [](std::uint64_t seed, int draw)
+    {
+        anoesis::dsp::Random random{seed};
+        std::uint32_t phase = 0;
+        for (int i = 0; i <= draw; ++i)
+        {
+            phase = random.nextUint32();
+        }
+        return phase;
+    };
+    const auto bare = [](std::uint32_t phase)
+    {
+        auto osc = Candidate<MinBlep64>::make();
+        osc.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 1});
+        osc.setWaveform(Waveform::saw);
+        osc.setFrequency(noteToFrequency(57.0f));
+        osc.restart(phase);
+        std::vector<float> out(800);
+        for (auto& sample : out)
+        {
+            sample = osc.next();
+        }
+        return out;
+    };
+
+    auto slot = preparedSlot(Waveform::saw);
+    slot.setRetrigger(false);
+    slot.setRandomSeed(1234);
+    routeHardLeft(slot);
+    slot.noteOn();
+    const auto first = render(slot, 57.0f, 800);
+    CHECK(bitIdentical(first.channel(0), bare(startOf(1234, 0))));
+
+    // reset() puts the oscillator back to silence and restarts the sequence.
+    slot.reset();
+    slot.noteOn();
+    CHECK(bitIdentical(render(slot, 57.0f, 800).channel(0), first.channel(0)));
+
+    // A voice that stopped and starts again draws the next phase.
+    auto carried = preparedSlot(Waveform::saw);
+    carried.setRetrigger(false);
+    carried.setRandomSeed(1234);
+    routeHardLeft(carried);
+    carried.noteOn();
+    static_cast<void>(render(carried, 57.0f, 100));
+    carried.stop();
+    carried.noteOn();
+    CHECK(bitIdentical(render(carried, 57.0f, 800).channel(0), bare(startOf(1234, 1))));
+
+    // Another seed, another phase.
+    auto other = preparedSlot(Waveform::saw);
+    other.setRetrigger(false);
+    other.setRandomSeed(99);
+    routeHardLeft(other);
+    other.noteOn();
+    CHECK(bitIdentical(render(other, 57.0f, 800).channel(0), bare(startOf(99, 0))));
+    CHECK(startOf(99, 0) != startOf(1234, 0));
+}
+
+TEST_CASE("OscillatorSlot: after stop(), the next note-on starts from silence", "[dsp][oscillator][slot][phase]")
+{
+    // stop() is for a voice that has finished: the next note is a new one,
+    // so it starts with the onset from silence rather than a jump, and its
+    // gains start where they are set, with no ramp.
+    for (const bool retrigger : {true, false})
+    {
+        CAPTURE(retrigger);
+        auto slot = preparedSlot(Waveform::pulse);
+        slot.setRetrigger(retrigger);
+        slot.setPhaseDegrees(45.0f);
+        routeHardLeft(slot);
+        slot.noteOn();
+        static_cast<void>(render(slot, 66.0f, 700));
+        slot.setVolume(0.5f);
+        slot.stop();
+        slot.noteOn();
+        const auto out = render(slot, 66.0f, 700);
+        CHECK_THAT(out.channel(0)[0], WithinAbs(0.0, 1e-6));
+        if (retrigger)
+        {
+            auto fresh = preparedSlot(Waveform::pulse);
+            fresh.setPhaseDegrees(45.0f);
+            fresh.setVolume(0.5f);
+            routeHardLeft(fresh);
+            fresh.noteOn();
+            CHECK(bitIdentical(out.channel(0), render(fresh, 66.0f, 700).channel(0)));
+        }
+    }
+}
+
+TEST_CASE("OscillatorSlot: a note-on inside a block equals the same note-on at a block boundary",
+          "[dsp][oscillator][slot][phase]")
+{
+    // A voice splits its block at each event and calls noteOn() between the
+    // two parts. The result must not depend on where the blocks fall: here
+    // 512-sample blocks split at the note-on, against one sample at a time.
+    // Pan and a volume ramp in flight make both channels and the smoothing
+    // take part.
+    for (const std::size_t offset : {1U, 100U, 300U, 511U})
+    {
+        for (const bool retrigger : {true, false})
+        {
+            CAPTURE(offset, retrigger);
+            const auto make = [&]
+            {
+                auto slot = preparedSlot(Waveform::trisaw);
+                slot.setPan(0.4f);
+                slot.setRetrigger(retrigger);
+                slot.setPhaseDegrees(77.0f);
+                slot.reset();
+                slot.noteOn();
+                slot.setVolume(0.3f);
+                return slot;
+            };
+            const std::size_t at = 1024 + offset;
+            auto split = make();
+            Buffer a{2, 2048};
+            for (std::size_t start = 0; start < a.numSamples(); start += 512)
+            {
+                if (start < at && at < start + 512)
+                {
+                    split.process(a.block().subBlock(start, at - start), 70.0f);
+                    split.noteOn();
+                    split.process(a.block().subBlock(at, start + 512 - at), 70.0f);
+                    continue;
+                }
+                split.process(a.block().subBlock(start, 512), 70.0f);
+            }
+            auto single = make();
+            Buffer b{2, 2048};
+            for (std::size_t i = 0; i < b.numSamples(); ++i)
+            {
+                if (i == at)
+                {
+                    single.noteOn();
+                }
+                single.process(b.block().subBlock(i, 1), 70.0f);
+            }
+            CHECK(bitIdentical(a.channel(0), b.channel(0)));
+            CHECK(bitIdentical(a.channel(1), b.channel(1)));
+        }
+    }
 }
 
 TEST_CASE("OscillatorSlot: a pitch per sample is applied exactly, sample by sample", "[dsp][oscillator][slot]")
@@ -430,6 +758,53 @@ TEST_CASE("OscillatorSlot honours the lifecycle contract", "[dsp][oscillator][sl
     const auto result = checkLifecycleContract([] { return SlotAtNote{}; }, specAt(rate), 2000);
     CHECK(result.resetMatchesFreshPrepare);
     CHECK(result.rePrepareMatchesFreshPrepare);
+
+    // With note-ons: one at the start of the first block after prepare() or
+    // reset(), and one every 300 samples, retriggered or free-running.
+    struct SlotWithNotes
+    {
+        Slot slot{minBlepTable64()};
+        std::size_t untilNote = 0;
+        explicit SlotWithNotes(bool retrigger) noexcept
+        {
+            slot.setWaveform(Waveform::saw);
+            slot.setRetrigger(retrigger);
+            slot.setPhaseDegrees(135.0f);
+            slot.setRandomSeed(5);
+            slot.setPan(-0.2f);
+        }
+        void prepare(const ProcessSpec& spec) noexcept
+        {
+            slot.prepare(spec);
+            untilNote = 0;
+        }
+        void reset() noexcept
+        {
+            slot.reset();
+            untilNote = 0;
+        }
+        void process(const AudioBlock& block) noexcept
+        {
+            for (std::size_t i = 0; i < block.numSamples(); ++i)
+            {
+                if (untilNote == 0)
+                {
+                    slot.noteOn();
+                    untilNote = 300;
+                }
+                --untilNote;
+                slot.process(block.subBlock(i, 1), 50.0f);
+            }
+        }
+    };
+    for (const bool retrigger : {true, false})
+    {
+        CAPTURE(retrigger);
+        const auto withNotes =
+            checkLifecycleContract([retrigger] { return SlotWithNotes{retrigger}; }, specAt(rate), 2000);
+        CHECK(withNotes.resetMatchesFreshPrepare);
+        CHECK(withNotes.rePrepareMatchesFreshPrepare);
+    }
 }
 
 TEST_CASE("OscillatorSlot: reset() finishes a volume ramp; a mono block is left untouched", "[dsp][oscillator][slot]")

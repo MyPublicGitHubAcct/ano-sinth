@@ -7,7 +7,9 @@
 #include <anoesis/dsp/core/audio_block.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
+#include <anoesis/dsp/math/random.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
+#include <anoesis/dsp/oscillators/phase.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 
 #include <algorithm>
@@ -20,7 +22,7 @@ namespace anoesis::dsp
 {
 
 /// One of a voice's oscillators, with its controls: tuning (octave, note,
-/// fine), the master tune, volume, pan, and invert. It renders a mono
+/// fine), the master tune, volume, pan, invert, Phase, and Retrig. It renders a mono
 /// band-limited oscillator and adds it, panned, into the voice's stereo bus
 /// (pan comes before the filter, so the bus is stereo).
 ///
@@ -39,10 +41,15 @@ namespace anoesis::dsp
 /// Pitch is not smoothed: the oscillator's phase is continuous, so a pitch
 /// step makes no discontinuity in the waveform.
 ///
+/// Phase and Retrig act at noteOn(): a retriggered note starts at Phase, as
+/// an onset from silence or as a band-limited jump while sounding; a
+/// free-running one is left alone. Phase is degrees here and fixed point in
+/// the oscillator.
+///
 /// Satisfies Preparable. No allocation: the table is shared, and the mono
 /// signal goes through a small buffer on the stack.
 ///
-/// Doc: docs/dsp/oscillator-controls.md
+/// Docs: docs/dsp/oscillator-controls.md, docs/dsp/oscillator-phase.md
 template <std::size_t Taps>
 class OscillatorSlot
 {
@@ -54,14 +61,70 @@ public:
     {
         oscillator.prepare(spec);
         gain.prepare(spec);
+        random.reset();
     }
 
-    /// Restarts the oscillator (from silence, at phase 0) and finishes any
-    /// gain ramp.
+    /// stop(), and restarts the random sequence of free-running start phases
+    /// from its seed: the slot is as freshly prepared.
     void reset() noexcept
+    {
+        stop();
+        random.reset();
+    }
+
+    /// For a voice that has finished: silences the oscillator, so the next
+    /// noteOn() starts it from silence, and finishes any gain ramp. Unlike
+    /// reset(), the random sequence carries on, so each new free-running note
+    /// draws a new start phase. Without a noteOn(), process() starts the
+    /// oscillator at phase 0.
+    void stop() noexcept
     {
         oscillator.reset();
         gain.reset();
+    }
+
+    /// A note-on, between two process() calls (a voice splits its block at
+    /// the event, so the note-on is sample-accurate).
+    ///
+    /// - Retrig on: the oscillator restarts at Phase. From silence, that is
+    ///   the band-limited onset at Phase; while it sounds (a stolen voice, or
+    ///   a retriggered mono note), a band-limited jump to Phase.
+    /// - Retrig off: a sounding oscillator runs on untouched. From silence,
+    ///   it starts at a random phase from this slot's Random (a working
+    ///   hypothesis, inventory O10: a free-running oscillator has been
+    ///   running unheard, so its phase is arbitrary).
+    void noteOn() noexcept
+    {
+        if (retrigger)
+        {
+            oscillator.jumpTo(startPhase);
+        }
+        else if (!oscillator.isRunning())
+        {
+            oscillator.restart(random.nextUint32());
+        }
+    }
+
+    /// The start phase for a retriggered note-on, in degrees (any value,
+    /// wrapped to one cycle). It takes effect at the next note-on, not on a
+    /// held note.
+    void setPhaseDegrees(float degrees) noexcept
+    {
+        startPhase = phaseFromDegrees(degrees);
+    }
+
+    /// Retrig: whether a note-on restarts the oscillator at Phase (on, the
+    /// default) or leaves it free-running (off).
+    void setRetrigger(bool shouldRetrigger) noexcept
+    {
+        retrigger = shouldRetrigger;
+    }
+
+    /// The seed of the free-running start phases. Give each slot its own, or
+    /// they start in step. Restarts the sequence.
+    void setRandomSeed(std::uint64_t seed) noexcept
+    {
+        random.setSeed(seed);
     }
 
     void setWaveform(Waveform waveform) noexcept
@@ -158,8 +221,11 @@ private:
 
     MinBlepOscillator<Taps> oscillator;
     StereoGain gain;
+    Random random;
     Tuning tuning;
     float referenceHz = concertPitchHz;
+    std::uint32_t startPhase = 0;
+    bool retrigger = true;
 };
 
 } // namespace anoesis::dsp

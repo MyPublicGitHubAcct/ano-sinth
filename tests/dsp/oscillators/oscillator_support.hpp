@@ -21,7 +21,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <numbers>
+#include <span>
 #include <vector>
 
 namespace anoesis::test::d6
@@ -186,6 +188,56 @@ inline std::vector<double> idealCorners(Waveform shape)
     return {};
 }
 
+/// Distance in samples from phase t to the nearest point where `shape` jumps
+/// or bends, given dt cycles per sample.
+inline double distanceToEdge(Waveform shape, double t, double dt)
+{
+    double nearest = std::numeric_limits<double>::infinity();
+    for (const double edge : idealCorners(shape))
+    {
+        const auto d = std::abs(t - edge);
+        nearest = std::min(nearest, std::min(d, 1.0 - d) / dt);
+    }
+    return nearest;
+}
+
+/// How closely a render follows the ideal waveform, see compareWithIdeal().
+struct IdealMatch
+{
+    std::size_t checked = 0; ///< samples compared
+    double worstError = 0.0; ///< the largest |output - ideal| among them
+    std::size_t worstAt = 0; ///< ...and its index
+};
+
+/// Compares out[n], from `from` on, with the ideal waveform whose phase is
+/// `start` cycles at time `origin` (in samples, possibly between two) and
+/// advances `dt` cycles per sample, delayed by `delay` samples. Skips the
+/// `guard` samples after `origin` (an onset's or a jump's residual) and the
+/// `guard` samples around every edge.
+inline IdealMatch compareWithIdeal(std::span<const float> out, Waveform shape, double start, double origin,
+                                   std::size_t from, double delay, double dt, double guard)
+{
+    IdealMatch match;
+    for (std::size_t n = from; n < out.size(); ++n)
+    {
+        const double time = static_cast<double>(n) - delay;
+        const double position = start + ((time - origin) * dt);
+        const double t = position - std::floor(position);
+        if (time <= origin + guard || distanceToEdge(shape, t, dt) <= guard)
+        {
+            continue;
+        }
+        const double error = std::abs(static_cast<double>(out[n]) - idealWave(shape, t));
+        if (error > match.worstError)
+        {
+            match.worstError = error;
+            match.worstAt = n;
+        }
+        ++match.checked;
+    }
+    return match;
+}
+
 /// The ideal waveform's mean (DC): 2w - 1 for a pulse of width w, 0 otherwise.
 inline double idealMean(Waveform shape)
 {
@@ -295,6 +347,60 @@ std::vector<float> render(Osc& osc, double sampleRate, std::size_t ratio, std::s
                 out.push_back(buffer.channel(0)[i]);
             }
         }
+    }
+    return out;
+}
+
+/// Hard sync, which is also a retrigger every master period: renders
+/// `settle` + `numSamples` samples of `osc` and returns the last `numSamples`,
+/// jumping it to `target` at the times k x numSamples / masterCycles, which in
+/// general fall between samples. In continuous time the result repeats every
+/// numSamples / masterCycles samples, so over numSamples samples it is
+/// periodic: the harmonics of masterCycles x fs / numSamples sit on their
+/// own bins, and the aliasing of each jump lands between them.
+template <typename Osc>
+std::vector<float> renderSynced(Osc& osc, std::uint32_t target, std::size_t numSamples, std::uint64_t masterCycles,
+                                std::size_t settle)
+{
+    std::vector<float> out;
+    out.reserve(numSamples);
+    std::uint64_t sync = 0; // the next sync's index k
+    for (std::uint64_t i = 0; i < settle + numSamples; ++i)
+    {
+        // Sync k is at time k N / c, so it falls in (i - 1, i] when k N <= i c,
+        // since (i c - k N) / c samples before sample i.
+        while (sync * numSamples <= i * masterCycles)
+        {
+            const auto since =
+                static_cast<double>((i * masterCycles) - (sync * numSamples)) / static_cast<double>(masterCycles);
+            osc.jumpTo(target, static_cast<float>(since));
+            ++sync;
+        }
+        const float y = osc.next();
+        if (i >= settle)
+        {
+            out.push_back(y);
+        }
+    }
+    return out;
+}
+
+/// renderSynced()'s pattern as a naive phase jump: each sample is the ideal
+/// waveform at the exact phase (in double), with no band-limiting at all.
+inline std::vector<float> renderSyncedNaive(Waveform shape, std::uint32_t increment, std::uint32_t target,
+                                            std::size_t numSamples, std::uint64_t masterCycles, std::size_t settle)
+{
+    std::vector<float> out;
+    out.reserve(numSamples);
+    const double start = std::ldexp(static_cast<double>(target), -32);
+    const double step = std::ldexp(static_cast<double>(increment), -32);
+    for (std::uint64_t i = settle; i < settle + numSamples; ++i)
+    {
+        const std::uint64_t sync = (i * masterCycles) / numSamples; // the last sync at or before i
+        const auto since =
+            static_cast<double>((i * masterCycles) - (sync * numSamples)) / static_cast<double>(masterCycles);
+        const double position = start + (since * step);
+        out.push_back(static_cast<float>(idealWave(shape, position - std::floor(position))));
     }
     return out;
 }

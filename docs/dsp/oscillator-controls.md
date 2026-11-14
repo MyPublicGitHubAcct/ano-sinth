@@ -104,7 +104,7 @@ The design leaves the later work open:
 
 - **Unison.** Each unison voice's pitch is the slot's pitch plus its detune (and drift), all in semitones. Each voice gets its own pair of stereo gains, computed when a control changes. How Pan combines with Stereo (inventory O8, an offset or a balance) only changes how those pairs are computed.
 - **Per-voice pitch modulation.** The voice passes a note per sample (key, bend, portamento, Pitch A modulation); the slot adds its tuning.
-- **Part 2: FM and hard sync.** FM between oscillators is a per-sample input of the same shape as the notes (an increment or phase offset). Hard sync is a list of sync events (sample index and fraction) from the master slot, applied by a band-limited phase reset in `MinBlepOscillator`. Block processing does not get in the way, because each event carries its position within the block.
+- **Part 2: FM and hard sync.** FM between oscillators is a per-sample input of the same shape as the notes (an increment or phase offset). Hard sync is a list of sync events (sample index and fraction) from the master slot, applied by `MinBlepOscillator::jumpTo(phase, since)`, the band-limited phase jump that retrigger already uses ([oscillator-phase.md](oscillator-phase.md)). Block processing does not get in the way, because each event carries its position within the block.
 
 ### Smoothing: which smoother and ramp, and why
 
@@ -212,7 +212,7 @@ Nanoseconds per sample, 64 taps, 48 kHz, `relwithdebinfo` ([baselines](../perfor
   - over every octave, note offset, and fine in eighths, on 4 base notes at 44.1 and 48 kHz, the increment's frequency is within the derived bound of the double-precision target (1.6·10⁻⁶ plus the fixed-point unit), or clamped at Nyquist;
   - the rendered sine runs at its increment's frequency to 10⁻⁹;
   - volume halves exactly, pan follows the law exactly, invert negates exactly;
-  - **the PWM trick:** two saws, one inverted and started 256 samples early (exactly a quarter cycle, because A4 = 46.875 Hz makes the increment exactly 2²² at 48 kHz), sum to the ideal 25% pulse away from its edges (within 2·10⁻⁴), with a mean within 10⁻⁶ of 0, no 4th or 8th harmonic (below −80 dB), and a fundamental of (4/π) sin(π/4);
+  - **the PWM trick:** two saws, both retriggered, one inverted and at Phase 90 (exactly a quarter cycle; A4 = 46.875 Hz makes the increment exactly 2²² at 48 kHz), sum to the ideal 25% pulse away from its edges (within 2·10⁻⁴), with a mean within 10⁻⁶ of 0, no 4th or 8th harmonic (below −80 dB), and a fundamental of (4/π) sin(π/4);
   - a note per sample gives the bare oscillator's output with the pitch set every sample, bit for bit, and a constant note per sample equals the per-block form;
   - the output does not depend on the block size (1, 7, 63, 64, 65, 500, 2000);
   - the lifecycle contract; `reset()` finishes a volume ramp; a mono block is untouched; Noise is silent until the unison slot adds `WhiteNoise`.

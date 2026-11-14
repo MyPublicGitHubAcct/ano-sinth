@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 
 /// Fixed-point oscillator phase.
@@ -42,6 +43,25 @@ inline constexpr std::uint32_t halfCycle = 0x80000000U;
 [[nodiscard]] constexpr float toCycles(std::uint32_t phase) noexcept
 {
     return static_cast<float>(phase) * cyclesPerUnit;
+}
+
+/// The phase `degrees` into the cycle (360 per cycle), wrapped into one
+/// cycle: 90 is a quarter cycle, -90 three quarters, 450 a quarter. For the
+/// Phase control: degrees belong to the parameter, cycles to the oscillator.
+/// Exact for every multiple of 360 / 2^k; otherwise to float precision.
+/// NaN and the infinities give 0, and so does a negative angle too small to
+/// tell from a whole cycle.
+[[nodiscard]] inline std::uint32_t phaseFromDegrees(float degrees) noexcept
+{
+    float cycles = degrees / 360.0f;
+    cycles -= std::floor(cycles);
+    // NaN (from NaN or an infinity), or a tiny negative angle that rounded
+    // up to a whole cycle: either would overflow the conversion below.
+    if (std::isnan(cycles) || cycles >= 1.0f)
+    {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(cycles * 4294967296.0f);
 }
 
 } // namespace anoesis::dsp

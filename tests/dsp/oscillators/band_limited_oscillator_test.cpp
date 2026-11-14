@@ -21,7 +21,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <limits>
 #include <numbers>
 #include <numeric>
 #include <vector>
@@ -58,19 +57,6 @@ std::vector<float> renderPlain(Osc& osc, std::size_t numSamples)
         sample = osc.next();
     }
     return out;
-}
-
-// Distance in samples from phase t to the nearest point where `shape` jumps
-// or bends, given dt cycles per sample.
-double distanceToEdge(Waveform shape, double t, double dt)
-{
-    double nearest = std::numeric_limits<double>::infinity();
-    for (const double edge : idealCorners(shape))
-    {
-        const auto d = std::abs(t - edge);
-        nearest = std::min(nearest, std::min(d, 1.0 - d) / dt);
-    }
-    return nearest;
 }
 
 } // namespace

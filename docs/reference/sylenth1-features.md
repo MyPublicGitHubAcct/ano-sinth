@@ -29,11 +29,11 @@ Four oscillators: A1, A2, B1, B2.
 | Octave / Note | Coarse tuning. Centered by default (0). Octave −3 to +3, Note −7 to +7 semitones, in whole steps (see [Tuning, volume, pan, and invert](#tuning-volume-pan-and-invert)). |
 | Fine | ±1 semitone, continuous; default 0. |
 | Volume | Oscillator output level. Knob 0–10; taper unspecified. |
-| Phase | 0–360° start phase. Only has an effect when Retrigger is on. |
+| Phase | 0–360° start phase. Only has an effect when Retrigger is on. See [Phase and Retrig](#phase-and-retrig). |
 | Detune | Spreads the pitch of the unison voices around the center pitch, as in a supersaw. |
 | Stereo | Spreads unison voices across the stereo field: 0 is mono, 10 is full width. Needs more than 1 voice. |
 | Pan | Oscillator pan, 0 (left) to 10 (right), centred by default (pp. 10, 15). Law unspecified. |
-| Retrig | Restarts every voice at Phase on each note-on. |
+| Retrig | Restarts every voice at Phase on each note-on. Off: free-running (see [Phase and Retrig](#phase-and-retrig)). |
 | Inv | Inverts the output, for PWM-style tricks. |
 | C / P | Copy and paste oscillator settings, including between presets. |
 
@@ -67,6 +67,26 @@ The manual gives only outlines (pp. 10, 14–15). The rest comes from third-part
 | O7 | Inv. | Exact negation | With Retrig on and Phase 0, a saw with Inv on against Inv off, sample by sample. Then two saws, one inverted, at Phase 90°: a 25% pulse with zero mean. |
 | O8 | How Pan combines with Stereo (unison). | Unknown | 2 voices, Stereo 10, sweep Pan: does each voice's position shift (an offset, clipping at the sides), or is the stereo pair balanced? Settled in the unison task. |
 | O9 | Master tune (v3): units, range, and whether a keytracked filter follows it. | A4 reference in Hz (decided 2026-11-13); the filter follows it | Read the control's LCD at both ends. Self-oscillate the filter at Keytrack 10 and check that it stays in tune with the oscillator as master tune changes. |
+
+### Phase and Retrig
+
+The manual gives only the outline: Phase is a 0–360° start phase that only has an effect when Retrig is on, and Retrig restarts every voice at Phase on each note-on (pp. 14–15). M1.1 builds the rest as below ([oscillator-phase.md](../dsp/oscillator-phase.md)).
+
+| Behaviour | As built | Source | Confidence |
+|---|---|---|---|
+| Phase 0 | The same point for every waveform: the start of its cycle as defined in W6 (saw at −1 rising, pulse high, triangle at −1, sine at 0 rising). Phase is an offset from it, in the direction of travel (90° = a quarter cycle in). | W6 hypothesis | Low until measured |
+| Retrig on, from silence | The voice starts at Phase. | Manual | High |
+| Retrig on, while sounding (a stolen voice, a mono retrigger) | A band-limited jump to Phase at the note-on's sample, keeping what is in flight, rather than a cut to silence. | No source says how Sylenth1 handles it; a click-free jump is our choice. | Unknown (O11) |
+| Retrig off | A sounding oscillator runs on untouched; Phase is ignored. *Hypothesis:* a voice starting from silence starts at a random phase (seeded, so renders are reproducible). | Manual (Phase only matters with Retrig on). A user on the [Sonic Academy forum](https://forums.sonicacademy.com/t/phase-settings-on-oscilators/26166): with Retrig off "it starts at random start point"; MusicRadar's tutorial (search-engine excerpt): otherwise the waveform cycles "freely regardless of note input". | Low–medium (O10) |
+| Retrig with unison | Every unison voice restarts at Phase. | Manual ("every voice") | Medium: "voice" may mean the polyphonic voice. Settled with unison. |
+
+**Open questions, settled by measuring the demo (M1.13).** Common setup as for W1–W9.
+
+| # | Question | Working hypothesis | Measurement that settles it |
+|---|---|---|---|
+| O10 | Retrig off: where does a note from silence start? Random per note, or continuing a phase the voice kept running? And are unison voices' start phases independent? | A seeded random phase per start, independent per voice | Play the same note 8 times with gaps, Retrig off, a low saw (A1). Read each note's start phase from its first cycle. Uniformly scattered: random; advancing by gap × frequency: a running phase. Repeat with 2 unison voices, Detune 0, Stereo 0: equal phases sum to 2× the level, independent ones to about √2×. |
+| O11 | Retrig on, a note-on while the voice sounds (mono, or a stolen voice): does the phase jump, and is the jump band-limited (no click, no aliasing) or a hard reset? | A band-limited jump | Mono mode, Retrig on, a high saw, a second note-on at the same pitch mid-note. Look at the waveform around the note-on, and at the spectrum of a fast repeated retrigger for aliases between the harmonics. |
+| O12 | Phase direction and units: is 90° a quarter cycle *into* the waveform? | Yes | With W6's setup, Phase 90 and 180 on a saw: the first sample after onset is −0.5 or 0 for "into"; +0.5 or 0 for "before". |
 
 ### Waveforms
 
