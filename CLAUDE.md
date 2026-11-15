@@ -16,12 +16,13 @@ A virtual analog synthesizer plugin by **Anoesis Audio**, built with JUCE and mo
 
 ## Project phases
 
-The work has four parts. Parts 1 → 2 → 3 run in sequence; Part 4 runs alongside all of them.
+The work has five parts. Parts 1 → 2 → 3 run in sequence. Part 5 starts once Part 2 is done (D10). Part 4 runs alongside all of them.
 
 1. **Sylenth1 parity.** Build a virtual analog synth that approximates *all* of Sylenth1's features (see the component map below). Design it so Part 2 can add to it: filters, effects, oscillator waveforms, and mod sources and destinations sit behind interfaces or registries rather than hard-coded switches.
 2. **Extensions.** Add filter types, effects, and synthesis methods that Sylenth1 does not have.
 3. **Optimization.** Profile first, then optimize: SIMD, voice and unison efficiency, denormal handling, and CPU per voice. Start capturing CPU baselines during Part 1 so later gains can be measured.
 4. **Documentation.** Write up every task and technique so that a reader can (a) see what was done and why, and (b) learn how the technique works both in general and in this codebase. Update the docs in the same change as the code. Do not leave them for later.
+5. **VCV Rack modules.** Ship Brutalis's processing sections as separate VCV Rack 2 modules: oscillator, filter, envelope, LFO, arpeggiator and step sequencer, one module per master effect, and the Part 2 additions. Each module wraps the same `libs/dsp` code the plugin uses. It never forks that code. Work starts after Part 2 is done (D10), so every section already exists in `libs/dsp` by then. Do not start Rack work before that.
 
 Current phase and task breakdown: see [PLAN.md](PLAN.md).
 
@@ -52,6 +53,7 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
   - All project code is **MIT** (root `LICENSE`, decision D1). `libs/dsp` also carries its own copy, so it can be reused on its own. Nothing JUCE-licensed or copyleft may enter `libs/dsp`.
   - Submodules keep their own licenses: JUCE is AGPLv3 or commercial, and Catch2 is BSL-1.0.
   - Plugin *binaries* contain JUCE, so distributing them must also satisfy JUCE: either the AGPLv3 for the combined work (offer the source, add no extra restrictions) or a commercial JUCE license. The MIT code itself stays MIT.
+  - The VCV Rack SDK is GPLv3-or-later, so the Rack plugin binary is a GPLv3 combined work unless VCV grants a commercial license (D11). The code under `rack/` can still be MIT. Nothing from the Rack SDK may enter `libs/dsp`.
 - **Build:** CMake + Ninja on every platform. Use `CMakePresets.json` for the configurations. Development happens on macOS.
 - **Compilers:** each platform's standard compiler:
   - macOS: Apple Clang (Xcode command-line tools)
@@ -61,6 +63,10 @@ Reproduce Sylenth1's *behavior and feature set*, not its implementation or asset
   Code must build cleanly on all three. Do not rely on extensions or behavior specific to one compiler.
   **Only macOS is built locally.** Linux and Windows are tested in Version CI on every major or minor version. Because GCC and MSVC see the code only at version time, the portability rules matter even more.
 - **Plugin formats:** VST3, AU, Standalone.
+- **VCV Rack (Part 5):** a separate Rack 2 plugin, built against the Rack SDK. Pin the SDK to an exact release and check its SHA-256, the same way pluginval is pinned. The SDK's toolchain differs from the plugin's in three ways, and R0 in PLAN.md settles each one:
+  - The SDK builds with Make, not CMake + Ninja.
+  - It compiles with an older C++ standard than ours. Our headers that Rack code includes must build under the SDK's flags, or `rack/` raises the standard for its own sources.
+  - On Windows, Rack plugins must be built with MinGW-w64 GCC (MSYS2), not MSVC. That makes MinGW a fourth compiler `libs/dsp` must build cleanly with.
 - **Target platforms:** macOS, Linux, Windows. **STM32 may be added later**, which constrains the DSP library (see below).
 
 ## Commands
@@ -93,15 +99,16 @@ On Windows, run these from a Visual Studio developer prompt (so Ninja finds `cl.
 
 ## Architecture and modularity
 
-Everything except the plugin target itself must be reusable in other projects. The layout below is proposed:
+Everything except the plugin target and the Rack plugin must be reusable in other projects. The layout below is proposed:
 
 ```
 external/          JUCE, Catch2 (submodules)
 libs/dsp/          anoesis::dsp: oscillators, filters, envelopes, LFOs, effects, voice management
 libs/gui/          anoesis_gui JUCE module (namespace anoesis::gui): knobs, LCD panel, meters, look-and-feel
 libs/interop/      anoesis_interop JUCE module (namespace anoesis::interop): parameter binding, preset/bank I/O, MIDI learn, host sync
-plugin/            Thin synth target (namespace brutalis) that wires the libs together. The only product-specific code.
-tests/             Catch2 tests, one executable per lib, mirroring libs/ and plugin/
+plugin/            Thin synth target (namespace brutalis) that wires the libs together. Product-specific.
+rack/              VCV Rack 2 plugin (Part 5): one thin module per processing section, wrapping libs/dsp. Product-specific.
+tests/             Catch2 tests, one executable per lib, mirroring libs/, plugin/, and rack/
 tools/             format.sh, tidy.sh, check-identity-leak.sh, git hooks
 docs/              Part 4 documentation
 ```
@@ -117,6 +124,8 @@ Full rationale: [docs/development/project-structure.md](docs/development/project
 - **`libs/gui` and `libs/interop`** may depend on JUCE but must know nothing about this synth's parameter set. They receive what they need through configuration or interfaces.
 - Each lib is its own CMake target with its own namespace, public headers, and test target. Dependencies point only toward `dsp`. Never create cycles.
 - **`libs/gui` and `libs/interop` are JUCE modules** (`juce_add_module`), not static libraries. Each final binary must compile JUCE exactly once, and the plugin target always compiles it. Link modules `PRIVATE` only. Put new implementation files in a module subfolder and `#include` them from the module's root `.cpp`.
+- **`rack/` depends only on `libs/dsp` and the Rack SDK.** It never uses JUCE, `libs/gui`, or `libs/interop`. Rack has its own widgets, and its panels are SVG. Each module does three things: it converts voltages to and from parameters (1 V/oct, ±5 V audio, 0–10 V envelopes, 10 V gates), it maps polyphonic cables (up to 16 channels) onto voices, and it calls into `libs/dsp`. Keep the voltage and polyphony mapping in plain C++ with no Rack dependency, so Catch2 can test it. Rack calls `process()` once per sample, so the real-time rules apply there as well.
+- **Rack identifiers are permanent once released**, the same as parameter IDs: the plugin slug, module slugs, and the param, input, and output IDs. Module names and panels are original. They must not name, describe, or resemble Sylenth1.
 - The plugin's sources live in the `brutalis_plugin_common` INTERFACE target, which both the plugin and `brutalis_plugin_tests` link. Shared JUCE config flags go in `anoesis_configure_juce_target()` ([cmake/AnoesisJuce.cmake](cmake/AnoesisJuce.cmake)).
 
 ## Conventions

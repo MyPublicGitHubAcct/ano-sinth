@@ -37,6 +37,8 @@ Still open:
 
 **M1.2 (envelopes, LFOs, and tempo sync) done** (2026-11-14). The ADSR is done (2026-11-14): exponential segments towards an overshoot target, counted in float so every stage is exact to the sample at any rate and block size, constant rate, retrigger from the current level, sustain changes ramped over 10 ms, gates at sample offsets, chosen by the project owner from six measured models (inventory §4, E1–E12; docs/dsp/envelopes.md). 271 tests pass on macOS in debug, and 269 under ASan/UBSan (which skips the plugin validators). The LFO is done (2026-11-14): a 32.32 fixed-point phase, 11 waveforms as data, straight-line rows exact and curved rows interpolated every 32 samples, every jump slewed over 1 ms (at most 1/16 cycle), gain × (wave + offset), one per voice with Free as a copy of a global one, chosen by the project owner from eight measured models (inventory §6, L1–L14; docs/dsp/lfos.md). 293 tests pass on macOS in debug, and 291 under ASan/UBSan (which skips the plugin validators). Tempo sync is done (2026-11-14): rate only, the phase from the note-on and never the song position, an exact 64-bit increment from exact note values (`NoteValue`, `notePhaseIncrement`, `Lfo::setPhaseIncrement`), and the host's last valid tempo or 120 BPM (`HostTempo`), chosen by the project owner from five measured models (inventory §8, S1–S14; docs/dsp/tempo-sync.md). 306 tests pass on macOS in debug, and 304 under ASan/UBSan (which skips the plugin validators). **Next:** M1.3, filters.
 
+**Phase 5 (VCV Rack modules) added to the plan** (2026-11-14). Not started. It starts after Phase 2 (D10, decided 2026-11-14). Its license and distribution are still open (D11).
+
 ---
 
 ## Open decisions
@@ -47,6 +49,7 @@ Settle these before or during Phase 0. Each one affects the work that follows.
 |---|---|---|---|
 | D7 | **Preset and bank file format** (for example JSON or XML with a version field) | A long-term compatibility commitment. | M1.10 |
 | D9 | **Visual design direction for the GUI** | Must be original (clean-room). Affects `libs/gui`. | M1.11 |
+| D11 | **License and distribution of the Rack plugin:** GPLv3 through the VCV Library (which builds from source) or a commercial VCV license. *TBD by the project owner (2026-11-14).* | The Rack SDK is GPLv3-or-later. This also sets where Rack builds are distributed, given the rule that GitHub hosts source only. | R0 (license), first Rack release (distribution) |
 
 Note: AU is a macOS-only format, so Linux and Windows ship VST3 and Standalone.
 
@@ -301,6 +304,45 @@ Each milestone above lists its docs. In addition:
 
 ---
 
+## Phase 5: VCV Rack modules (after Phase 2)
+
+Goal: ship Brutalis's processing sections as VCV Rack 2 modules. Each module is a thin wrapper around the same `libs/dsp` code the plugin uses, so it adds no DSP of its own. **Work starts once Phase 2 is done** (D10), so every Phase 1 section and Phase 2 addition already exists in `libs/dsp` by then. The rules are in CLAUDE.md (Part 5; Architecture).
+
+### R0 Rack foundation
+- [ ] Settle D11 (license and distribution).
+- [ ] Rack SDK: pin an exact 2.x release and verify each platform's download by SHA-256, the same way pluginval is pinned. Record its license and how it is fetched and cached.
+- [ ] Build integration. The SDK builds plugins with Make (`plugin.mk`), but the repo standard is CMake + Ninja. Choose one of: (a) a CMake target that drives the SDK's Make build, (b) a CMake build that reproduces the SDK's flags, or (c) a documented exception. Record the choice in the Decisions log.
+- [ ] C++ standard. Check that the Rack SDK headers compile next to our C++23 headers under `-Wall -Wextra -Wpedantic -Werror`. If they don't, isolate the Rack code from our headers or lower the warnings for Rack's headers only (as with JUCE's `SYSTEM` includes).
+- [ ] Toolchains. On Windows, Rack plugins are built with MinGW-w64 GCC (MSYS2), not MSVC, so `libs/dsp` must build cleanly under MinGW too. On macOS, build both arm64 and x86_64.
+- [ ] Skeleton: a `rack/` directory with `plugin.json` and one trivial module, linked to `libs/dsp` only. The plugin slug and module slugs are permanent once released.
+- [ ] Shared adapter code, in plain C++ with no Rack dependency, tested with Catch2 in `tests/rack`:
+  - voltage conventions: 1 V/oct pitch, ±5 V audio, 0–10 V unipolar and ±5 V bipolar CV, gates and triggers with Schmitt thresholds;
+  - polyphonic cables (up to 16 channels) mapped to voices;
+  - knob plus CV with attenuverters, combined into one parameter value.
+- [ ] Per-sample calls. Rack calls `process()` once per sample, and `libs/dsp` processors work in blocks. Measure two options against each other, the per-sample `next()` path and internal blocks of N samples (which add N samples of latency), for CPU, latency, and bit-exactness with the plugin. Choose one and record it.
+- [ ] Panels: original SVG at Rack's 3U height and HP widths, in a style shared by every module (related to D9 but its own design).
+- [ ] Testing: Catch2 for the adapters, plus a smoke test that loads every module in Rack's headless mode, if headless mode can do it. Add both to `tools/check.sh` when the SDK is present.
+- [ ] CI: add a Rack build to Version CI, keeping the existing policy (only on `vX.Y.0` tags, no artifacts).
+
+### R1 Modules for the Phase 1 sections
+- [ ] **Oscillator** (M1.1): V/Oct, 8 waveforms, unison 0–8 with detune and spread, phase, retrigger input, invert, drift; stereo out; polyphonic.
+- [ ] **Envelope** (M1.2): ADSR with gate and retrigger inputs, CV for each stage, and sample-accurate gates.
+- [ ] **LFO** (M1.2): 11 waveforms, rate, gain, offset, a reset input, and a clock input. In Rack the clock replaces the host tempo: measure its period and feed it to `notePhaseIncrement`. Polyphonic.
+- [ ] **Filter** (M1.3): bypass, LP, BP, and HP at 12 and 24 dB, cutoff (with 1 V/oct CV), resonance up to self-oscillation, drive, Warm Drive, keytrack from a V/Oct input; polyphonic.
+- [ ] **Part voice** (M1.4, optional): one Brutalis part (2 oscillators → filter → amp envelope) as a single polyphonic module.
+- [ ] **Arpeggiator and step sequencer** (M1.6): polyphonic gate and V/Oct in, clock and reset in, mono gate, V/Oct, and step velocity out; all 10 modes, the step sequencer, and swing.
+- [ ] **Effects** (M1.7): one stereo module each for Distortion, Phaser, Chorus/Flanger, EQ, Reverb, Delay, and Compressor, with CV on the main controls. Delay times sync to a clock input. The Compressor gets a sidechain input.
+
+### R2 Modules for the Phase 2 additions
+- [ ] Each Phase 2 addition (waveforms, filters, synthesis methods, effects) becomes its own module or a mode of an R1 module. Decide which, addition by addition, from the Phase 2 list as built.
+
+### R3 Optimization
+- [ ] Apply the Phase 3 optimizations that have landed, and measure CPU per module at 16 channels in Rack.
+
+**Docs:** `docs/rack/`: building against the Rack SDK; voltage and polyphony conventions and how the adapters map them; block versus per-sample processing; one page per module listing its I/O and the plugin parameters behind each control.
+
+---
+
 ## Decisions log
 
 | Date | Decision | Notes |
@@ -362,3 +404,5 @@ Each milestone above lists its docs. In addition:
 | 2026-11-14 | ADSR envelope: **exponential segments towards an overshoot target** (target = end + r(end − start)), **attack ratio 0.3, decay and release 0.001**, computed in float as a **closed form from the sample count** (level = target + d₀ · `fastExp2`(log₂c · k)) and ended by count, so a stage of N = round(time × rate) samples ends on its N-th at its end level. **Constant rate**: a stage entered part-way enters its full-scale curve at the current level. **A retrigger attacks from the current level**; a legato gate leaves a held envelope alone. **A sustain change while sustaining ramps linearly over 10 ms**; during the decay the decay re-aims. Stages of 0 are instant. `isActive()` is false when the release reaches 0 (no threshold). The DSP takes seconds and a linear sustain; the parameter table's working hypothesis (M1.9, E1, E4) is t = 25 s · x^4.64 for knob x ∈ [0, 1], the same for A, D, and R, and sustain = knob / 10. | Chosen by the project owner from six measured models (docs/dsp/envelopes.md, commit c8c1ab1). Exponential, as the one Sylenth1 test reports; the release is a near-straight line in dB, above −60 dB for 90% of its time. Float recursion missed 25 s stages at 192 kHz by 1.5–8%; the count is exact in float, with a curve error of 4.2·10⁻⁷, and needs no double (STM32). The analog RC needed a flush (+2.5 ns per sample) and went subnormal 94 ms into a held note. A retrigger from 0 clicked at up to −12 dB, against −35 dB from the current level (one user: Sylenth1 doesn't click); a jumped sustain change −12 dB, against −50 dB ramped (v3.008 fixed "clicks and pops during automation"). The knob law passes through the two reported points (1 s at half, about 25 s at the top) and through 0. Each is a hypothesis for M1.13 (inventory E1–E12). |
 | 2026-11-14 | LFO: a **32.32 fixed-point phase** (2⁶⁴ per cycle, the increment set in double at the control call). **11 waveforms as data** (`lfoShapes`): Sine, Saw, Ramp, Triangle, Pulse, HPulse, QPulse, TriSaw (the oscillator's rows where the names match; the Ramp falling), Lorenz, S&H, and a provisional Smooth (smoothed random); all bipolar, starting at the sine's and triangle's peak, the Ramp's top, the others' cycle start. **Straight-line rows exact**, computed in runs from corner to corner; **curved rows (sine, Smooth, Lorenz) interpolated linearly every 32 samples** on a grid counted from the last (re)start. **Every jump** (an edge, an S&H step, a retrigger, a waveform change) **slewed linearly from the last output over 1 ms, at most 1/16 of a cycle**. Output **gain × (wave + offset)**, gain in [0, 1], offset in [−1, 1], unclipped, changes ramped over 10 ms. **One LFO per voice**: `restart()` from silence, `retrigger()` while sounding; **Free = the voice copies a global free-running LFO** at its note-on. S&H and Smooth from the seeded `Random`; the **Lorenz step with every product its own statement**, so no target fuses it. No band-limiting at audio rate for now. Knob-law hypotheses for M1.9 (L6, L7): Rate f = 0.1 Hz × 1000^x, Gain = knob / 10, Offset = knob / 10. | Chosen by the project owner, every recommendation, from eight measured models (docs/dsp/lfos.md, commit dae814e). Float phase was 8% off at 0.01 Hz; 64-bit fixed point is exact for hours without double (STM32). Band-limiting took under 1 dB off an LFO step's in-band click; a 1 ms slew took 18.6–34 dB (one edge +6 → −12.6 dB re a unit step), and the cap keeps a 1 kHz LFO's shape (a fixed 1 ms erased it). Interpolation every 32 samples: spurs −73 dB or below on amplitude up to 40 Hz, below −100 dB on pitch. Lorenz renders parted after 15–20 cycles between builds that do and don't fuse multiply-adds. The copy for Free keeps per-voice rate modulation (the developer's keytracked ringmod) and gives free voices one phase. Built with one change: the slew starts from the last output (the extended segment overshot to 1.46 at audio rate, found by the stress test). 32 LFOs cost 12.8 ns per sample. |
 | 2026-11-14 | Tempo sync: **rate only**: the phase starts at the note-on (Free off) or follows the global free LFO (Free on) and never reads the song position; the rate is an **exact 64-bit increment**, `notePhaseIncrement(value, bpm, fs)` into `Lfo::setPhaseIncrement()` once per block per slot. **Note values are exact fractions** (`Ratio` × straight, triplet 2/3, dotted 3/2; a bar is four beats), converted with plain values (BPM, sample rate); long-running positions are counted in integers. **The list: 30 values, 8/1D to 1/64T, stepped, sorted by length** (`syncNoteValues`); a control may use a sub-range. **One global Sync** for LFO 1/2 Rate (Free off), Delay L/R, and Arp Time, not the chorus or phaser; a Free LFO stays in Hz; Sync off is absolute (parameter table, M1.9). **The reported tempo whether or not the transport plays**; `HostTempo` keeps the last positive, finite report clamped to [1, 999] BPM, and 120 BPM without one. | Chosen by the project owner from five measured models (commit d181628; docs/dsp/tempo-sync.md): the developer's "locks to host tempo, but not to song position". Rate only never jumps (bar-locked models click at loops, locates, and starts: −12.6 to −25 dB slewed), drifts 5·10⁻¹¹ cycles in three hours (float hertz: 1.6·10⁻²), and costs 0.1 ns per sample per LFO. Its cost is a lag under tempo ramps (1.8 ms after 6 s at blocks of 512); note-anchored is the measured alternative (S10). A float table puts 46,364 of 50,220 arpeggiator steps on the wrong sample. Settled against the demo in M1.13 (S1–S14). |
+| 2026-11-14 | Add **Part 5, VCV Rack modules**: each Brutalis processing section becomes a Rack 2 module wrapping the same `libs/dsp` code. `rack/` depends only on `libs/dsp` and the Rack SDK. | CLAUDE.md (Part 5); PLAN.md Phase 5. License and distribution still open (D11). |
+| 2026-11-14 | **D10: the VCV Rack track starts after Phase 2.** Decided by the project owner. | Every Phase 1 section and Phase 2 addition exists in `libs/dsp` before any Rack work starts. |

@@ -10,7 +10,8 @@ external/              JUCE and Catch2 submodules (never edited)
 libs/dsp/              anoesis::dsp: portable DSP, MIT, no JUCE
 libs/gui/              anoesis_gui JUCE module: reusable UI components
 libs/interop/          anoesis_interop JUCE module: reusable plugin glue
-plugin/                the Brutalis plugin: the only product-specific code
+plugin/                the Brutalis plugin: product-specific
+rack/                  (planned, Phase 5, after Phase 2) VCV Rack 2 modules wrapping libs/dsp: product-specific
 tests/<lib>/           one Catch2 executable per library, mirroring the tree
 tools/                 format, tidy, identity-leak check, git hooks
 docs/                  these write-ups
@@ -41,7 +42,8 @@ The rules (from [CLAUDE.md](../../CLAUDE.md)):
   - no OS, thread, file, or log calls;
   - `float` samples.
 - **`libs/gui` and `libs/interop` may depend on JUCE and on `libs/dsp`**, but must know nothing about Brutalis's parameter set. They get what they need through configuration or interfaces.
-- **`plugin/` is the only product-specific code.** It wires the libraries together.
+- **`plugin/` is product-specific.** It wires the libraries together.
+- **`rack/` (planned for Phase 5, after Phase 2, in [PLAN.md](../../PLAN.md)) is the other product-specific target.** It depends only on `libs/dsp` and the VCV Rack SDK, never on JUCE, `libs/gui`, or `libs/interop`. Its voltage and polyphony adapters are plain C++, so Catch2 can test them without Rack.
 - Dependencies point toward `dsp`, never back up, and never in a cycle.
 
 ## Namespaces and target names
