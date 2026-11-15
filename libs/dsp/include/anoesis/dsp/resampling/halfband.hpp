@@ -3,7 +3,11 @@
 
 #pragma once
 
+#include <anoesis/dsp/core/denormals.hpp>
+
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 
 /// Polyphase IIR halfband filters: the building blocks of Oversampler.
@@ -57,6 +61,11 @@ template <std::size_t N>
 /// A cascade of first-order allpass sections y = a (x - y1) + x1, run at the
 /// low rate. Coefficients are taken from every second element of an array,
 /// starting at `first`, so one sorted coefficient list feeds both paths.
+/// flushStates() zeroes any state below FLT_MIN (flushDenormal); the
+/// Oversampler calls it once per block, so the recursive states decay to
+/// exact zero after the input stops, with or without FTZ
+/// (docs/dsp/denormals.md). Flushing inside the per-sample chain would put
+/// a compare in its serial dependency (+50% on the round trip, measured).
 template <std::size_t Sections>
 class AllpassChain
 {
@@ -88,6 +97,26 @@ public:
         y1.fill(0.0f);
     }
 
+    /// Zeroes every state below FLT_MIN in size.
+    void flushStates() noexcept
+    {
+        for (std::size_t k = 0; k < Sections; ++k)
+        {
+            x1[k] = flushDenormal(x1[k]);
+            y1[k] = flushDenormal(y1[k]);
+        }
+    }
+
+    /// True when every state is exactly zero.
+    [[nodiscard]] bool isAtRest() const noexcept
+    {
+        const auto zero = [](float v)
+        {
+            return std::fpclassify(v) == FP_ZERO;
+        };
+        return std::ranges::all_of(x1, zero) && std::ranges::all_of(y1, zero);
+    }
+
 private:
     std::array<float, Sections> a{};
     std::array<float, Sections> x1{};
@@ -108,16 +137,28 @@ public:
     /// Y(z) = 2 H(z) X(z^2) = [A0(z^2) + z^-1 A1(z^2)] X(z^2): the even
     /// output is path 0, the odd output path 1. (The factor 2 restores the
     /// level lost by inserting zeros.)
+    /// The outputs are flushed below FLT_MIN (outside the recursion).
     void process(float input, float& even, float& odd) noexcept
     {
-        even = path0.process(input);
-        odd = path1.process(input);
+        even = flushDenormal(path0.process(input));
+        odd = flushDenormal(path1.process(input));
     }
 
     void reset() noexcept
     {
         path0.reset();
         path1.reset();
+    }
+
+    void flushStates() noexcept
+    {
+        path0.flushStates();
+        path1.flushStates();
+    }
+
+    [[nodiscard]] bool isAtRest() const noexcept
+    {
+        return path0.isAtRest() && path1.isAtRest();
     }
 
 private:
@@ -138,15 +179,27 @@ public:
 
     /// The odd-phase output of H: y[n] = 1/2 [A0(v[2n+1]) + A1(v[2n])].
     /// Both paths see a sample from the same pair, so neither needs a delay.
+    /// Flushed: half the sum of two tiny paths can fall below FLT_MIN.
     [[nodiscard]] float process(float first, float second) noexcept
     {
-        return 0.5f * (path0.process(second) + path1.process(first));
+        return flushDenormal(0.5f * (path0.process(second) + path1.process(first)));
     }
 
     void reset() noexcept
     {
         path0.reset();
         path1.reset();
+    }
+
+    void flushStates() noexcept
+    {
+        path0.flushStates();
+        path1.flushStates();
+    }
+
+    [[nodiscard]] bool isAtRest() const noexcept
+    {
+        return path0.isAtRest() && path1.isAtRest();
     }
 
 private:

@@ -22,6 +22,7 @@ add_executable(anoesis_dsp_tests
     control/tempo_sync_report.cpp
     control/tempo_sync_test.cpp
     filters/filter_report.cpp
+    filters/ladder_filter_test.cpp
     generators/white_noise_test.cpp
     math/decibels_test.cpp
     math/fast_math_test.cpp

@@ -73,6 +73,7 @@ oversampler.downsample(block);                            // back into the calle
 - `OversamplingFactor::none` copies, so the same code path works when oversampling is switched off. `setFactor()` takes effect at the next `prepare()`, since the buffer size changes.
 - `latencySamples()` is the round trip's group delay at DC in base-rate samples, for host delay compensation. Upsampling delays by τ (the halfband's DC group delay, in high-rate samples), and odd-phase decimation by τ − 1, so one stage's round trip is 2τ − 1 high-rate samples. The result: **3.18 samples at 2×, 4.30 at 4×**.
 - Effects that mix dry and wet should mix *inside* the oversampled domain, so both paths share the same filters and phase.
+- **Denormals** (added in M1.3, [filters.md](filters.md#the-oversamplers-halfbands)): every halfband output is flushed below FLT_MIN per sample, and every allpass state once per block (`flushStates()`, from `upsample()` and `downsample()`). So without FTZ a round trip still reaches exact silence after its input stops (`isAtRest()`: every state exactly zero) and never puts out a subnormal. Flushing each section inside the chain instead put a compare in its serial dependency and cost 50–57%; per block it is within noise.
 
 ## Trade-offs and alternatives
 
@@ -117,7 +118,8 @@ Also tested:
 - factor 1 is an exact pass-through;
 - `oversampledSpec()` and `setFactor()` semantics;
 - channel independence;
-- stability on a full-scale square wave (peak < 1.5).
+- stability on a full-scale square wave (peak < 1.5);
+- silence after a signal: at rest within 4096 samples, its output exactly zero from then on, and no subnormal sample inside or out, at 2× and 4× without FTZ (the slowest section, a = 0.944, falls below FLT_MIN within 1515 samples).
 
 Cost ([CPU baselines](../performance/baselines.md), Apple M1): about 17 ns per sample per channel for a 2× round trip and 27 ns for 4×. That is 0.08% and 0.13% of one core at 48 kHz.
 

@@ -70,6 +70,11 @@ public:
     /// in base-rate samples: what a plugin reports for delay compensation.
     [[nodiscard]] float latencySamples() const noexcept;
 
+    /// True when every channel's filter states are exactly zero: silence in
+    /// gives silence out. The states are flushed below FLT_MIN once per
+    /// block, so this follows within a few thousand samples of silence.
+    [[nodiscard]] bool isAtRest() const noexcept;
+
 private:
     struct ChannelFilters
     {
@@ -79,6 +84,7 @@ private:
         HalfbandDownsampler<halfband::stage1.size()> down1{halfband::stage1};
 
         void reset() noexcept;
+        [[nodiscard]] bool isAtRest() const noexcept;
     };
 
     OversamplingFactor requested;

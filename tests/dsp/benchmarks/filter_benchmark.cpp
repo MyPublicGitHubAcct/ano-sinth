@@ -1,14 +1,18 @@
-// CPU cost of the filter candidates (filter_candidates.hpp,
-// docs/dsp/filters.md): one mono filter channel for a 512-sample block at
-// 48 kHz, LP24 at 1 kHz, on a 110 Hz saw at -6 dBFS: typical settings (k 2,
-// drive 2) and heavy ones (k 6, drive 16, where the Newton solver works
-// hardest); oversampled models include the Oversampler. Then the cutoff set
-// every sample (a coefficient per sample), and the coefficient computations
-// alone. Tagged [!benchmark][filter]: run with tools/bench.sh "[filter]" in
-// relwithdebinfo. Also four independent channels interleaved per sample, as
-// a voice loop would run them.
+// CPU cost of the filter (LadderFilter, docs/dsp/filters.md): one channel
+// for a 512-sample block at 48 kHz, LP24 at 1 kHz on a 110 Hz saw at
+// -6 dBFS, Warm Drive on (tanh) and off (cubic), at typical settings (k 2,
+// drive 2) and heavy ones (k 6, drive 16, where Newton works hardest); a
+// stereo filter; a cutoff ramp in progress and the modulation input set
+// every 32 samples; bypass; inside the Oversampler at 2x and 4x; and a
+// 16-voice synth's 32 stereo filters. Tagged [!benchmark][filter]: run with
+// tools/bench.sh "[filter]" in relwithdebinfo. The candidate models it was
+// chosen from are benchmarked at commit a0e9899. Results:
+// docs/dsp/filters.md, docs/performance/baselines.md
 
-#include "../filters/filter_candidates.hpp"
+#include <anoesis/dsp/filters/ladder_filter.hpp>
+#include <anoesis/dsp/resampling/oversampler.hpp>
+
+#include <anoesis/test/buffer.hpp>
 
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -16,149 +20,152 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
-#include <span>
 #include <string>
 #include <tuple>
+#include <vector>
 
-using namespace anoesis::test::filters;
+using anoesis::dsp::LadderFilter;
+using anoesis::dsp::Oversampler;
 using anoesis::dsp::OversamplingFactor;
+using anoesis::test::Buffer;
 
 namespace
 {
 
 constexpr std::size_t blockSize = 512;
-constexpr double rate = 48000.0;
-using Block = std::array<float, blockSize>;
+constexpr float rate = 48000.0f;
 
-Block sawInput()
+std::vector<float> sawInput()
 {
-    Block x{};
+    std::vector<float> x(blockSize);
     double phase = 0.0;
     for (auto& v : x)
     {
         v = static_cast<float>(phase - 0.5);
-        phase += 110.0 / rate;
+        phase += 110.0 / static_cast<double>(rate);
         phase -= std::floor(phase);
     }
     return x;
 }
 
-template <typename Model>
-void configure(Model& model, float k, float drive)
+LadderFilter prepared(bool warm, float k, float drive, std::size_t channels = 1, float sampleRate = rate)
 {
-    model.prepare(rate);
-    model.setCutoff(1000.0);
-    model.setResonance(k);
-    model.setDrive(drive);
+    LadderFilter f;
+    f.setWarm(warm);
+    f.setCutoff(1000.0f);
+    f.setResonance(k);
+    f.setDrive(drive);
+    f.prepare({.sampleRate = sampleRate, .maxBlockSize = blockSize * 4, .numChannels = channels});
+    return f;
 }
 
-template <typename Model>
-void benchmarkModel(const std::string& name, Model model)
+void fill(Buffer& buffer, const std::vector<float>& input)
 {
-    const auto input = sawInput();
-    Block io{};
-    for (const auto& [k, drive, setting] :
-         {std::tuple{2.0f, 2.0f, "k 2, drive 2"}, std::tuple{6.0f, 16.0f, "k 6, drive 16"}})
+    for (std::size_t ch = 0; ch < buffer.numChannels(); ++ch)
     {
-        configure(model, k, drive);
-        BENCHMARK("filter: " + name + ", " + setting + ", x512")
-        {
-            io = input;
-            processBlock(model, std::span{io});
-            return io[blockSize - 1];
-        };
+        std::ranges::copy(input, buffer.channel(ch).begin());
     }
-}
-
-template <typename Model>
-void benchmarkModulated(const std::string& name, Model model)
-{
-    const auto input = sawInput();
-    Block cutoff{};
-    for (std::size_t i = 0; i < blockSize; ++i)
-    {
-        cutoff[i] = static_cast<float>(1000.0 * std::exp2(std::sin(static_cast<double>(i) * 0.01)));
-    }
-    Block io{};
-    configure(model, 2.0f, 2.0f);
-    BENCHMARK("filter: " + name + ", cutoff every sample, x512")
-    {
-        io = input;
-        processModulated(model, std::span{io}, std::span<const float>{cutoff});
-        return io[blockSize - 1];
-    };
-}
-
-/// Four independent channels, interleaved sample by sample: the throughput a
-/// voice loop can reach when the out-of-order core overlaps four dependency
-/// chains (per channel-sample: divide by 2048).
-template <typename Model>
-void benchmarkInterleaved(const std::string& name)
-{
-    const auto input = sawInput();
-    std::array<Model, 4> models{};
-    for (auto& m : models)
-    {
-        configure(m, 2.0f, 2.0f);
-    }
-    std::array<Block, 4> io{};
-    BENCHMARK("filter: " + name + ", 4 channels interleaved, k 2, drive 2, x2048")
-    {
-        for (std::size_t i = 0; i < blockSize; ++i)
-        {
-            for (std::size_t c = 0; c < 4; ++c)
-            {
-                io[c][i] = models[c].process(input[i]);
-            }
-        }
-        return io[3][blockSize - 1];
-    };
 }
 
 } // namespace
 
 TEST_CASE("Filters: CPU", "[!benchmark][filter]")
 {
-    benchmarkModel("Linear ZDF", LinearZdf{});
-    benchmarkModel("Linearised ZDF (tanh)", LinearisedZdf<TanhSat>{});
-    benchmarkModel("Linearised ZDF (cubic)", LinearisedZdf<CubicSat>{});
-    benchmarkModel("Feedback-only ZDF (tanh)", FeedbackOnlyZdf<TanhSat>{});
-    benchmarkModel("Newton ZDF, 1 step (tanh)", NewtonZdf<TanhSat, 1>{});
-    benchmarkModel("Newton ZDF (tanh)", NewtonZdf<TanhSat>{});
-    benchmarkModel("Newton ZDF (cubic)", NewtonZdf<CubicSat>{});
-    benchmarkModel("Newton ZDF (algebraic)", NewtonZdf<AlgebraicSat>{});
-    benchmarkModel("Unit-delay ladder (tanh)", UnitDelayLadder<TanhSat>{});
-    benchmarkModel("Linear SVF", LinearSvf{});
-    using HuovExact = Huovilainen<TanhSat, HuovilainenTuning::exact>;
-    benchmarkModel("Huovilainen exact, 2x", Oversampled<HuovExact>{OversamplingFactor::two});
-    benchmarkModel("Huovilainen exact, 4x", Oversampled<HuovExact>{OversamplingFactor::four});
-    benchmarkModel("Newton ZDF (tanh), 2x", Oversampled<NewtonZdf<TanhSat>>{OversamplingFactor::two});
-    benchmarkModel("Linearised ZDF (tanh), 2x", Oversampled<LinearisedZdf<TanhSat>>{OversamplingFactor::two});
-    benchmarkModel("Linearised ZDF (tanh), 4x", Oversampled<LinearisedZdf<TanhSat>>{OversamplingFactor::four});
-
-    benchmarkInterleaved<LinearZdf>("Linear ZDF");
-    benchmarkInterleaved<LinearisedZdf<TanhSat>>("Linearised ZDF (tanh)");
-    benchmarkInterleaved<NewtonZdf<TanhSat, 1>>("Newton ZDF, 1 step (tanh)");
-    benchmarkInterleaved<NewtonZdf<TanhSat>>("Newton ZDF (tanh)");
-    benchmarkInterleaved<NewtonZdf<CubicSat>>("Newton ZDF (cubic)");
-
-    benchmarkModulated("Linear ZDF", LinearZdf{});
-    benchmarkModulated("Newton ZDF (tanh)", NewtonZdf<TanhSat>{});
-    benchmarkModulated("Linearised ZDF (tanh)", LinearisedZdf<TanhSat>{});
-    benchmarkModulated("Huovilainen exact, 2x", Oversampled<HuovExact>{OversamplingFactor::two});
-
-    double hz = 1000.0;
-    BENCHMARK("filter: prewarpedGain() (std::tan), one call")
+    const auto input = sawInput();
+    for (const bool warm : {true, false})
     {
-        hz += 0.01;
-        return prewarpedGain(hz, rate);
+        const std::string name = warm ? "Warm on (tanh)" : "Warm off (cubic)";
+        for (const auto& [k, drive, setting] :
+             {std::tuple{2.0f, 2.0f, "k 2, drive 2"}, std::tuple{6.0f, 16.0f, "k 6, drive 16"}})
+        {
+            auto f = prepared(warm, k, drive);
+            Buffer buffer{1, blockSize};
+            BENCHMARK("filter: " + name + ", " + setting + ", x512")
+            {
+                fill(buffer, input);
+                f.process(buffer.block());
+                return buffer.channel(0)[blockSize - 1];
+            };
+        }
+
+        auto stereo = prepared(warm, 2.0f, 2.0f, 2);
+        Buffer two{2, blockSize};
+        BENCHMARK("filter: " + name + ", stereo (2 channels), k 2, drive 2, x512")
+        {
+            fill(two, input);
+            stereo.process(two.block());
+            return two.channel(1)[blockSize - 1];
+        };
+
+        auto ramping = prepared(warm, 2.0f, 2.0f);
+        Buffer buffer{1, blockSize};
+        bool high = false;
+        BENCHMARK("filter: " + name + ", a cutoff ramp every block, x512")
+        {
+            high = !high;
+            ramping.setCutoff(high ? 4000.0f : 500.0f);
+            fill(buffer, input);
+            ramping.process(buffer.block());
+            return buffer.channel(0)[blockSize - 1];
+        };
+
+        auto modulated = prepared(warm, 2.0f, 2.0f);
+        float octaves = 0.0f;
+        BENCHMARK("filter: " + name + ", modulation every 32 samples, x512")
+        {
+            fill(buffer, input);
+            for (std::size_t i = 0; i < blockSize; i += 32)
+            {
+                octaves = octaves > 2.0f ? -2.0f : octaves + 0.13f;
+                modulated.setCutoffModulation(octaves);
+                modulated.process(buffer.block().subBlock(i, 32));
+            }
+            return buffer.channel(0)[blockSize - 1];
+        };
+
+        for (const auto factor : {OversamplingFactor::two, OversamplingFactor::four})
+        {
+            Oversampler oversampler{factor};
+            oversampler.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
+            auto inner = prepared(warm, 2.0f, 2.0f, 1, rate * static_cast<float>(oversampler.ratio()));
+            BENCHMARK("filter: " + name + (factor == OversamplingFactor::two ? ", 2x" : ", 4x") +
+                      " (with the Oversampler), k 2, drive 2, x512")
+            {
+                fill(buffer, input);
+                inner.process(oversampler.upsample(buffer.block()));
+                oversampler.downsample(buffer.block());
+                return buffer.channel(0)[blockSize - 1];
+            };
+        }
+    }
+
+    auto bypassed = prepared(true, 2.0f, 2.0f);
+    bypassed.setBypassed(true);
+    Buffer buffer{1, blockSize};
+    BENCHMARK("filter: bypassed, x512")
+    {
+        fill(buffer, input);
+        bypassed.process(buffer.block());
+        return buffer.channel(0)[blockSize - 1];
     };
-    HuovExact huovilainen;
-    huovilainen.prepare(2.0 * rate);
-    BENCHMARK("filter: Huovilainen exact setCutoff(), one call")
+
+    // 16 voices x 2 filters, each stereo: 64 filter channels.
+    std::vector<LadderFilter> voices;
+    voices.reserve(32);
+    for (std::size_t v = 0; v < 32; ++v)
     {
-        hz += 0.01;
-        huovilainen.setCutoff(hz);
-        return huovilainen.thresholdScale();
+        voices.push_back(prepared(true, 2.0f, 2.0f, 2));
+        voices.back().setCutoff(500.0f + (100.0f * static_cast<float>(v)));
+        voices.back().reset(); // no ramp
+    }
+    Buffer stereo{2, blockSize};
+    BENCHMARK("filter: 16 voices x 2 stereo filters, Warm on, k 2, drive 2, x512")
+    {
+        for (auto& f : voices)
+        {
+            fill(stereo, input);
+            f.process(stereo.block());
+        }
+        return stereo.channel(1)[blockSize - 1];
     };
 }

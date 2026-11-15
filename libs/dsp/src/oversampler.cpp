@@ -98,6 +98,9 @@ AudioBlock Oversampler::upsample(const AudioBlock& input) noexcept
             }
             break;
         }
+        // Once per block: states below FLT_MIN become exactly zero.
+        f.up1.flushStates();
+        f.up2.flushStates();
     }
     return {channelPointers.data(), numChannels, numSamples * ratio()};
 }
@@ -132,7 +135,19 @@ void Oversampler::downsample(const AudioBlock& output) noexcept
             }
             break;
         }
+        f.down2.flushStates();
+        f.down1.flushStates();
     }
+}
+
+bool Oversampler::ChannelFilters::isAtRest() const noexcept
+{
+    return up1.isAtRest() && up2.isAtRest() && down2.isAtRest() && down1.isAtRest();
+}
+
+bool Oversampler::isAtRest() const noexcept
+{
+    return std::ranges::all_of(filters, [](const ChannelFilters& f) { return f.isAtRest(); });
 }
 
 float Oversampler::latencySamples() const noexcept

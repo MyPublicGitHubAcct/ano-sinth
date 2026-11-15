@@ -52,7 +52,7 @@ The register access is out of line, in a `.cpp`. The compiler doesn't model the 
 
 In the plugin, `PluginProcessor::processBlock` already uses JUCE's `juce::ScopedNoDenormals`, which does the same thing. `libs/dsp` can't use JUCE, so it has its own guard. The engine (M1.8) installs one at the top of its process call, so it is protected when hosted outside JUCE, in tests, and on an STM32.
 
-**Layer 2: `flushDenormal(x)`** returns 0 when |x| is below the smallest normal float, and x unchanged otherwise (inf and NaN pass through). Recursive processors in later milestones apply it to their feedback state, once per sample or once per block. That covers targets without an FTZ control, and code that runs outside a guarded callback. Where it is cheap enough to keep in Phase 3 will be decided by measurement.
+**Layer 2: `flushDenormal(x)`** returns 0 when |x| is below the smallest normal float, and x unchanged otherwise (inf and NaN pass through). Recursive processors in later milestones apply it to their feedback state, once per sample or once per block. That covers targets without an FTZ control, and code that runs outside a guarded callback. Where it is cheap enough to keep in Phase 3 will be decided by measurement. Two places it was measured (M1.3): the ladder filter flushes its states and its output per sample, at no measurable cost beside the Newton solve; the `Oversampler`'s halfbands flush their outputs per sample but their states once per block, because a flush inside the serial allpass chain cost 50–57% of the round trip. A flushed output can hide subnormal states behind it, so both expose `isAtRest()` (every state exactly zero), which their tests check ([filters.md](filters.md)).
 
 ## Trade-offs and alternatives
 

@@ -6,6 +6,33 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-15: M1.3 filter
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[filter]"` and `"[oversampling]"`, 100 samples per benchmark.
+- **What changed** ([filters.md](../dsp/filters.md)): a new `LadderFilter` (a Newton-solved ZDF transistor ladder, tanh with Warm Drive on and a cubic soft clip off, g every 32 samples). The `Oversampler`'s halfbands now flush their outputs per sample and their states once per block, so the `[oversampling]` rows are re-measured: unchanged within noise. (A first version that flushed inside the allpass chain measured 24.0 and 43.9 ns: +50–57%.) New rows: one channel at typical and heavy settings, stereo, a cutoff ramp, modulation every 32 samples, 2× and 4× with the `Oversampler`, bypass, and a 16-voice synth's 32 stereo filters.
+
+| Benchmark (ns / sample) | this commit | previous |
+|---|---:|---:|
+| filter: Warm on (tanh), k 2, drive 2 / k 6, drive 16 | 98.26 / 126.08 | |
+| filter: Warm off (cubic), k 2, drive 2 / k 6, drive 16 | 63.50 / 81.81 | |
+| filter: stereo (2 channels), Warm on / off | 191.58 / 126.28 | |
+| filter: a cutoff ramp every block, Warm on / off | 95.37 / 64.29 | |
+| filter: modulation every 32 samples, Warm on / off | 92.70 / 64.15 | |
+| filter: 2× with the Oversampler, Warm on / off | 201.46 / 139.42 | |
+| filter: 4× with the Oversampler, Warm on / off | 389.14 / 266.23 | |
+| filter: bypassed | 0.06 | |
+| filter: 16 voices × 2 stereo filters (64 channels), Warm on | 6,046.70 (29.0% of a core) | |
+| Oversampler 2× up+down | 15.71 | 16.71 |
+| Oversampler 4× up+down | 26.25 | 26.78 |
+
+### Observations
+
+- **A filter channel costs 98 ns (Warm on) or 64 ns (Warm off) per sample**, the Newton solve's serial chain of divisions and saturators. A full 16-voice patch with both parts' filters in stereo is 29% of a core: the most expensive section so far, and the first Phase 3 target (SIMD across the channels, which interleaving four already speeds 1.3–3× in the candidate benchmarks).
+- **Warm off saves 35%** (the cubic has no division), as the manual says it should save CPU.
+- The cutoff ramp and grid-rate modulation are free (within noise of settled): `tan` runs once per 32 samples. Bypass costs nothing.
+
+---
+
 ## 2026-11-14: M1.2 tempo sync
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[sync]"` and `"[lfo]"`, 100 samples per benchmark.

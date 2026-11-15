@@ -296,3 +296,43 @@ TEST_CASE("Oversampler: stable and bounded on a full-scale square wave", "[dsp][
     CHECK(std::isfinite(peak));
     CHECK(std::abs(peak) < 1.5f);
 }
+
+TEST_CASE("Oversampler: silence after a signal reaches exactly 0, with no subnormal sample", "[dsp][oversampling]")
+{
+    // Without FTZ, as on a target with no flush-to-zero control. The slowest
+    // allpass section (a = 0.944, at the low rate) decays by 0.944 per base
+    // sample, so a state of 1 falls below FLT_MIN (87.3 nepers) within
+    // 87.3 / -ln 0.944 = 1515 base samples, and the chain within a few
+    // sections' more. The states are flushed below FLT_MIN once per block
+    // (docs/dsp/denormals.md), so the round trip is at rest (isAtRest(): every
+    // state exactly zero) within 4096 samples of the input stopping, and the
+    // outputs are flushed per sample, so neither the upsampled view nor the
+    // output is ever subnormal.
+    const auto factor = GENERATE(OversamplingFactor::two, OversamplingFactor::four);
+    Oversampler oversampler{factor};
+    oversampler.prepare(monoSpec());
+    std::vector<float> input(16384, 0.0f);
+    std::ranges::copy(anoesis::test::sine(1000.0, baseRate, 1024, 1.0), input.begin());
+    Buffer buffer{1, input.size()};
+    std::ranges::copy(input, buffer.channel(0).begin());
+    bool innerSubnormal = false;
+    std::size_t restAt = input.size();
+    for (std::size_t start = 0; start < input.size(); start += blockSize)
+    {
+        const auto block = buffer.block().subBlock(start, blockSize);
+        const auto up = oversampler.upsample(block);
+        innerSubnormal = innerSubnormal ||
+                         std::ranges::any_of(up.channel(0), [](float v) { return std::fpclassify(v) == FP_SUBNORMAL; });
+        oversampler.downsample(block);
+        if (restAt == input.size() && oversampler.isAtRest())
+        {
+            restAt = start + blockSize;
+        }
+    }
+    CHECK(restAt < 1024 + 4096);
+    const auto output = buffer.channel(0);
+    CHECK_FALSE(innerSubnormal);
+    CHECK(std::ranges::none_of(output, [](float v) { return std::fpclassify(v) == FP_SUBNORMAL; }));
+    const auto nonZero = std::ranges::find_last_if(output, [](float v) { return v != 0.0f; });
+    CHECK(std::distance(output.begin(), nonZero.begin()) < 1024 + 4096);
+}

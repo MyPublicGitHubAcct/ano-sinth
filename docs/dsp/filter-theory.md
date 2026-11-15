@@ -70,7 +70,7 @@ Any fixed mix Σ cᵢ yᵢ (y0 = u) has the transfer function (Σ cᵢ p⁴⁻�
 
 Every response shares the loop, so every one resonates at the cutoff and self-oscillates at k = 4. The highpasses' passband doesn't drop with resonance: at high frequencies their numerator and the denominator both tend to s⁴. The 12 dB modes are still four-pole filters with 12 dB/oct skirts: LP12 with feedback is p²/(p⁴ + k), not a two-pole resonator. A two-pole loop of identical poles can't self-oscillate at all (its poles −1 ± j√k never reach the axis), which is one reason to keep the 12 dB modes inside the four-pole loop rather than build a separate two-pole filter.
 
-The weights are data: a new response is a row of five numbers ([filter_candidates.hpp](../../tests/dsp/filters/filter_candidates.hpp), `tapTable`).
+The weights are data: a new response is a row of five numbers (`filterTapMixes` in [ladder_filter.hpp](../../libs/dsp/include/anoesis/dsp/filters/ladder_filter.hpp)).
 
 ### The transistor ladder's saturation
 
@@ -184,7 +184,7 @@ The trapezoidal **state-variable filter** (SVF) is the other standard resonant f
 LP = 1/(s² + 2Rs + 1)     BP = s/(s² + 2Rs + 1)     HP = s²/(s² + 2Rs + 1)
 ```
 
-Resonance is low damping, and R = 0 is self-oscillation. It is cheaper than a ladder (two states) and its 12 dB modes are true two-pole responses with a passband that doesn't drop with resonance. It has no four-stage structure, though, so it can't be "four filter stages, each with a saturator", and its 24 dB modes would need two in series with two resonances. The prototype (`LinearSvf`) is a reference: cutoff exact to 0.01 dB, 14 ns per sample. A multimode SVF is in the Phase 2 list.
+Resonance is low damping, and R = 0 is self-oscillation. It is cheaper than a ladder (two states) and its 12 dB modes are true two-pole responses with a passband that doesn't drop with resonance. It has no four-stage structure, though, so it can't be "four filter stages, each with a saturator", and its 24 dB modes would need two in series with two resonances. The prototype (`LinearSvf`, at commit `a0e9899`) is a reference: cutoff exact to 0.01 dB, 14 ns per sample. A multimode SVF is in the Phase 2 list.
 
 ## References
 

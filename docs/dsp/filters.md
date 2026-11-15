@@ -5,7 +5,7 @@ Each part of a Brutalis voice has a filter: four saturating stages in a resonant
 - what is known about Sylenth1's filter;
 - the candidate models prototyped here, and why these;
 - what each measured: the linear response against the analog prototype in every mode, self-oscillation (pitch, threshold, level), passband loss, harmonics against drive, aliasing at 1×, 2×, and 4×, the distance from a converged solution, stability, block sizes, clicks and zipper noise, and CPU;
-- the options for the decision.
+- the decision, and how it is built (`LadderFilter`), measured and tested as built.
 
 Keytracking, the Filter Control's combining law, and the v3 oversampling options are later rounds. Their inputs are measured here anyway: self-oscillation tuning decides how well keytrack 10 can play in tune, and aliasing decides how much oversampling the filter needs.
 
@@ -23,7 +23,7 @@ So the evidence describes a **transistor-ladder-style loop**: four stages, a sat
 
 ## The candidates
 
-Seven models, all in [filter_candidates.hpp](../../tests/dsp/filters/filter_candidates.hpp). The six ladders share one loop (four one-poles, feedback k from the last) and the same six responses from tap mixes (`tapTable`, filter-theory.md), so the comparison is about discretisation and saturation, not about the modes.
+Seven models, all in `tests/dsp/filters/filter_candidates.hpp` at commit `a0e9899`. The six ladders share one loop (four one-poles, feedback k from the last) and the same six responses from tap mixes (`tapTable`, filter-theory.md), so the comparison is about discretisation and saturation, not about the modes.
 
 | Model | Discretisation | Saturators | Solver | Why it is here |
 |---|---|---|---|---|
@@ -41,9 +41,10 @@ Two things were left out on purpose. A model of the actual Moog circuit with its
 
 ## What they measured
 
-Measured by the hidden `[filter-report]` ([filter_report.cpp](../../tests/dsp/filters/filter_report.cpp)) and the `[filter]` benchmarks ([filter_benchmark.cpp](../../tests/dsp/benchmarks/filter_benchmark.cpp)):
+Measured at commit `a0e9899` by the hidden `[filter-report]` and the `[filter]` benchmarks, on the test-only prototypes. The report and the benchmarks now measure the built `LadderFilter` ([Results, as built](#results-as-built)). To rerun the candidates, build that commit:
 
 ```sh
+git checkout a0e9899
 cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[filter-report]"   # about 30 s
 tools/bench.sh "[filter]"
@@ -250,11 +251,11 @@ A cutoff set every sample (a `tan` per sample) costs nothing measurable in these
 - **Newton with tanh is the costliest ZDF**: 113–139 ns serial, a third of a core for a full 16-voice, two-filter, stereo patch, before SIMD. The cubic saturator cuts that by 26–46% (31% serial at k 2, 26% at k 6 and drive 16, 46% interleaved: 47 against 87 ns), more than its harmonics would suggest, because tanh's quotient sits in every iteration.
 - **Oversampling multiplies the filter's cost by the factor and adds the round trip** (17 ns at 2×, 27 ns at 4× per channel, [baselines](../performance/baselines.md)). Huovilainen, though cheap per inner sample, is not cheap per output sample: 194 ns at 2× against Newton's 113 at 1×.
 
-## Options for the decision
+## The decision
 
-*To be decided by the project owner. The decision and its date go here and in PLAN.md's Decisions log.*
+*Decided by the project owner on 2026-11-14: every recommendation below, as written (PLAN.md, Decisions log). The build follows it, with the details in [How it is applied here](#how-it-is-applied-here).*
 
-| Question | Recommendation | Why |
+| Question | Decision | Why |
 |---|---|---|
 | **Core model** | **The Newton ZDF ladder**: four trapezoidal one-poles with the cutoff prewarped, a zero-delay loop, a saturator at the loop input and in each stage (five), solved by Newton–Raphson from the linearised guess to 10⁻⁵, at most 8 iterations (a cap for the worst case; 5 was the most measured). | It is the structure the manual and the feature list describe (four stages, each saturating; five saturators). Prewarped and delay-free, it is exact where the parity questions are asked: the cutoff (0.00 dB, 0.0°), the threshold (4.000 at every cutoff and rate), the passband (1/(1 + k) to 0.1 dB), and self-oscillation that keeps its intervals across the keyboard to about a cent. It is bounded under every stress, bit-identical across block sizes, and allocation-free. Its cost (113 ns serial, 87 interleaved) is the price, and SIMD is the plan for it. The linearised solve (half the cost) is out because its detune changes with the cutoff, which breaks keytrack 10; Huovilainen because it needs 2× just to be in tune, is not exact even then, and costs more than Newton at 1×; the unit delay because it detunes by hundreds of cents. |
 | **Solver for Warm off** (or a Phase 3 economy) | Keep the same solver; vary the saturator (next row). "One Newton step" is the fallback if CPU needs it. | One step is −46 dB from converged on hard material (−70 at 2×) and saves 16–24%, but it changes nothing audible, so it can't be what Warm Drive switches. |
@@ -269,11 +270,123 @@ A cutoff set every sample (a `tan` per sample) costs nothing measurable in these
 
 ## How it is applied here
 
-*Written once the model is built (M1.3).*
+### The filter
+
+`LadderFilter` ([ladder_filter.hpp](../../libs/dsp/include/anoesis/dsp/filters/ladder_filter.hpp)) holds its controls, four `LinearSmoother`s (log₂ of the cutoff, k, drive, and a 0 → 1 fade for response changes), the grid's two gains, the current and previous tap mixes, and per channel (up to two: a stereo voice) four integrator states and the last loop input. It is 344 bytes, and a `BlockProcessor`.
+
+- **The loop** is the decided Newton ZDF ladder. Each sample, `solve<Sat>()` first linearises the five saturators at the state (each t(v) as v · t(v₀)/v₀, v₀ the stage's integrator state or the previous loop input) and solves that linear loop in closed form, then runs Newton–Raphson on the residuals Fᵢ = yᵢ − sᵢ − g·(t(yᵢ₋₁) − t(yᵢ)), y₀ = x − k·y4, until no stage moves by 10⁻⁵, at most 8 times. The Jacobian solve is the bidiagonal-plus-corner sweep of filter-theory.md: each Δᵢ as pᵢ + qᵢ·Δ4, then Δ4 = p4/(1 − q4), where 1 − q4 ≥ 1 because every slope is non-negative. The integrators then take sᵢ ← 2yᵢ − sᵢ.
+- **Warm Drive** picks the saturator once per run of samples, as a template argument: `TanhSaturator` (`fastTanh`, slope 1 − t², secant t/x) or `CubicSaturator` (x − (4/27)x³ to |x| = 1.5, then ±1; slope 1 − (4/9)x²; secant 1 − (4/27)x² inside the knee and 1/|x| outside, no division in the curve itself). Toggling it changes nothing else.
+- **Responses are data.** `filterTapMixes` holds the five weights of u, y1 … y4 for each `FilterResponse`; the output is their mix, with u taken after its saturator (the signal the first stage sees). `setResponse()` crossfades: the old mix (or, mid-fade, the blend so far) and the new one are interpolated over 10 ms, sample by sample, from the same state. This detail was not in the prototypes: switching the weights at once would step the output (a lowpass's y4 to a highpass's u), and the fade costs only the five-weight blend while it lasts.
+- **The cutoff** is a `LinearSmoother` on log₂(Hz), so a `setCutoff()` from a knob, a MIDI controller, or automation ramps over 10 ms in octaves. `setCutoffModulation()` adds octaves without a ramp. Both are read at grid points every 32 samples, counted from `reset()`: there the smoother is advanced 32 samples, the cutoff (control plus modulation) is clamped to [1 Hz, 0.495 fs], and g = tan(π·fc/fs) is computed once; across the next 32 samples g is interpolated linearly from the last grid point's value. A change therefore applies from the next grid point, at most 31 samples late, which is what makes the output independent of the block size. `currentCutoff()` reports the cutoff at the end of the current segment (for tests, and for a display).
+- **Resonance and drive** ramp linearly over 10 ms, sample by sample. k is clamped to [0, 64] and drive to [0, 1000]; NaN gives 0. The cutoff maps NaN and +∞ to 1 MHz (then the clamp below Nyquist) and −∞ to 1 Hz; a NaN modulation counts as 0.
+- **Bypass** returns before touching anything: the audio is bit for bit the input, and no smoother or grid advances. Leaving bypass calls `reset()`, so the filter starts from rest with every ramp finished, as a new note would.
+- **Channels** share the controls, the grid, and the ramps (computed once per run) and keep their own loop states. A channel beyond the prepared count is left untouched.
+- **Denormals.** The integrator states, the last loop input, and the output are flushed below FLT_MIN with `flushDenormal`, so silence reaches exact zero without FTZ (the slowest pole sets when: 1.8 s at 100 Hz, k 3) and no output is subnormal. The candidate measurements showed about 600 subnormal outputs before the states reached zero; flushing the output removes them for one compare per sample. `isAtRest()` is true once every state is exactly zero: the filter holds no energy, so silence in gives silence out (a voice may use it; the tests use it, because a flushed output alone can't show whether the states behind it are subnormal).
+- **Real time.** Nothing allocates; there are no tables. `prepare()` and `reset()` finish every ramp and clear the states, so a voice that starts a note calls `reset()` after setting its controls.
+
+### The Oversampler's halfbands
+
+The candidate measurements found the library's `Oversampler` never reaching silence without FTZ (875,000 subnormal outputs in 20 s). Two changes fix it. Every output of a halfband (each upsampler path's sample, the downsampler's) is flushed below FLT_MIN per sample, outside the recursion, so no sample is ever subnormal. And every allpass state is flushed once per block (`flushStates()`, called by `upsample()` and `downsample()`), so the states reach exact zero within a few thousand samples of the input stopping (`Oversampler::isAtRest()`). A first version flushed each section's output inside the chain, per sample: correct, but the compare sat in the chain's serial dependency and made the round trip 50–57% slower (2×: 15.8 → 24.0 ns per sample; 4×: 27.9 → 43.9). Per block, a state that crosses FLT_MIN can run subnormal at most until the block ends, once per decay; the round trip measures 15.7 and 26.3 ns, within noise of the 16.7 and 26.8 recorded before (baselines).
+
+### How a voice uses it
+
+```cpp
+// Per part (M1.4): the filter after the oscillators, before the amp envelope.
+filter.setResponse(responseFromTypeAndSlope);   // the parameter table maps Type x Slope
+filter.setBypassed(type == FilterType::bypass); // bypass costs nothing
+filter.setWarm(warmDrive);                      // Filter Control's switch
+filter.setCutoff(cutoffHz);                     // knob law and Filter Control: M1.9 and a later round
+filter.setResonance(k);                         // knob law: k = 6 x knob / 10 (F5)
+filter.setDrive(driveGain);                     // knob law: 0 to +24 dB (F8)
+// Modulation (M1.5): envelopes, LFOs, keytrack in octaves, read on the grid.
+filter.setCutoffModulation(modulationOctaves);
+// At a note-on from silence: filter.reset();
+filter.process(partBlock);                      // stereo, in place
+```
+
+The voice decides the rate the filter runs at (M1.8): it is prepared at whatever rate it is given, so the v3 Realtime and Render oversampling wrap the whole voice.
+
+## Results, as built
+
+From the `[filter-report]` ([filter_report.cpp](../../tests/dsp/filters/filter_report.cpp)), which now measures `LadderFilter` with Warm on and off, at 1× and inside the `Oversampler` at 2× and 4×, and the `[filter]` benchmarks ([filter_benchmark.cpp](../../tests/dsp/benchmarks/filter_benchmark.cpp)):
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[filter-report]"   # about 10 s
+tools/bench.sh "[filter]"
+```
+
+Every figure matches the chosen prototype's (the Newton ZDF rows above, tanh and cubic) to the printed digit: the built filter computes the same equations, and a settled cutoff gives the same g.
+
+| Measurement | Warm on (tanh) | Warm off (cubic) |
+|---|---|---|
+| At the cutoff, 100 Hz–19 kHz, 44.1 kHz | 0.00 dB, 0.0° | the same |
+| Cramping above a 10 kHz cutoff, LP24: 1× / 2× / 4× | 44.0 / 4.3 / 0.9 dB | the same |
+| Threshold, 110 Hz–14 kHz at 44.1 and 96 kHz | 3.998–4.003 | the same |
+| Self-oscillation at k 4.4, 55 Hz–3.5 kHz, 44.1 kHz | −35.78 to −34.40 cents | −32.35 to −31.09 cents |
+| The same at 2×, 44.1 kHz | −35.78 to −35.42 cents | −32.35 to −32.02 cents |
+| Level / pitch at k 4.05, 6, 8 (440 Hz) | −24.9 dBFS / −5.3; −11.9 / −101.2; −10.9 / −125.7 | −21.4 / −5.2; −10.7 / −64.3; −10.3 / −70.1 |
+| Passband, LP24 at k 4 / 8 | −14.0 / −21.0 dB | −14.0 / −21.3 dB |
+| THD at drive 1 / 4 / 16 | 0.50 / 14.4 / 34.3% | 0.23 / 15.3 / 36.3% |
+| Strongest alias, drive 4: 1× / 2× / 4× | −47.4 / −102.0 / −150.0 dB | −59.4 / −87.0 / −101.3 dB |
+| Strongest alias, drive 16: 1× / 2× / 4× | −33.2 / −65.7 / −120.6 dB | −31.8 / −53.6 / −75.4 dB |
+| Peak at k 8, drive 32, under an audio-rate sweep | 2.35 | 1.47 |
+| Silence after an impulse, 100 Hz, k 3, no FTZ: subnormal outputs, exactly 0 after | 0, 1.77 s (2× and 4× the same: 0, 1.76 and 1.74 s) | the same |
+| Block sizes 1 / 37 / 4096 (controls changed every 1000 samples), allocations | identical, 0 | identical, 0 |
+| A resonant cutoff step, re a unit step: `setCutoff()` / modulation / steady | −46.5 / −29.5 / −114.7 dB | −46.4 / −29.5 / −114.7 dB |
+
+At 2× and 4× the oversampled rows now also reach exact silence with no subnormal output (the prototypes' 875,000 subnormals are gone).
+
+**CPU** (ns per sample per channel, 48 kHz, LP24 at 1 kHz on a saw, `relwithdebinfo`, Apple M1 Ultra):
+
+| | Warm on (tanh) | Warm off (cubic) |
+|---|---:|---:|
+| k 2, drive 2 | 98.3 | 63.5 |
+| k 6, drive 16 | 126.1 | 81.8 |
+| Stereo, per sample (two channels) | 191.6 | 126.3 |
+| A cutoff ramp every block | 95.4 | 64.3 |
+| Modulation every 32 samples | 92.7 | 64.2 |
+| 2× with the `Oversampler` | 201.5 | 139.4 |
+| 4× with the `Oversampler` | 389.1 | 266.2 |
+| Bypassed | 0.06 | |
+| **16 voices × 2 stereo filters** (64 channels), per sample | **6,047 (29.0% of a core)** | |
+
+The built filter is 13% (tanh) and 19% (cubic) faster than its prototype (113 and 78 ns; the prototype also kept solver statistics and divided by each Jacobian diagonal twice). The ramps and the grid cost nothing measurable (a ramp in progress, or modulation every grid point, is within noise of settled). Warm off saves 35% at typical settings. The full 16-voice, two-filter, stereo case is 29% of a core, before SIMD across channels (Phase 3); a part's filter is per voice, so a patch with one part and four voices costs an eighth of that.
 
 ## Tests
 
-*Written once the model is built (M1.3).* The report's measurements become tests with derived tolerances: the small-signal response against the prototype for every response (exact at the cutoff, the cramping bound above it); the threshold at 4 and the self-oscillation pitch flat across the cutoff (and its value against k); the passband 1/(1 + k); harmonics against drive for each saturator; aliasing at the chosen factors; boundedness at k 8 and drive 32 under an audio-rate sweep; bypass bit-exact; block sizes 1/37/4096; subnormals and allocation; the g grid against per-sample g; Newton's iteration bound.
+[ladder_filter_test.cpp](../../tests/dsp/filters/ladder_filter_test.cpp), 24 tests, each tolerance derived in the test from the model or from the decay of the slowest pole:
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| The tap table | `filterTapMixes` against the six mixes written out independently | exact |
+| The small-signal response, every response, Warm on and off | the impulse response at −80 dBFS against the bilinear map of the prototype, at 100 Hz–19 kHz and k 0 and 3 | 4·10⁻⁵ absolute: the saturators are linear to 3·10⁻⁹ there, and float rounding over the response's decay is about 10⁻⁵ of a peak of at most 1 (measured: 8.7·10⁻⁶) |
+| At the cutoff, LP24 is 1/\|4 − k\| | the response at the cutoff, placed on an FFT bin, at 44.1/96/192 kHz and k 0, 2, 3.5 | 10⁻⁴: 65,536 samples are 34 time constants of the slowest case, so only rounding remains (measured: 2.7·10⁻⁵) |
+| Self-oscillation starts at k = 4 | a 10⁻¹⁵ impulse decays at k 3.99 and grows at 4.01, at 110 Hz–7 kHz and 44.1–192 kHz, Warm on and off | the bilinear map keeps the threshold exactly; the margin is the growth over 25 cycles (e^0.07) |
+| Self-oscillation is flat across the cutoff and falls with resonance | the pitch at k 4.4 within 1.5 cents from 55 Hz to 3.5 kHz; −35.8 (tanh) and −32.3 (cubic) cents at 440 Hz; flatter and louder as k rises; under 0 dBFS at k 8 | the report's figures (spread 1.17 and 1.07 cents; pitch within 0.04 cents of the pinned values, checked to 0.2) |
+| Silence stays silent | no input at k 8 gives exact zeros | exact |
+| The passband against resonance | LP24 at 20 Hz is the prototype and 1/(1 + k) within 0.01 dB; HP24 at 10 kHz stays within 0.1 dB of 0 dB | the prototype's own distance from those values (0.002 and 0.04 dB) |
+| Drive is a gain on the input | 4× drive at −80 dBFS gives 4× the output | 10⁻⁵ of the peak (the saturators: 5·10⁻⁸) |
+| Warm Drive's harmonics | tanh's H5, H7, H9 at least 3 dB above the cubic's at drive 1 | the report: 5.1, 5.5, 6.7 dB |
+| Bounded at maximum resonance and drive | k 8, drive 32, a full-scale saw, the cutoff swept 20 Hz–20 kHz at 500 Hz through the modulation input; DC steps to ±10 at k 4.5 | drive·max\|x\|/(1 + k) + 1, the loop's DC gain plus a self-oscillation under 0 dBFS (measured 2.35 against 4.6) |
+| Bypass | bit for bit the input; leaving bypass equals a fresh filter | exact |
+| A response change crossfades | during the fade the output is (1 − b)·LP24 + b·HP24 of the same state, b linear over 480 samples at 48 kHz | 10⁻⁶ (measured 6.6·10⁻⁸) |
+| A cutoff step ramps in log₂ over 10 ms on the grid | `currentCutoff()` after each sample: unchanged until the next grid point, then log₂ linear to the target over round(0.01 fs) samples | 10⁻⁵ relative |
+| A cutoff step at resonance clicks far less than a jump | the 10 ms ramp against a modulation step (one 32-sample ramp of g) | at least 10 dB less energy above 1 kHz (measured 17.0 dB) |
+| Block sizes | blocks of 1, 37, and 4096, with every control changed at fixed samples | bit for bit |
+| Stereo | two equal channels give equal outputs, equal to the mono filter; a silent channel stays silent | bit for bit |
+| The lifecycle contract | `checkLifecycleContract` in stereo | bit for bit |
+| Allocation | processing and every control call | none |
+| Silence reaches exactly 0 | an impulse at 100 Hz, k 3, without FTZ: no subnormal output; at rest (`isAtRest()`, every state exactly 0) within 2.0 s, and exactly 0 out from then on | the slowest pole: 87.3 time constants of 22.9 ms is 2.0 s from a peak of 1 (the output measured silent from 1.77 s) |
+| The loop is solved | against the same equations solved in double with `std::tanh` to 10⁻¹³: a 110 Hz saw at −6 dBFS, drive 4, k 3.8, 1 s | under −100 dB of the signal: per-sample errors of a few 10⁻⁷ (`fastTanh`, the quadratic Newton step) times a resonance gain of 5 (measured −119.7 dB; one Newton step: −81.2 dB) |
+| Between grid points g is interpolated linearly | a modulation step read at the next grid point: the output against a double-precision linear ladder fed g linear across the 32 samples, at −80 dBFS | 10⁻⁴ of the peak (float tan and the loop's rounding) |
+| reset() restarts the grid | a filter reset mid-segment, then a cutoff step, against a fresh filter | bit for bit |
+| Controls clamp, and NaN is safe | NaN, ±∞, −1, 0, 10⁹ for every control | finite output, cutoff in [1 Hz, fs/2] |
+| A randomized stress test | random controls at random samples, every response, Warm and bypass toggled, 44.1–192 kHz | finite, under drive·max\|x\|·16 + 1, bit for bit across blocks of 1, 37, 4096 |
+
+And for the halfbands, in [oversampler_test.cpp](../../tests/dsp/resampling/oversampler_test.cpp): after a signal, a round trip at 2× and 4× without FTZ is at rest (`isAtRest()`) within 4096 samples, its output exactly zero from then on, and no sample inside or out is ever subnormal (the slowest allpass section, a = 0.944, falls below FLT_MIN within 1515 samples).
+
+Red first: against an inert stub (a pass-through), 13 of the first 21 failed; the other 8 are properties a pass-through also has (silence, block sizes, stereo, allocation, the lifecycle). The halfband test failed against the unflushed sections. Then 26 deliberate breaks, one at a time: no prewarp; feedback from y3; no Newton iterations; one Newton iteration; linear tanh stages; a cubic knee of 1/3; a wrong HP12 weight; no response crossfade; bypass keeping its state; bypass still processing; g held per segment; no cutoff ramp; drive after the filter; no state flush; no output flush; the grid not reset; channels sharing a state; the modulation ignored; resonance capped at 4; the state update s = y; Warm inverted; and in the halfbands, the upsampler's or downsampler's states unflushed, and their outputs unflushed. The first pass caught all but four (one Newton iteration, no state flush, g held per segment, the grid not reset), which led to three tests (the double-precision reference, g's interpolation, the grid after `reset()`), `isAtRest()`, and the tighter 2.0 s bound; then all 25 were caught. The 26th, a Newton tolerance of 10⁻³ instead of 10⁻⁵, is not: Newton converges quadratically, so stopping when a step is under 10⁻³ leaves an error near 10⁻⁶, below anything audible or tested. The tolerance is a cost choice (Phase 3 can measure a looser one), not a correctness one.
 
 ## References
 
