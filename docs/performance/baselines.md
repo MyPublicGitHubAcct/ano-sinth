@@ -6,6 +6,31 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-14: M1.2 LFO
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[lfo]"`, 100 samples per benchmark.
+- **What changed** ([lfos.md](../dsp/lfos.md)): a new `Lfo` (a 32.32 fixed-point phase; piecewise-linear rows exact in runs from corner to corner; curved rows interpolated linearly every 32 samples; jumps slewed over 1 ms, at most 1/16 cycle; gain and offset ramped over 10 ms). No existing code changed, so no existing row is re-measured. New rows: one 512-sample block per row at 3 Hz through `process()`, the sine and saw through `next()` per sample, a 1 kHz saw (an edge and a slew every 48 samples), a sine with its gain ramping, and a 16-voice synth's 32 LFOs.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| LFO: sine 3 Hz, `process()` | 0.62 |
+| LFO: saw / triangle / pulse 3 Hz, `process()` | 0.19 / 0.19 / 0.20 |
+| LFO: S&H 3 Hz, `process()` | 0.10 |
+| LFO: smooth / Lorenz 3 Hz, `process()` | 0.54 / 0.65 |
+| LFO: sine / saw 3 Hz, `next()` per sample | 6.18 / 6.92 |
+| LFO: saw 1 kHz, `process()` | 0.50 |
+| LFO: sine 3 Hz with its gain ramping, `process()` | 1.53 |
+| LFO: 32 LFOs (16 voices × 2), sine and saw, `process()` | 12.83 (0.40 per LFO) |
+
+### Observations
+
+- **A 16-voice synth's 32 LFOs cost 12.8 ns per sample, 0.06% of a core**: half the 64 envelopes, and a tenth of the per-sample prototypes (140 ns, measured at `dae814e`; [lfos.md](../dsp/lfos.md#cpu)).
+- **The exact rows are the cheapest**: a run of a straight segment, or of a held value, is one loop with no per-sample branch. The curved rows add a `sin`, a smoothstep, or Lorenz steps once per 32 samples.
+- **`next()` costs 6–7 ns**: it is `process()` of one sample, so it pays the run setup every call. Blocks should go through `process()`.
+- A ramping gain costs about 1 ns per sample for its 10 ms (the per-sample smoother path).
+
+---
+
 ## 2026-11-14: M1.2 ADSR envelope
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[envelope]"`, 100 samples per benchmark.

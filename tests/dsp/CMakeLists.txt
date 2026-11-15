@@ -13,6 +13,7 @@ add_executable(anoesis_dsp_tests
     control/adsr_test.cpp
     control/envelope_report.cpp
     control/lfo_report.cpp
+    control/lfo_test.cpp
     control/smoother_test.cpp
     control/stereo_gain_test.cpp
     generators/white_noise_test.cpp

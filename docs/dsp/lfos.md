@@ -5,7 +5,7 @@ A low-frequency oscillator (LFO) is a modulation source: a slow, repeating (or r
 - what an LFO has to get right that an audio oscillator doesn't, and the other way round;
 - what is known about Sylenth1's LFOs;
 - the candidate models prototyped here, and what each one measured: phase accuracy over hours, discontinuities and clicks, smear at audio rate, retriggers, the evaluation rate, the random waveforms, rate changes, block sizes, denormals, allocation, and CPU;
-- the options for the decision.
+- the decision, how it is built, and the tests that pin it down.
 
 Read [band-limited-oscillators.md](band-limited-oscillators.md) (minBLEP and PolyBLEP), [oscillator-waveforms.md](oscillator-waveforms.md) (waveforms as data), [oscillator-phase.md](oscillator-phase.md) (fixed-point phase, retriggers), [envelopes.md](envelopes.md) (the click metric), and [parameter-smoothing.md](parameter-smoothing.md) first.
 
@@ -64,9 +64,10 @@ The full source table, with confidence ratings and the open questions, is in the
 
 ## The candidates and what they measured
 
-Measured by the hidden `[lfo-report]` and `[lfo-long-report]` ([lfo_report.cpp](../../tests/dsp/control/lfo_report.cpp)) and the `[lfo]` benchmarks ([lfo_benchmark.cpp](../../tests/dsp/benchmarks/lfo_benchmark.cpp)), on test-only prototypes ([lfo_candidates.hpp](../../tests/dsp/control/lfo_candidates.hpp)):
+Measured at commit `dae814e` by the hidden `[lfo-report]` and `[lfo-long-report]` and the `[lfo]` benchmarks, on test-only prototypes (`tests/dsp/control/lfo_candidates.hpp` at that commit). The report and the benchmarks now measure the built `Lfo` ([Results, as built](#results-as-built)). To rerun the candidates, build that commit:
 
 ```sh
+git checkout dae814e
 cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[lfo-report]"        # about 25 s
 build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[lfo-long-report]"   # three hours of each accumulator, a few minutes
@@ -275,11 +276,11 @@ Nanoseconds per sample, 48 kHz, `relwithdebinfo`, Apple M1 Ultra (`tools/bench.s
 - **Linear interpolation every 32 samples cuts that to 18.5 ns** for 32 LFOs (0.09% of a core). Holding saves another 10 ns, at the error measured above.
 - The slew costs about 1 ns per sample on a saw. Fixed 64 costs what fixed 32 does. Float and double phase cost more than fixed point here (the float-to-integer conversion for the table lookup). Lorenz costs about 11 ns: a midpoint step of three coupled equations per sample.
 
-## Options for the decision
+## The decision
 
-*To be decided by the project owner. The decision and its date go here and in PLAN.md's Decisions log.*
+**Chosen by the project owner on 2026-11-14: every recommendation below** (PLAN.md, Decisions log). Building it changed one detail: a jump is slewed from the last output sample, not from the old segment extended to the new sample. The randomized stress test found the difference. At audio rate the extended segment overshoots by up to a sample's worth of slope (a 10 kHz saw reached 1.46), while the last output is always a value the LFO has really had.
 
-| Question | Recommendation | Why |
+| Question | Decided | Why |
 |---|---|---|
 | **Phase** | **64-bit fixed point (32.32)** | Exact for hours (5·10⁻¹¹ cycles in three), so a synced LFO can't drift. No double needed (Cortex-M4F), and it costs what 32 bits does. Float is out (8% off at 0.01 Hz). |
 | **Waveform set** | The **11 rows above**: Vintage Synth's 10 as the oscillator's shapes plus a falling Ramp, Lorenz and S&H, and **Smooth** (smoothed random) as a provisional 11th. All bipolar (±1); start phases as in the table. Data rows, so M1.13 changes rows, not code. | The only list of names, with the count and v1.1's S&H. The oscillator's rows are reused where the names match (L2). |
@@ -295,11 +296,146 @@ Nanoseconds per sample, 48 kHz, `relwithdebinfo`, Apple M1 Ultra (`tools/bench.s
 
 ## How it is applied here
 
-*Written once the model is built (M1.2).*
+### The LFO
+
+`Lfo` ([lfo.hpp](../../libs/dsp/include/anoesis/dsp/control/lfo.hpp)) holds its settings, a 64-bit phase, the state of every kind of row (a segment, a held value, a pair of random values, a Lorenz state, a grid segment), a slew, two `LinearSmoother`s for gain and offset, and a `Random`. It is 328 bytes, a value type with no tables of its own and no allocation.
+
+- **The table.** `lfoShapes` is a `constexpr` array of `LfoShape` rows: a kind (`periodic`, `sampleHold`, `smoothRandom`, `lorenz`), a `WaveShape` for the periodic ones, and a start phase. The Sine, Saw, Triangle, pulses, and TriSaw are the oscillator's own rows (`waveShapes`). The Ramp is one segment from +1 to −1. `isCurved()` sorts the rows into exact and interpolated. A new periodic waveform is a row; a new kind of generator is a case in four small switches.
+- **The phase** is a 64-bit integer, 2⁶⁴ per cycle, whose top 32 bits are the oscillators' phase. It is set from the rate in double, at the control call only (one division and one rounding), and every sample adds it exactly. `phase()` and `phaseIncrement()` expose it.
+- **Exact rows in runs.** The piecewise-linear rows and S&H render a run at a time, up to the sample before the next corner. The number of samples to the corner is one 64-bit division per corner, not a test per sample. Within a run each sample is the corner's value plus its slope times the phase since the corner: the same expression `WaveShape::valueAt` uses, so it is exact and the same however a render is split.
+- **Curved rows on a grid.** Every 32 samples from the last (re)start, the row is evaluated at the next grid point: `sin` for the sine; smoothstep between the current pair for the smoothed random, which draws a new value for each cycle start the 32 steps pass; Lorenz steps of at most 0.02 time units for the attractor. The run in between is a straight line from the last grid value, which vectorizes. A rate change reaches a curved row at its next grid point, at most 31 samples later.
+- **Jumps.** At a corner with a jump, a new S&H cycle, a retrigger, or a waveform change, the slew offset becomes the last output minus the new value. It then falls linearly to exactly 0 over the slew's length: round(1 ms × rate), or 1/16 of a cycle if that is shorter, at least one sample. A jump during a slew starts a new one from the current output. A jump smaller than 2⁻²⁴ is not slewed. Corners that only bend (the triangle's) need nothing.
+- **Triggers.** `restart()` starts the cycle at once with no slew, for a voice from silence: the random rows draw new values, and the Lorenz row runs on. `retrigger()` starts the cycle with the jump slewed, for a sounding voice. Before the first sample it is `restart()`. `process(out, events)` applies `LfoEvent`s at their sample offsets.
+- **Gain and offset.** out = gain × (wave + offset), gain clamped to [0, 1] and offset to [−1, 1]. A value below 2⁻²⁴ in size is 0, so no output can be subnormal. NaN is ignored. A change ramps linearly over 10 ms, like the oscillator's gains. Settled, the block is one multiply-add loop.
+- **The Lorenz step** is `lorenzStep()`, a midpoint step with every product and sum its own statement, so no compiler fuses them (above). `reset()` settles a seeded start onto the attractor with 1000 steps (about 10 µs).
+- **`next()`** is `process()` of one sample, so the two agree bit for bit. It costs about 6 ns a call (the run setup), so a block should go through `process()`.
+
+### How a voice uses it
+
+```cpp
+// At a note-on (M1.4/M1.5): Free off restarts or retriggers the voice's own LFO;
+// Free on copies the global free-running one, which then runs in step with it.
+if (lfoFree)
+    voiceLfo = globalLfo;                  // a value type: phase, random state, everything
+else if (voiceWasSilent)
+    voiceLfo.restart();
+else
+    voiceLfo.retrigger();
+
+voiceLfo.setFrequency(rateHz * keytrackRatio);   // per voice; synced rates arrive in Hz too
+voiceLfo.setGain(gainKnob / 10.0f + gainModulation);
+voiceLfo.process(lfoBlock);                      // then scaled per destination (M1.5)
+```
+
+The knob laws live in the parameter table (M1.9). They are working hypotheses: Rate f = 0.1 Hz × 1000^x for knob x ∈ [0, 1]; Gain = knob / 10; Offset = knob / 10 for knob −10..10 (L6, L7).
+
+## Results, as built
+
+From the `[lfo-report]` ([lfo_report.cpp](../../tests/dsp/control/lfo_report.cpp)), which now measures `Lfo` against a naive reference (the same rows read at the same 64-bit phase every sample, with no slew and no grid), and the `[lfo]` benchmarks ([lfo_benchmark.cpp](../../tests/dsp/benchmarks/lfo_benchmark.cpp)):
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[lfo-report]"   # about 2 s
+tools/bench.sh "[lfo]"
+```
+
+Every figure matches the chosen prototype's, measured the same way at 48 kHz:
+
+| Measurement | Lfo, as built | Naive reference |
+|---|---|---|
+| Saw edges, 1 / 20 Hz: LFO / amplitude / cutoff, against naive | −18.6 / −22.3 / −22.0, −18.6 / −22.5 / −22.0 dB | 0 |
+| Pulse edges, 1 / 20 Hz: the same | −18.6 / −22.3 / −33.5, −18.6 / −22.5 / −33.8 dB | 0 |
+| One edge as a click, re a unit step | −12.6 dB | +6.0 dB |
+| Saw at 1 kHz: h1 / h5 against naive, worst alias | −0.1 / −1.4 dB, −33.4 dB | −29.2 dB |
+| Retrigger at a sine's trough: largest step, click, on amplitude | 0.042, −12.6 dB, −20.3 dB | 2.000, +6.0 dB, 0.0 dB |
+| A rate change, 2 → 7 Hz: largest step re the slope | sine 0.961, triangle and saw 1.000 | 0.966, 1.000 |
+
+The first samples after a restart are each row's start value, at once (sine and pulse 1.0000, saw −1.0000, triangle 1.0000).
+
+**The curved rows' interpolation**, a sine against the ideal at every sample (spurs as in the evaluation-rate table above):
+
+| Sine | Control error | Amplitude spur | Pitch spur | Ideal sine's own floor |
+|---|---:|---:|---:|---|
+| 0.5 Hz | 7.2·10⁻⁷ | −132.2 | −135.7 | −132.2, −135.7 |
+| 5 Hz | 5.5·10⁻⁵ | −109.7 | −134.3 | −133.0, −134.8 |
+| 40 Hz | 3.5·10⁻³ | −73.3 | −102.4 | −131.9, −134.6 |
+| 200 Hz | 8.6·10⁻² | **−43.7** | −43.0 | −131.2, −42.0 |
+
+The error grows with the square of the rate, so a curved row at a few hundred hertz is coarse: a 200 Hz sine on the amplitude has a tone 44 dB down. (Its pitch spur is the vibrato's own: the ideal sine's is −42.0 dB at that rate.) If audio-rate sine LFOs matter, the grid could shrink with the rate (at most 1/32 of a cycle, say) at a small cost. That is a Part 2 or Phase 3 item, not part of this decision.
+
+**The random rows** (10 Hz, 40 s per voice, 16 voices): S&H σ 0.573, cycle-to-cycle r −0.002; Smooth σ 0.494, r 0.488; Lorenz σ 0.396. Adjacent seeds |r| 0.024–0.042. The same seed gives the same output, bit for bit. **Lorenz against its rate**: σ 0.36–0.40 and 0.34–0.44 zero crossings per cycle from 0.05 to 500 Hz.
+
+CPU, nanoseconds per sample, 48 kHz, one 512-sample block ([baselines](../performance/baselines.md)):
+
+| Row | `process()` |
+|---|---:|
+| Sine 3 Hz | 0.62 |
+| Saw / triangle / pulse 3 Hz | 0.19 / 0.19 / 0.20 |
+| S&H 3 Hz | 0.10 |
+| Smooth / Lorenz 3 Hz | 0.54 / 0.65 |
+| Saw 1 kHz (an edge, and a slew, every 48 samples) | 0.50 |
+| Sine with its gain ramping | 1.53 |
+| `next()` per sample, sine / saw | 6.18 / 6.92 |
+| **32 LFOs (16 voices × 2), sine and saw** | **12.8** |
+
+Computing in runs cut 32 LFOs from 140 ns per sample (the per-sample prototypes) to 12.8, which is 0.06% of a core and half the cost of the 64 envelopes. The exact rows are cheaper than the interpolated ones, because a run of a straight segment is one loop with no per-sample branch.
 
 ## Tests
 
-*Written once the model is built (M1.2).* The report's measurements become tests with derived tolerances: the table's values and start phases, phase accuracy at 0.01 Hz to audio rate (frequency error bounded by 2⁻³² of a cycle per sample), the slew's length and shape at edges, S&H steps and retriggers, the 1/16-cycle cap, the first sample after a reset, interpolation error per 32 samples against its bound, sample-accurate retriggers, block sizes 1/37/4096, rate changes, the random rows' statistics and determinism, the Lorenz step against an unfused reference, subnormals, allocation, and the lifecycle contract.
+[lfo_test.cpp](../../tests/dsp/control/lfo_test.cpp) (`[lfo]`), 22 tests. The references are computed in double from each waveform's definition (not from the table under test), at the exact phase the LFO reports. The tolerances are derived next to each test:
+
+- **Linear rows:** the slope times the phase's conversion to float and its dropped low 32 bits, plus one rounding each for the product and the sum.
+- **Interpolated sine:** the curvature bound 4π² · spacing² / 8, plus `sin`'s float error and the interpolation's arithmetic.
+- **Statistics:** 5 standard errors.
+
+The tests:
+
+- **Lifecycle and defaults.** `Preparable`. `reset()` and a second `prepare()` reproduce a fresh LFO bit for bit, for every row. By default it is a 1 Hz sine at gain 1, offset 0, starting at +1.
+- **The table.** The periodic rows equal the oscillator's, sample for sample. The Ramp is the saw negated. Each row has its kind and its start value, from a reset and from a `restart()` while sounding.
+- **Exact rows.** Every sample of every piecewise-linear row at four rates and four frequencies (0.01 Hz to 333 Hz), away from its slews.
+- **Curved rows.** The sine at four rates and five frequencies (0.01 Hz to 400 Hz) within the interpolation bound, and on the grid within `sin`'s own error.
+- **The phase.** The increment is the nearest 2⁻⁶⁴ of a cycle. After 1.2 million samples the phase is exactly the start plus that many increments.
+- **Slews.** A saw's edge at four rates and four frequencies (1 Hz to 3 kHz): exactly round(1 ms × rate) or 1/16 of a cycle, a straight line from the last sample before the edge.
+- **Retrigger and restart.** For five rows at four rates: a retrigger continues from the last output, slews to the restarted cycle, and from then on equals a restarted LFO bit for bit. A restart equals a fresh LFO at once.
+- **Sample-accurate triggers** at offsets 0, 1, 200, and 511.
+- **A rate change** is continuous for four rows, and the LFO does move at the new rate.
+- **Gain and offset.** The output is exactly gain × (wave + offset) for five pairs. A change ramps linearly over round(10 ms × rate) samples and lands exactly.
+- **Controls** clamp, ignore NaN, and flush below 2⁻²⁴. An out-of-range waveform is the sine.
+- **S&H.** One value per cycle, held, its steps slewed. Uniform over 20,000 cycles (mean and variance within 5 standard errors). Independent from cycle to cycle. A restart draws a new value.
+- **Smooth.** Continuous (no step beyond its slope bound), within ±1, and it moves.
+- **Lorenz.** `lorenzStep` equals an unfused reference (every operation rounded through a volatile store) bit for bit over 200,000 steps at four step sizes. The row stays within ±1, is continuous, and has the same zero-crossing rate per cycle within a factor 2 at 0.5, 5, and 50 Hz.
+- **Seeds.** The same seed gives the same output; adjacent seeds are uncorrelated (|r| ≤ 0.2 over 2000 cycles, for S&H, Smooth, and Lorenz).
+- **A copy** made mid-run continues exactly as the original (Free). Its own rate change moves it alone.
+- **A waveform change** continues from the last output and slews to the new row at the same phase.
+- **Block sizes.** A script of retriggers, restarts, and rate, gain, offset, and waveform changes, for every row at four rates, rendered in blocks of 1, 37, and 4096: bit-identical. `next()` equals `process()`.
+- **No subnormals** for every row at three rates, with a gain of 10⁻³⁵ (flushed) and with a retrigger every 12,000 samples. **No allocation** in any control, trigger, process call, or copy.
+- **Stress.** At each of the four rates, 200,000 samples of random waveforms, rates (0, past Nyquist, NaN, 0.01 Hz to 10 kHz), gains, offsets, and triggers: finite, within ±2.25 (the wave passes ±1 by at most the triangle's slope × 1/16 cycle), free of subnormals, and bit-identical in blocks of 1, 37, and 4096.
+
+**Every test was checked to fail first.** Against an inert stub with the same interface, 16 of the 22 tests failed. The other 6 pin properties that silence also has (the lifecycle, sample-accurate triggers, block sizes, subnormals, allocation, stability), and the breaks below check them. Then 23 deliberate breaks in `Lfo`, each caught and each restored. Every test fails under at least one break.
+
+| Break | Tests that failed |
+|---|---|
+| no slew: jumps are steps | slew, retrigger, waveform change, S&H |
+| the slew not capped at 1/16 cycle | slew, S&H, exact rows, stress |
+| a slew one sample too long | 5, including slew, retrigger, exact rows |
+| a crossing's slew from the extended old segment (the first version) | slew |
+| a retrigger restarts, with no slew | retrigger |
+| a restart slews | retrigger, S&H, table |
+| a waveform change not slewed | waveform change |
+| a 32-bit phase increment | the phase |
+| curved rows held, not interpolated | curved rows, rate change, Lorenz, Smooth |
+| the grid not restarted by a retrigger | retrigger, lifecycle, table, stress |
+| a fused multiply-add in the Lorenz step | Lorenz |
+| S&H draws no value at a cycle start | S&H, seeds, copy |
+| Smooth draws nothing at its cycle starts | Smooth, seeds |
+| gain and offset jump instead of ramping | gain and offset, stress |
+| output = gain × wave + offset | gain and offset, block sizes, stress |
+| the sine starts at 0 / the triangle at its bottom / the Ramp rises | defaults, table, curved rows, retrigger / table / table, exact rows, waveform change |
+| triggers one sample late | sample-accurate triggers |
+| reset doesn't reseed | lifecycle |
+| a tiny gain not flushed | controls, subnormals |
+| no Nyquist clamp | controls |
+| an allocation in `process()` | allocation |
 
 ## References
 
