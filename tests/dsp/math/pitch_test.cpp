@@ -96,3 +96,26 @@ TEST_CASE("Tuning: whole octaves are exact frequency ratios", "[dsp][math][tunin
         CHECK_THAT(noteToFrequency(69.0f + Tuning{.octaves = octaves}.offset()), WithinULP(expected, 0));
     }
 }
+
+TEST_CASE("masterTuneSemitones: the master tune as a note offset", "[dsp][math]")
+{
+    using anoesis::dsp::masterTuneSemitones;
+    CHECK_THAT(masterTuneSemitones(440.0f), WithinULP(0.0f, 0));
+    CHECK_THAT(masterTuneSemitones(880.0f), WithinULP(12.0f, 0));
+    CHECK_THAT(masterTuneSemitones(220.0f), WithinULP(-12.0f, 0));
+    // 432 Hz is 31.766 cents below concert pitch.
+    CHECK_THAT(masterTuneSemitones(432.0f), WithinAbs(-0.317667, 1e-5));
+    // A note plus the offset, at 440, is the note at the master tune: the
+    // pitch a keytracked filter (or anything that works in notes) follows.
+    // Tolerance as for noteToFrequency (1e-6 relative), plus log2's rounding
+    // carried through the exp2 (about 1e-7).
+    for (const float tune : {415.0f, 432.0f, 438.0f, 442.0f, 444.0f, 466.0f})
+    {
+        for (const float note : {21.0f, 45.5f, 69.0f, 100.25f, 127.0f})
+        {
+            CAPTURE(tune, note);
+            CHECK_THAT(noteToFrequency(note + masterTuneSemitones(tune)),
+                       WithinRel(noteToFrequency(note, tune), 1.2e-6f));
+        }
+    }
+}

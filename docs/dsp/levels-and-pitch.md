@@ -41,6 +41,7 @@ MIDI numbers semitones from C−1 (note 0) up to G9 (note 127). A4, the A above 
 
 - `noteToFrequency(note, referenceHz = 440)` and `frequencyToNote(hz, referenceHz = 440)` implement the 12-TET formulas. `referenceHz` *is* the master tune.
 - `centsToRatio(cents)` and `referenceFromCents(cents)` convert a cents-based master tune (for example −31.77 cents for A4 = 432 Hz) to a reference frequency.
+- `masterTuneSemitones(referenceHz)` = 12·log₂(referenceHz / 440) goes the other way, to a note offset, so `noteToFrequency(n + offset)` is `noteToFrequency(n, referenceHz)`. Code that works in notes rather than Hz, such as a keytracked filter ([keytracking.md](keytracking.md)), adds it to its pitch. It is one `log2`, computed once per block.
 
 The division by 12 is a true division rather than multiplication by a rounded 1/12. That keeps octaves exact: note 81 is exactly 880 Hz, not 880.00006.
 
@@ -60,7 +61,8 @@ These functions call `std::pow`, `std::exp2`, and `std::log2`. They suit per-not
   - every quarter tone from note 0 to 127 matches the double-precision formula to 1e-6 relative, which is 0.0017 cents (the derivation is in the test);
   - the master tune (432, 415, and 444 Hz) moves A4 and scales every note by the same ratio;
   - the cents form gives 432 Hz at −31.766 cents;
-  - `frequencyToNote` round-trips to within 0.01 cents.
+  - `frequencyToNote` round-trips to within 0.01 cents;
+  - `masterTuneSemitones` is exact at octaves (±12 at 880 and 220 Hz, 0 at 440), −0.31767 at 432 Hz, and a note plus it is the note at that master tune, for six tunings and five notes, to 1.2·10⁻⁶ relative.
 
 ## References
 

@@ -6,9 +6,7 @@ Keytracking makes a filter's cutoff follow the note being played. Sylenth1 has o
 - what is known about Sylenth1's keytracking;
 - the candidate models prototyped here, and why these;
 - what each measured: the law against the reference, intervals at keytrack 10 from C1 to C7, the cutoff clamp near Nyquist, the master tune, a portamento glide and a bend sweep, the zipper of each feeding rate, a legato step at high resonance, block sizes, subnormals, allocation, and CPU;
-- the recommendation, for the project owner's decision.
-
-**Status (2026-11-15): stage 1. The evidence is gathered and five models are measured. The decision is open.** Nothing is built in `libs/dsp` yet. The prototypes are test-only, in [keytrack_candidates.hpp](../../tests/dsp/filters/keytrack_candidates.hpp).
+- the decision, and how it is built (`keytrackOctaves`, `keytrackSource`, `masterTuneSemitones`), measured and tested as built.
 
 Read [filters.md](filters.md) and [filter-theory.md](filter-theory.md) first. The self-oscillation detune measured there is what decides how far keytrack 10 can play in tune. [levels-and-pitch.md](levels-and-pitch.md) covers notes, cents, and the master tune.
 
@@ -83,7 +81,7 @@ One consequence is for later rounds. If the keytrack adds to the cutoff in knob 
 
 ## The candidates
 
-Five models, all in [keytrack_candidates.hpp](../../tests/dsp/filters/keytrack_candidates.hpp). Each turns a `VoicePitch` (key, glide, bend, master tune) and the amount a into an offset in octaves for `setCutoffModulation`, except (e), which goes through `setCutoff`. The reference note and the amount are inputs, so F17 changes a value, not a model.
+Five models, all in `tests/dsp/filters/keytrack_candidates.hpp` at commit `3948d99`. Each turns a `VoicePitch` (key, glide, bend, master tune) and the amount a into an offset in octaves for `setCutoffModulation`, except (e), which goes through `setCutoff`. The reference note and the amount are inputs, so F17 changes a value, not a model.
 
 | Model | Offset in octaves | Why it is here |
 |---|---|---|
@@ -99,11 +97,12 @@ Drift is left out of (b). The inventory's hypothesis (O25) is that drift moves t
 
 ## What they measured
 
-Measured by the hidden `[keytrack-report]` ([keytrack_report.cpp](../../tests/dsp/filters/keytrack_report.cpp), about 25 s) and the `[keytrack]` benchmarks ([keytrack_benchmark.cpp](../../tests/dsp/benchmarks/keytrack_benchmark.cpp)), on `LadderFilter` as built:
+Measured at commit `3948d99` by the hidden `[keytrack-report]` and the `[keytrack]` benchmarks, on the test-only prototypes and `LadderFilter` as built. The report and the benchmarks now measure the built keytracking ([Results, as built](#results-as-built)). To rerun the candidates, build that commit:
 
 ```sh
+git checkout 3948d99
 cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
-build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[keytrack-report]"
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[keytrack-report]"   # about 25 s
 tools/bench.sh "[keytrack]"
 ```
 
@@ -266,11 +265,11 @@ Every model is a pure function of the voice's pitch at a grid point, so feeding 
 
 Keytracking costs nothing that matters: at most 0.23 ns per sample per voice to evaluate, and feeding at every grid point is within the filter's run-to-run noise (+1.2%, while the filter alone measures 91–97 ns across runs). (b)'s `log2` of the master tune is the same for every voice, so a build would compute it once per block.
 
-## Recommendation
+## The decision
 
-*Awaiting the project owner's decision (2026-11-15). Each row is a recommendation, not a decision. The build follows the choice.*
+*Decided by the project owner on 2026-11-15: every recommendation below, as written (PLAN.md, Decisions log). The build follows it, with the details in [How it is applied here](#how-it-is-applied-here).*
 
-| Question | Recommendation | Why |
+| Question | Decision | Why |
 |---|---|---|
 | **The law** | **Linear in octaves**: offset = a · (pitch − r) / 12 octaves, a = Keytrack / 10, added to the cutoff's log₂ before g (the existing modulation input). | The developer's source is linear in notes, one unit per octave; keytrack 10 is 1:1 (manual, Chris-S); intervals then hold to 0.08–1.75 cents at 44.1 kHz and 0.10 at 192 kHz. Linear in Hz (c) breaks intervals by up to 8 semitones. |
 | **The reference note** | **A-1 (MIDI 9)**, as one named constant, F17 to confirm. A4 is the alternative. | The source is 0 at A-1 ("all modulation is additive"), and two users measured the filter's unaffected note "very far down", one at A-1. "Hinge point A4" fits the source's midpoint (+5), said about a Mix example. The cost of A-1: at keytrack 10 the cutoff knob must sit near 13.75 Hz to play in tune, and a patch at keytrack 5 is 2.5 octaves brighter at A4 than its knob reads. If the demo shows A4, it is the constant that changes. |
@@ -288,17 +287,94 @@ Keytracking costs nothing that matters: at most 0.23 ns per sample per voice to 
 
 The Filter Control's combining law (F12) is open, and this round doesn't settle it. Keytrack produces one number per voice: an offset in octaves, already scaled by its amount. Task 6 decides how it combines with Filter A's or B's cutoff and the Filter Control's cutoff. For example, all three may add in knob units before one exponential law, or in octaves after it. Either way keytrack stays an input to that sum: in octaves if the law adds octaves, or converted by the cutoff law's octaves per knob unit if it adds in knob units.
 
-### How a voice would use it (sketch, M1.4)
+## How it is applied here
+
+### The functions
+
+[keytrack.hpp](../../libs/dsp/include/anoesis/dsp/filters/keytrack.hpp) holds three `constexpr` pieces, with no state:
+
+- `keytrackReferenceNote` = 9 (A-1, 13.75 Hz at A4 = 440 Hz): the note where keytrack changes nothing.
+- `keytrackOctaves(pitch, amount, reference = A-1)` = amount · ((pitch − reference) / 12): the cutoff offset in octaves. amount is Keytrack / 10. The reference is a parameter, so F17 changes a default, not the function.
+- `keytrackSource(pitch)` = (pitch − 9) / 120: the misc modulation source for M1.5, 0 at A-1, 0.5 at A4, 1 at A9 (MIDI 129), negative below A-1, past 1 above A9. `keytrackOctaves(p, 1)` is 10 × `keytrackSource(p)`, so the knob and the source can't disagree.
+
+[pitch.hpp](../../libs/dsp/include/anoesis/dsp/math/pitch.hpp) gains `masterTuneSemitones(referenceHz)` = 12·log₂(referenceHz / 440): the master tune as a note offset, so `noteToFrequency(n + offset)` is `noteToFrequency(n, referenceHz)`. The voice computes it once per block, not per voice per grid point (it is the one `log2` in keytracking).
+
+A NaN pitch gives a NaN offset, which `LadderFilter::setCutoffModulation` already treats as 0, so a bad pitch silently means no keytrack. Nothing allocates and nothing is stored: `keytrack.hpp` includes no other header, and `masterTuneSemitones` is one `log2`. Both are real-time safe and portable.
+
+### How a voice uses it (M1.4)
 
 ```cpp
-// Per voice, at each of the filter's grid points (every 32 samples):
-const float pitch = key + glide.at(gridEnd) + bendSemitones(gridEnd) + masterTuneNotes; // (b), aligned
-const float keytrack = keytrackOctaves(pitch, keytrackKnob / 10.0f, keytrackReferenceNote);
+// Once per block: the master tune as a note offset (pitch.hpp).
+const float tune = masterTuneSemitones(masterTuneHz);
+// The voice processes in chunks that stop at the filter's 32-sample grid
+// points (it already must for the LFOs and drift). At each grid point, the
+// pitch at the END of the coming segment: the filter reads a modulation there
+// as the value g reaches at the next grid point.
+const float pitch = key + glide.at(gridEnd) + bendSemitones(gridEnd) + tune; // not drift, not osc offsets
+const float keytrack = keytrackOctaves(pitch, keytrackKnob / 10.0f);
 // Task 6 combines it with the cutoffs; with octaves added, for example:
 filterA.setCutoffModulation(keytrack + modulationOctavesA);
 filterB.setCutoffModulation(keytrack + modulationOctavesB);
-// The misc source (M1.5): keytrackSource(pitch), 0 at A-1, 1 at A9.
+// The misc source (M1.5): keytrackSource(pitch).
 ```
+
+`key` is the MIDI key, or the arpeggiator's note when it plays (its octaves and the step sequencer's Transpose are notes). A legato note with no portamento steps the pitch, and the step goes through the modulation input like any other: one 32-sample ramp of g. The tests' stand-in for the voice, [keytrack_support.hpp](../../tests/dsp/filters/keytrack_support.hpp), feeds the filter this way, and the report measures the other feeds against it.
+
+## Results, as built
+
+From the `[keytrack-report]` ([keytrack_report.cpp](../../tests/dsp/filters/keytrack_report.cpp)) and the `[keytrack]` benchmarks ([keytrack_benchmark.cpp](../../tests/dsp/benchmarks/keytrack_benchmark.cpp)), which now measure the built functions fed into `LadderFilter` as the voice will feed them, with the other feeds and the key alone as contrasts:
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[keytrack-report]"   # about 20 s
+tools/bench.sh "[keytrack]"
+```
+
+Every figure matches the chosen prototype's, model (b) with the aligned feed, to the printed digit. The built function computes the same offset (the prototype took the master tune in Hz and folded it in itself; the built one takes it from `masterTuneSemitones()`, with the same result):
+
+| Measurement | As built |
+|---|---|
+| The law, keytrack 0 / 5 / 10, A-1 to C7 (48 kHz, k 4.4) | 13.47 Hz everywhere / A4 at 76.19 Hz / A4 at 431.0 Hz: the law, 35.8 cents flat, within 0.5 cents |
+| Intervals at keytrack 10, C1–C7, 44.1 kHz, k 4.05 / 6 / 8 | spread 0.08 / 1.33 / 1.69 cents (tanh), 0.08 / 1.20 / 1.75 (cubic) |
+| The same at 192 kHz | at most 0.10 cents |
+| Near the clamp (44.1 kHz, k 6, the cutoff two octaves above the note) | −99.9 (C5) to −28.1 cents (C8, 0.38 fs); locked from C9 (the solver failure) |
+| The master tune at 432 / 444 Hz | the filter stays with the oscillators: −35.8 cents (the detune) as at 440; without the term −4.0 / −51.4 |
+| A 100 ms octave glide / a ±2 semitone bend, largest / RMS | 3.2 / 0.6 cents; 0.1 / 0.0 cents |
+| The key alone, the same glide and bend | 1,144.7 / 553.7; 200.0 / 141.6 cents |
+| Zipper against the aligned feed: grid start / per block of 64 / 512 | −26.5 / −23.0 / −8.4 dB (glide) |
+| A legato step at k 3.6, a fifth / an octave: none / 30 ms / 100 ms portamento | −49.0 / −97.9 / −110.3; −47.8 / −87.7 / −106.8 dB re a unit step (steady −115) |
+| Block sizes 1 / 37 / 4096, aligned or grid-start feed; subnormals; allocations | identical; 0; 0 (fed per host block: differs) |
+| The solver failure (tanh, k 4.4 / 6 / 8) | from 0.4800 / 0.4500 / 0.4400 fs, at 44.1 and 96 kHz: task 7 |
+
+**CPU** (`tools/bench.sh "[keytrack]"`, `relwithdebinfo`, Apple M1 Ultra):
+
+| Benchmark | ns per block of 512 | ns per sample |
+|---|---:|---:|
+| `keytrackOctaves`, 16 grid points | 5 | 0.01 |
+| `keytrackSource`, 16 grid points | 5 | 0.01 |
+| `masterTuneSemitones`, once per block | 4 | 0.01 |
+| `LadderFilter`, Warm on, k 2, fed once per block | 47,074 | 91.9 |
+| `LadderFilter`, Warm on, k 2, fed at each grid point | 46,310 | 90.5 |
+
+The built offset costs 0.3 ns per grid point, against the prototype (b)'s 4 ns, because the master tune's `log2` moved out to once per block. Feeding the filter at every grid point is within noise of feeding it once per block.
+
+## Tests
+
+[keytrack_test.cpp](../../tests/dsp/filters/keytrack_test.cpp), 8 tests, and one in [pitch_test.cpp](../../tests/dsp/math/pitch_test.cpp). Each tolerance is derived in the test:
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| An octave per octave at 10, nothing at the reference | 0 at A-1 at every amount, evaluated at compile time; 1 octave at A0, 5 at A4, 10 at A9, −0.75 at note 0; keytrack 5 is half, 0 is none; another reference as a parameter | exact |
+| Linear in octaves over and beyond the keyboard | every quarter tone from note −24 to 150 at five amounts against the formula in double | 2⁻²² relative: two roundings (the division, the product) and half an ulp for the reference |
+| The source: 0 at A-1, 0.5 at A4, 1 at A9, unclamped, the filter's quantity | the end points; −0.075 at note 0 and 1.1 at note 141 (unclamped); the sweep; keytrack 10 equals 10 × the source | exact at the end points; 2⁻²² (the sweep), twice that for the identity |
+| Keytrack 10 plays intervals | a self-oscillating filter, the cutoff knob at 13.75 Hz, notes C2–C6 and A4, Warm on and off: each note at its own frequency, flat by the k 4.4 detune | 0.5 cents per note against the detune pinned in filters.md (0.2 for that pin, 0.3 for the flatness the report measures); the spread under 0.5 cents |
+| Keytrack 5 tracks half as many octaves | A4 at keytrack 5: 2.5 octaves above 13.75 Hz | 0.5 cents, as above |
+| Follows the voice's pitch | a 100 ms octave glide, a ±2 semitone bend at 2 Hz, and the master tune at 432 and 444 Hz | glide under 5 cents at worst and 1.5 RMS (report: 3.2 / 0.6; the one-segment lag of feeding at the grid point is 8 / 6, which fails); bend under 0.5 (report 0.1; the lag 1.7); the master tune within 0.1 cents of 440's offset (without it: 31.8 and 15.7) |
+| Bit-identical across block sizes, no allocation | legato glides, a moving wheel, a master tune of 438 Hz, fed at the grid, in blocks of 1 and 37 against 4096 | bit for bit; 0 allocations |
+| A NaN pitch is no modulation | NaN propagates through both functions; a filter fed a NaN pitch is bit for bit the filter with no keytrack | exact |
+| `masterTuneSemitones` | 0 at 440, ±12 at 880 and 220, −0.31767 at 432; a note plus the offset is the note at that master tune, for six tunings and five notes | exact at octaves; 1.2·10⁻⁶ relative (noteToFrequency's 10⁻⁶ plus `log2`'s rounding carried through `exp2`) |
+
+Red first: against an inert stub (every function returning 0), 8 of the 9 failed. The ninth, block-size identity, is a property a stub also has. Then 12 deliberate breaks, one at a time, each caught by at least one test: the reference at A4; 1.1:1 tracking (an 11-octave knob added in knob units); the amount ignored; the amount squared; whole notes only (glide and bend lost); the source over 100; the source clamped to [0, 1]; the source centred on A4; the master tune's sign flipped; the master tune with ln instead of log₂; the master tune in cents; a NaN pitch mapped to 0. Every test but the block-size test caught at least one. That test pins a property of the feed (each grid point's value is a pure function of the pitch there), which no fault in the functions can change; it is there to keep the voice's feeding honest when M1.4 builds it.
 
 ## References
 

@@ -44,6 +44,16 @@ inline constexpr float referenceNote = 69.0f;
     return concertPitchHz * centsToRatio(cents);
 }
 
+/// The master tune as an offset in semitones from concert pitch:
+/// 12 log2(referenceHz / 440), so noteToFrequency(n + offset) equals
+/// noteToFrequency(n, referenceHz). For anything that works in notes rather
+/// than Hz, such as a keytracked filter (filters/keytrack.hpp). Computed once
+/// per block, not per sample. `referenceHz` must be positive.
+[[nodiscard]] inline float masterTuneSemitones(float referenceHz) noexcept
+{
+    return 12.0f * std::log2(referenceHz / concertPitchHz);
+}
+
 /// An oscillator's tuning: coarse steps of octaves and semitones, plus a fine
 /// offset in (fractional) semitones. A pitch is one fractional note,
 /// `note + offset()`, converted once by noteToFrequency(), so every pitch

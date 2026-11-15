@@ -17,6 +17,7 @@
 #include <anoesis/dsp/core/denormals.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
 #include <anoesis/dsp/core/processor.hpp>
+#include <anoesis/dsp/filters/keytrack.hpp>
 #include <anoesis/dsp/filters/ladder_filter.hpp>
 #include <anoesis/dsp/generators/white_noise.hpp>
 #include <anoesis/dsp/library.hpp>

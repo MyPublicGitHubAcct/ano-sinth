@@ -6,6 +6,25 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-15: M1.3 keytracking
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[keytrack]"`, 100 samples per benchmark.
+- **What changed** ([keytracking.md](../dsp/keytracking.md)): new `keytrackOctaves`, `keytrackSource` (`constexpr`, no state), and `masterTuneSemitones`. `LadderFilter` is unchanged. New rows: each function at the 16 grid points of a 512-sample block, as a voice feeds them; the master tune once per block; the filter fed at each grid point against once per block.
+
+| Benchmark (ns / sample) | this commit | previous |
+|---|---:|---:|
+| keytrack: `keytrackOctaves`, 16 grid points per 512 | 0.01 (5 ns per block) | |
+| keytrack: `keytrackSource`, 16 grid points per 512 | 0.01 (5 ns per block) | |
+| keytrack: `masterTuneSemitones`, once per block | 0.01 (4 ns per block) | |
+| keytrack: filter (Warm on, k 2) fed once per block | 91.94 | |
+| keytrack: filter (Warm on, k 2) fed at each grid point | 90.45 | |
+
+### Observations
+
+- **Keytracking costs nothing measurable**: 0.3 ns per grid point, and feeding the filter at every grid point is within noise of feeding it once per block (90.5 against 91.9 ns; the filter alone measures 91–98 ns across runs). The candidates' figures (commit 3948d99) put the sounding-pitch prototype at 4 ns per call, its master tune `log2` per call; built, that `log2` runs once per block.
+
+---
+
 ## 2026-11-15: M1.3 filter
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[filter]"` and `"[oversampling]"`, 100 samples per benchmark.
