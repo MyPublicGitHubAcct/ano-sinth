@@ -439,6 +439,71 @@ TEST_CASE("LFO: the phase is exact: the frequency to double precision, and nothi
     }
 }
 
+TEST_CASE("LFO: setPhaseIncrement sets the rate exactly (tempo sync), clamped to half a cycle", "[dsp][lfo]")
+{
+    const auto rate = GENERATE(from_range(sampleRates));
+    INFO("rate " << rate);
+    // An increment that no float frequency reaches exactly.
+    constexpr std::uint64_t increment = 0x00123456789ABCDFULL;
+    auto lfo = prepared(rate, LfoWaveform::saw, 1.0f);
+    lfo.setPhaseIncrement(increment);
+    CHECK(lfo.phaseIncrement() == increment);
+    // frequency() reports it in Hz, rounded to a float.
+    const double hz = std::ldexp(static_cast<double>(increment), -64) * static_cast<double>(rate);
+    CHECK(std::abs(static_cast<double>(lfo.frequency()) - hz) <= hz * u);
+
+    // Nothing accumulates: the phase is the start plus every increment.
+    const std::uint64_t start = lfo.phase();
+    static_cast<void>(render(lfo, 100000));
+    CHECK(lfo.phase() == start + (std::uint64_t{100000} * increment));
+
+    // A change mid-cycle keeps the phase (continuous), and takes effect for
+    // a straight row from the next sample.
+    const std::uint64_t before = lfo.phase();
+    lfo.setPhaseIncrement(increment / 3);
+    CHECK(lfo.phase() == before);
+    static_cast<void>(lfo.next());
+    CHECK(lfo.phase() == before + (increment / 3));
+
+    // Half a cycle per sample at most, as setFrequency clamps to Nyquist.
+    lfo.setPhaseIncrement(std::numeric_limits<std::uint64_t>::max());
+    CHECK(lfo.phaseIncrement() == std::uint64_t{1} << 63U);
+    lfo.setPhaseIncrement(0);
+    CHECK(lfo.phaseIncrement() == 0);
+}
+
+TEST_CASE("LFO: an increment and a frequency are two ways to set one rate", "[dsp][lfo]")
+{
+    // The same increment set either way renders the same samples, slews
+    // included (the slew's length follows the increment).
+    for (const auto waveform : {LfoWaveform::sine, LfoWaveform::pulse, LfoWaveform::sampleHold})
+    {
+        INFO("row " << static_cast<int>(waveform));
+        auto byHz = prepared(48000.0f, waveform, 37.0f);
+        auto byIncrement = prepared(48000.0f, waveform, 1.0f);
+        byIncrement.setPhaseIncrement(byHz.phaseIncrement());
+        CHECK(byIncrement.slewSamples() == byHz.slewSamples());
+        CHECK(bitIdentical(render(byHz, 20000), render(byIncrement, 20000)));
+    }
+
+    // The slew follows an increment set directly: 1/96 cycle per sample
+    // makes 1/16 cycle 6 samples, shorter than 1 ms.
+    auto lfo = prepared(48000.0f, LfoWaveform::saw, 1.0f);
+    lfo.setPhaseIncrement((std::numeric_limits<std::uint64_t>::max() / 96U) + 1U);
+    CHECK(lfo.slewSamples() == 6);
+
+    // An increment is per sample, so prepare() keeps it; a frequency is in
+    // Hz, so prepare() at another rate recomputes the increment from it.
+    lfo.setPhaseIncrement(0x0000100000000000ULL);
+    lfo.prepare({.sampleRate = 96000.0f, .maxBlockSize = 4096, .numChannels = 1});
+    CHECK(lfo.phaseIncrement() == 0x0000100000000000ULL);
+    lfo.setFrequency(3.0f);
+    const std::uint64_t at96k = lfo.phaseIncrement();
+    lfo.prepare({.sampleRate = 48000.0f, .maxBlockSize = 4096, .numChannels = 1});
+    CHECK(lfo.phaseIncrement() > at96k + (at96k / 2));
+    CHECK(lfo.phaseIncrement() == prepared(48000.0f, LfoWaveform::saw, 3.0f).phaseIncrement());
+}
+
 TEST_CASE("LFO: a jump is slewed linearly over 1 ms, at most 1/16 of a cycle", "[dsp][lfo]")
 {
     const auto rate = GENERATE(from_range(sampleRates));

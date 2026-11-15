@@ -15,9 +15,11 @@ add_executable(anoesis_dsp_tests
     control/envelope_report.cpp
     control/lfo_report.cpp
     control/lfo_test.cpp
+    control/note_value_test.cpp
     control/smoother_test.cpp
     control/stereo_gain_test.cpp
     control/tempo_sync_report.cpp
+    control/tempo_sync_test.cpp
     generators/white_noise_test.cpp
     math/decibels_test.cpp
     math/fast_math_test.cpp

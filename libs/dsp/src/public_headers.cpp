@@ -8,7 +8,9 @@
 // Add every new public header here.
 
 #include <anoesis/dsp/control/adsr.hpp>
+#include <anoesis/dsp/control/host_tempo.hpp>
 #include <anoesis/dsp/control/lfo.hpp>
+#include <anoesis/dsp/control/note_value.hpp>
 #include <anoesis/dsp/control/smoother.hpp>
 #include <anoesis/dsp/control/stereo_gain.hpp>
 #include <anoesis/dsp/core/audio_block.hpp>

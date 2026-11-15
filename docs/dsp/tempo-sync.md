@@ -7,7 +7,7 @@ Tempo sync makes a time-based parameter follow the host's tempo: an LFO that cyc
 - two ways to sync an LFO: free-running at the synced rate, or locked to the host's position, and the hybrids between them;
 - what is known about Sylenth1's sync;
 - the candidate models prototyped here, and what each one measured: the value list, exactness, drift over hours, tempo changes and ramps, loops, locates, transport start and stop, block sizes, subnormals, allocation, and CPU;
-- the options for the decision.
+- the decision, how it is built, and the tests that pin it down.
 
 Read [lfos.md](lfos.md) (the 64-bit phase, slewed jumps, the click metric) and [processor-lifecycle.md](processor-lifecycle.md) first.
 
@@ -70,12 +70,12 @@ So the evidence points to **tempo, not position**: the phase starts at the note-
 
 ## The candidates and what they measured
 
-Measured by the hidden `[sync-report]` and `[sync-long-report]` ([tempo_sync_report.cpp](../../tests/dsp/control/tempo_sync_report.cpp)) and the `[sync]` benchmarks ([tempo_sync_benchmark.cpp](../../tests/dsp/benchmarks/tempo_sync_benchmark.cpp)), on test-only prototypes ([tempo_sync_candidates.hpp](../../tests/dsp/control/tempo_sync_candidates.hpp)):
+Measured on test-only prototypes, `tempo_sync_candidates.hpp` at commit `d181628`, by that commit's `[sync-report]`, `[sync-long-report]`, and `[sync]` benchmarks. The prototypes were removed when the decision was built; the same report and benchmarks now measure the code as built (see **Results, as built** below):
 
 ```sh
 cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[sync-report]"        # about 1 s
-build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[sync-long-report]"   # three hours of every model, about 12 s
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[sync-long-report]"   # three hours at every rate
 tools/bench.sh "[sync]"
 ```
 
@@ -207,28 +207,121 @@ Nanoseconds per sample, 48 kHz, `relwithdebinfo`, Apple M1 Ultra (`tools/bench.s
 - **Locked** needs a `setPhase()` that is silent for tiny sets and slewed for large ones, called every block. Every set restarts the curved rows' interpolation grid, which makes them depend on the block size. It also fights Free: a free LFO copied at the note-on is not a transport-locked one.
 - **Hybrid and note-anchored** need the exact rate input every block (the nudge), `phase()` to measure the error (it exists), and, for the hybrid, a slewed `jumpTo(phase)`: a retrigger to an arbitrary phase. A nudge on a curved row also lands at the next grid point, but the next block measures the error again, so it still converges.
 
-## Options for the decision
+## The decision
 
-*To be decided by the project owner. The decision and its date go here and in PLAN.md's Decisions log.*
+**Chosen by the project owner on 2026-11-14: every recommendation below** (PLAN.md, Decisions log). The rows on what Sync covers and on Sync off are for the parameter table (M1.9); `libs/dsp` builds the rest.
 
-| Question | Recommendation | Why |
+| Question | Decided | Why |
 |---|---|---|
-| **Model** | **Rate only**, with an **exact increment** from a `NoteValue`: `phaseIncrement(note, bpm, fs)` once per block per slot, into a new `Lfo::setPhaseIncrement()`. The phase starts at the note-on (Free off) or follows the global free LFO (Free on), as built. | It is what the evidence describes: the developer's "locks to host tempo, but not to song position", a synced sine starting at its peak on every note, Free the only mode that runs on. It never jumps, so loops, locates, and transport starts can't click. It is bit-identical across block sizes except under a ramp, drifts 5·10⁻¹¹ cycles in three hours, costs about 9 ns per block, and needs one small addition to `Lfo`. Its cost: a ramp leaves it behind the note-on's grid by about half a block's tempo change per block (1.8 ms after 6 s at 512 samples). |
-| **Alternative model** | **Note-anchored**, if a ramp's lag matters. | The same semantics with no lag: it corrects towards "note-on phase + quarter notes played" from the host's position, re-anchoring at loops and starts so it never jumps. Its costs: about 65 ns per block, a deadband and two tolerances to justify and test, and it needs the position, which the standalone build doesn't have. |
+| **Model** | **Rate only**, with an **exact increment** from a `NoteValue`: `notePhaseIncrement(value, bpm, fs)` once per block per slot, into a new `Lfo::setPhaseIncrement()`. The phase starts at the note-on (Free off) or follows the global free LFO (Free on), as built. | It is what the evidence describes: the developer's "locks to host tempo, but not to song position", a synced sine starting at its peak on every note, Free the only mode that runs on. It never jumps, so loops, locates, and transport starts can't click. It is bit-identical across block sizes except under a ramp, drifts 5·10⁻¹¹ cycles in three hours, costs about 9 ns per block, and needs one small addition to `Lfo`. Its cost: a ramp leaves it behind the note-on's grid by about half a block's tempo change per block (1.8 ms after 6 s at 512 samples). |
+| **Alternative model** | Not built. **Note-anchored** stays the measured option if a ramp's lag turns out to matter (S10). | The same semantics with no lag: it corrects towards "note-on phase + quarter notes played" from the host's position, re-anchoring at loops and starts so it never jumps. Its costs: about 65 ns per block, a deadband and two tolerances to justify and test, and it needs the position, which the standalone build doesn't have. |
 | **Bar-locked LFOs** | Not for Part 1. If wanted, **the hybrid** as a Part 2 option ("lock to bar"), not the per-block lock. | Sylenth1 doesn't lock (above). A lock clicks at every loop, locate, and start (−12.6 to −25 dB even slewed). The hybrid gives the same lock with identical output across block sizes, where the per-block set never is. |
 | **Note values** | **Exact fractions** (`Ratio` × straight, triplet, or dotted) in `libs/dsp`, with conversions to seconds, hertz, samples, and the 64-bit increment that take plain values (BPM, sample rate). Long-running positions (the arpeggiator's steps, M1.6) counted as integers, ⌈k · num / den⌉, never accumulated. | A float table puts 46,364 of 50,220 arpeggiator steps on the wrong sample in three hours (by up to 7), and a float accumulator is 5 s out. The fractions cost nothing per sample. The delay (M1.7) and the arpeggiator (M1.6) use the same conversions. |
-| **Value list** | **30 values, 8/1D to 1/64T**: every straight value from 8/1 to 1/64 with its dotted and triplet value, **stepped and ordered by length** (strictly monotonic). Data in the parameter table (M1.9), so S1's measurement changes a list, not code. A parameter may use a sub-range: the delay's longest value is limited by its buffer (M1.7). | 8/1, 2/1T, 2/1D (the developer), 1/32 (2007), 1/16, 1/8D, 1/4, 8T, 16T (users) are attested. 16/1 didn't exist in 2010. 1/64 and 1/64T are a guess (1/64T at 120 BPM is 48 Hz, inside the free range). Ordering by length makes the knob monotonic, which grouping by base doesn't (9 reversals). |
+| **Value list** | **30 values, 8/1D to 1/64T**: every straight value from 8/1 to 1/64 with its dotted and triplet value, **stepped and ordered by length** (strictly monotonic). Data (`syncNoteValues`), which the parameter table (M1.9) maps each synced knob onto, so S1's measurement changes a list, not code. A parameter may use a sub-range: the delay's longest value is limited by its buffer (M1.7). | 8/1, 2/1T, 2/1D (the developer), 1/32 (2007), 1/16, 1/8D, 1/4, 8T, 16T (users) are attested. 16/1 didn't exist in 2010. 1/64 and 1/64T are a guess (1/64T at 120 BPM is 48 Hz, inside the free range). Ordering by length makes the knob monotonic, which grouping by base doesn't (9 reversals). |
 | **What Sync covers** | **One global switch** for **LFO 1 and 2 Rate** (when Free is off), **Delay L and R**, and **Arp Time**. Not the chorus Rate or the phaser's LFO Rate. A **Free LFO ignores Sync** (Hz). With Sync off, rates and times are **absolute** (Hz, ms), not tempo-relative. | The manual, the specification, Audiotent, and two users on the arpeggiator. The chorus and phaser are never mentioned with Sync (S2). Sync off as absolute follows the manual and the specification, against the developer's 2007 description of v1.21 (S4): a measurement settles it, and it changes only how M1.9 maps the knob. |
 | **Transport stopped, no host** | Run at the **tempo the host reports, whether or not the transport plays**, and ignore the position (rate only reads none). With no tempo (the standalone build, or a host that reports none) use **120 BPM**; if a host reports a tempo of 0, a negative one, or NaN, keep the last valid tempo. | Sylenth1's LFOs and arpeggiator are played live with the transport stopped, and the arpeggiator starts at the key press (the developer). Rate only has nothing to do at a stop, start, loop, or locate. Sylenth1 has no standalone, so 120 BPM (the common host default) is our choice (S13). |
-| **Where it lives** | `libs/dsp`: the note values, conversions, and value list in a new `control/note_value.hpp`; `Lfo::setPhaseIncrement()`. `libs/interop` (M1.9): reading the tempo (and, for the alternative, the position and transport) from `AudioPlayHead`, and the fallbacks above. The plugin: Sync, Free, and each parameter's range of the list. | The design constraints: plain values into `libs/dsp`, no JUCE; the same conversions for the delay and the arpeggiator. |
+| **Where it lives** | `libs/dsp`: the note values, conversions, and value list in a new `control/note_value.hpp`; the tempo's fallbacks in `control/host_tempo.hpp`; `Lfo::setPhaseIncrement()`. `libs/interop` (M1.9): reading the tempo (and, for the alternative, the position and transport) from `AudioPlayHead`, and the fallbacks above. The plugin: Sync, Free, and each parameter's range of the list. | The design constraints: plain values into `libs/dsp`, no JUCE; the same conversions for the delay and the arpeggiator. |
 
 ## How it is applied here
 
-*Written once the model is built (M1.2).*
+### Note values
+
+[note_value.hpp](../../libs/dsp/include/anoesis/dsp/control/note_value.hpp) holds the note values and their conversions. Everything in it is `constexpr` or a few arithmetic operations, with no state and no allocation.
+
+- **`Ratio`** is an exact non-negative fraction of two 64-bit integers, always reduced, so equal fractions compare equal member by member. `*` cross-reduces before multiplying, and `<=>` compares the cross products. Note lengths stay tiny (at most 12/1 and 1/96), so nothing overflows.
+- **`NoteValue`** is a straight `base` in whole notes plus a `NoteKind` (straight, triplet, dotted), built with `NoteValue::straight(1, 4)`, `::triplet(1, 8)`, or `::dotted(1, 8)`. `wholeNotes()` multiplies by exactly 2/3 or 3/2, and `quarterNotes()` by 4 (a bar is four beats, whatever the time signature).
+- **`syncNoteValues`** is the list as data: 30 values sorted by length, longest first, built at compile time from the 10 straight bases. The parameter table (M1.9) maps each synced knob onto it, or onto a contiguous part of it.
+- **The conversions** `noteSeconds(value, bpm)`, `noteHertz(value, bpm)`, `noteSamples(value, bpm, fs)`, and `notePhaseIncrement(value, bpm, fs)` take plain values. Each forms an exact numerator and denominator (products of small integers, the tempo, and the sample rate) and divides once. At integer tempos and rates the result is the exact fraction correctly rounded. `notePhaseIncrement` scales by 2⁶⁴ exactly and rounds to the nearest integer. It clamps at half a cycle per sample, and returns 0 for a tempo or sample rate that isn't positive and finite.
+
+### The host's tempo
+
+[host_tempo.hpp](../../libs/dsp/include/anoesis/dsp/control/host_tempo.hpp) holds `HostTempo`, the tempo every synced parameter follows. It starts at 120 BPM. `report(bpm)` keeps any positive, finite report, clamped to [1, 999] BPM, and ignores anything else, so a host that reports 0, NaN, or nothing leaves the last valid tempo in place. `reset()` goes back to 120.
+
+There is nothing for the transport. Synced parameters follow the tempo whether or not the transport plays, and nothing reads the position, so a stop, a start, a loop, or a locate has no effect. Reading JUCE's `AudioPlayHead` and calling `report()` once per block is the host bridge's job (M1.9).
+
+### The LFO
+
+`Lfo::setPhaseIncrement(std::uint64_t)` ([lfo.hpp](../../libs/dsp/include/anoesis/dsp/control/lfo.hpp)) sets the rate as an exact increment, clamped to half a cycle. It behaves like `setFrequency`: the phase is continuous, a straight row takes the new rate from the next sample, and a curved row from its next 32-sample grid point. The slew's length follows the new rate. An increment is per sample, so `prepare()` keeps it, whereas a frequency is in hertz and `prepare()` recomputes its increment. `frequency()` reports either one in Hz. The `setFrequency` path is unchanged bit for bit.
+
+### How a voice uses it
+
+```cpp
+// Once per block, before the voices (M1.8, with M1.9's host bridge):
+tempo.report(hostBpm);                         // when the host reports one
+
+// Per LFO slot: Sync on and Free off.
+const auto value = syncNoteValues[rateStep];   // the knob's step (M1.9)
+const auto increment = notePhaseIncrement(value, tempo.bpm(), sampleRate);
+for (auto& voice : activeVoices)
+    voice.lfo.setPhaseIncrement(increment);    // the phase started at the voice's note-on
+// Sync off, or Free on: setFrequency(hz), as before.
+```
+
+The increment is computed once per slot per block and shared by the voices. A rate modulated per voice (keytrack, M1.5) scales it. The delay (M1.7) takes `noteSamples(value, tempo.bpm(), fs)` for its time. The arpeggiator (M1.6) counts its steps in integers, through a 64-bit phase with `notePhaseIncrement`'s increment or as ⌈k · num / den⌉, never by adding a rounded length.
+
+## Results, as built
+
+From the `[sync-report]` and `[sync-long-report]` ([tempo_sync_report.cpp](../../tests/dsp/control/tempo_sync_report.cpp)), which now measure the code as built: a real `Lfo` driven as a voice drives it, with the host's tempo into `HostTempo` and `notePhaseIncrement()` into `setPhaseIncrement()` once per block. Every figure matches the chosen prototype's.
+
+**Drift** of a synced saw `Lfo` against the exact grid, the largest phase error at any block's end, worst over 120, 174, and 93.75 BPM:
+
+| Rate set through | 8/1, 1 min | 1/64T, 1 min | 8/1, 3 h | 1/64T, 3 h |
+|---|---:|---:|---:|---:|
+| `setPhaseIncrement(notePhaseIncrement())`, as built | 2.1·10⁻¹³ | 2.9·10⁻¹³ | 3.8·10⁻¹¹ | 5.2·10⁻¹¹ |
+| `setFrequency(float hertz)`, for comparison | 1.8·10⁻⁷ | 9.2·10⁻⁵ | 3.2·10⁻⁵ | 1.6·10⁻² |
+
+(Worst over 44.1, 48, 96, and 192 kHz.) The report checks the built path stays under 10⁻¹⁰ cycles.
+
+**A tempo step** from 120 to 140 BPM, 48 kHz, blocks of 512, a sine:
+
+| Value | Largest step (× the sine's slope) | Click at the step | The same 2 s later | Lag from the note-on's grid |
+|---|---:|---:|---:|---:|
+| 1/4 | 0.948 | −82.2 dB | −85.1 dB | 3.3·10⁻¹⁵ cycles |
+| 1/64T | 0.998 | −29.8 dB | −28.7 dB | 4.4·10⁻¹⁴ cycles |
+
+The step adds nothing. The "click" is the sine's own floor, its linear interpolation on the LFO's 32-sample grid: its energy above 1 kHz is the same 2 s later, where nothing happens. That floor is high for a 56 Hz sine (lfos.md measures the grid's spurs). It is lower than the prototype's figures because the prototype computed the sine at every sample.
+
+**A tempo ramp** (120 → 160 BPM over 6 s): the lag from "note-on phase + quarter notes played", the cost of following the tempo a block at a time:
+
+| Value | 32 | 128 | 512 | 2048 | 4096 |
+|---|---:|---:|---:|---:|---:|
+| 1/4 | 0.11 ms | 0.44 ms | 1.78 ms | 7.10 ms | 14.2 ms |
+| 1/64T | 0.11 ms | 0.44 ms | 1.78 ms | 7.10 ms | ≥ 10 ms (half a cycle) |
+
+**Block sizes 1, 37, 4096**: a sine at 1/16 and a saw at 1/4D are bit-identical at a steady tempo and through a tempo step (the host splits its block at the step). Under the ramp they differ (up to 0.69 for the sine, and 2.0 where a saw edge moves by a sample), because each block size sees a different staircase. **Exactness**: as in the candidates' table above; the arpeggiator's steps from `noteSamples()` × k are all on the right sample in this case. No subnormal outputs; no allocation over 2000 blocks of tempo reports through every list value.
+
+CPU, nanoseconds per sample, 48 kHz ([baselines](../performance/baselines.md)), the tempo reported and the increment set every block:
+
+| | Blocks of 512 | Blocks of 32 |
+|---|---:|---:|
+| A synced sine, 1/8D | 0.72 | 1.69 |
+| A synced saw, 1/8D | 0.30 | 1.35 |
+| `notePhaseIncrement()`, one call | 3.4 ns | |
+| **32 synced LFOs (16 voices × 2), one increment per slot** | **13.56** | |
+
+Sync adds 0.1 ns per sample to one LFO at blocks of 512 (the unsynced sine is 0.59–0.62), and 0.4–0.7 ns to 32 LFOs (13.2–12.8 unsynced). At blocks of 32 most of the extra is `Lfo::process()`'s own setup per call, not the sync.
 
 ## Tests
 
-*Written once the model is built (M1.2).* The report's measurements become tests with derived tolerances: the value list (count, order, exact lengths, the developer's examples), the triplet and dotted identities, the conversions against exact fractions (seconds, hertz, samples, the increment within half a unit), the arpeggiator's step positions over three hours, drift over three hours bounded by the increment's rounding, phase continuity at a tempo step, block sizes 1/37/4096, the fallback tempo, subnormals, and allocation.
+[note_value_test.cpp](../../tests/dsp/control/note_value_test.cpp), [tempo_sync_test.cpp](../../tests/dsp/control/tempo_sync_test.cpp), and two cases in [lfo_test.cpp](../../tests/dsp/control/lfo_test.cpp), tagged `[tempo]` and `[lfo]`. The references are exact: `Ratio` arithmetic, and the increment's exact value from long division in integers. Tolerances are derived next to each use.
+
+| Test | What it pins down |
+|---|---|
+| A Ratio is exact and always reduced | reduction, 0 as 0/1, products, sums, ordering, `toDouble()`, at compile time too |
+| A triplet is 2/3 and a dotted value 3/2 of the length | every base × every kind; a bar is four beats; the developer's examples (8/1 = 32 beats, 2/1T = 16/3, 2/1D = 12); identities a rounded table can miss (96 × 1/64T = 1/1, 9 × 1/8T = 1/2D) |
+| The sync list | 30 values, 8/1D first and 1/64T last, strictly decreasing, every base × kind exactly once, and the interleaving of 1/2, 1/4D, 1/2T, 1/4 |
+| Seconds, hertz, and samples round once | known values at 120 BPM, then every list value at 4 integer tempos × 4 sample rates against the exact fraction, **0 ULP** |
+| The phase increment | every list value at 4 tempos × 4 rates against the exact value from long division, within ½ unit plus the division's 2⁻⁵³; the clamp at half a cycle; 0 for a tempo or rate of 0, negative, NaN, or infinite |
+| Three hours of a synced phase | 8/1 and 1/64T at 4 tempos × 4 rates: N × increment against the exact phase, within the derived bound and under 10⁻¹⁰ cycles |
+| Host tempo: 120 BPM, then the last valid report | the default, reports kept, `reset()` |
+| Host tempo: bad reports ignored, the rest clamped | 0, −0, negative, NaN, ±∞ leave the last tempo; 0.25 and 5000 BPM clamp to 1 and 999 |
+| A synced LFO's phase is exact through a tempo step | the phase after a step from 120 to 140 BPM is the start plus every sample's increment, exactly; a sine's largest step stays within its own slope (no jump) |
+| A synced LFO does not depend on the block size | sine, saw, pulse through a tempo step in blocks of 1, 37, 4096: bit-identical |
+| No allocation | tempo reports, conversions, and a synced LFO over 64 blocks |
+| LFO: `setPhaseIncrement` sets the rate exactly | at four rates: the increment is kept, `frequency()` within float rounding, the phase is the start plus N increments, continuity, the next sample at the new rate, the clamp |
+| LFO: an increment and a frequency are two ways to set one rate | the same increment either way renders bit-identical sine, pulse, and S&H; the slew follows an increment set directly; `prepare()` keeps an increment and recomputes a frequency |
+
+**Red, then green.** The tests were written first and run against an inert stub of both headers and of `setPhaseIncrement`: 11 of the 13 cases failed. The two that passed, block-size independence and no allocation, can't fail on a stub that does nothing. Then 25 deliberate breaks were applied, one at a time: a triplet of 3/4, a dotted value of 4/3, a bar of 2 beats, an unreduced `Ratio`, a reversed or wrong ordering, a wrong sum, the list ascending or without its dotted values, 61 seconds a minute, a reassociated `noteSamples`, a floored or float-rounded increment, the tempo truncated to an integer, no Nyquist clamp, no finite check, a default of 100 BPM, `HostTempo` accepting 0 or ∞, not clamping, or not resetting, and `Lfo` not clamping the increment, not keeping it through `prepare()`, keeping it after `setFrequency`, not reporting it in Hz, or adding one unit. Each was caught: the unreduced `Ratio` at compile time by a `STATIC_CHECK`, every other by at least one test. A first float break, rounding only the numerator to float, changed nothing at integer tempos, where that numerator is exact in float. That gap is why the tests now include 93.75 and 128.5 BPM.
 
 ## References
 

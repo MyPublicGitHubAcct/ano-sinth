@@ -40,6 +40,11 @@
 /// - The output is gain x (wave + offset), unclipped; gain in [0, 1] and
 ///   offset in [-1, 1] ramp linearly over 10 ms when changed.
 ///
+/// The rate is set in Hz (setFrequency) or, for tempo sync, as an exact
+/// phase increment (setPhaseIncrement with notePhaseIncrement() from
+/// note_value.hpp, once per block): a float in Hz drifts 0.016 cycles in
+/// three hours at 1/64T (docs/dsp/tempo-sync.md).
+///
 /// A voice whose LFO is not free calls restart() when it starts from
 /// silence and retrigger() when a note retriggers it while it sounds. A free
 /// LFO is one instance running for the whole synth; a voice copies it at its
@@ -212,6 +217,8 @@ public:
     static constexpr float lorenzScale = 20.0f;
     /// A gain, an offset, or a jump smaller than this is 0.
     static constexpr float smallest = 0x1p-24f;
+    /// The largest phase increment: half a cycle per sample (Nyquist).
+    static constexpr std::uint64_t maxIncrement = std::uint64_t{1} << 63U;
 
     explicit Lfo(std::uint64_t seed = 0) noexcept : seedValue(seed), random(seed) {}
 
@@ -282,6 +289,20 @@ public:
             return;
         }
         rateHz = std::max(hz, 0.0f);
+        rateIsIncrement = false;
+        updateRate();
+    }
+
+    /// The rate as an exact phase increment: cycles per sample x 2^64,
+    /// clamped to half a cycle. For tempo sync (notePhaseIncrement() in
+    /// note_value.hpp), whose rate no float frequency holds exactly. The
+    /// phase is continuous; a curved row takes it from its next grid point.
+    /// It is per sample, so prepare() keeps it (at another sample rate, set
+    /// it again); frequency() reports it in Hz.
+    void setPhaseIncrement(std::uint64_t value) noexcept
+    {
+        increment = std::min(value, maxIncrement);
+        rateIsIncrement = true;
         updateRate();
     }
 
@@ -460,8 +481,17 @@ private:
             return;
         }
         const auto fs = static_cast<double>(sampleRate);
-        const double cycles = std::min(static_cast<double>(rateHz) / fs, 0.5);
-        increment = static_cast<std::uint64_t>(std::round(std::ldexp(cycles, 64)));
+        double cycles = 0.0;
+        if (rateIsIncrement)
+        {
+            cycles = std::ldexp(static_cast<double>(increment), -64);
+            rateHz = static_cast<float>(cycles * fs);
+        }
+        else
+        {
+            cycles = std::min(static_cast<double>(rateHz) / fs, 0.5);
+            increment = static_cast<std::uint64_t>(std::round(std::ldexp(cycles, 64)));
+        }
         double samples = static_cast<double>(slewSeconds) * fs;
         if (cycles > 0.0)
         {
@@ -752,6 +782,7 @@ private:
     float sampleRate = 0.0f;
     std::uint64_t seedValue = 0;
     LfoWaveform current = LfoWaveform::sine;
+    bool rateIsIncrement = false; ///< set by setPhaseIncrement(), not setFrequency()
     float rateHz = 1.0f;
     float gainTarget = 1.0f;
     float offsetTarget = 0.0f;

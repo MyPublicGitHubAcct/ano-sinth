@@ -6,6 +6,28 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-14: M1.2 tempo sync
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[sync]"` and `"[lfo]"`, 100 samples per benchmark.
+- **What changed** ([tempo-sync.md](../dsp/tempo-sync.md)): new `NoteValue` conversions and `HostTempo`, and `Lfo::setPhaseIncrement()`. `Lfo::updateRate()` gained a branch, so the `[lfo]` rows are re-measured: unchanged within noise. New rows: one conversion; a synced LFO with the tempo reported and the increment set every block, in blocks of 512 and of 32; a 16-voice synth's 32 synced LFOs.
+
+| Benchmark (ns / sample) | this commit | previous |
+|---|---:|---:|
+| sync: `notePhaseIncrement()`, one call (ns) | 3.4 | |
+| sync: sine 1/8D, blocks of 512 / of 32 | 0.72 / 1.69 | |
+| sync: saw 1/8D, blocks of 512 / of 32 | 0.30 / 1.35 | |
+| sync: 32 synced LFOs (16 voices × 2), blocks of 512 | 13.56 | |
+| LFO: sine 3 Hz, `process()` | 0.59 | 0.62 |
+| LFO: saw / triangle / pulse 3 Hz, `process()` | 0.19 / 0.19 / 0.20 | 0.19 / 0.19 / 0.20 |
+| LFO: 32 LFOs (16 voices × 2), sine and saw, `process()` | 13.21 | 12.83 |
+
+### Observations
+
+- **Sync costs about 0.1 ns per sample per LFO** at blocks of 512: one conversion (3.4 ns) and one `setPhaseIncrement` per slot per block. 32 synced LFOs cost 13.6 ns per sample, 0.07% of a core.
+- At blocks of 32 a synced LFO costs 1.4–1.7 ns per sample, mostly `Lfo::process()`'s setup per call, which an unsynced LFO in blocks of 32 pays too.
+
+---
+
 ## 2026-11-14: M1.2 LFO
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[lfo]"`, 100 samples per benchmark.
