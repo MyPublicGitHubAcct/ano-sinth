@@ -6,6 +6,35 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-15: M1.3 filter stability
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[filter-stability]"` and `"[filter]"`, 100 samples per benchmark. The previous column is commit 26cd4ec built in a separate worktree and run in the same session, alternating with this commit, four runs each (means).
+- **What changed** ([filter-stability.md](../dsp/filter-stability.md#as-built)): `LadderFilter`'s solve moved to `LadderSolver` (`filters/ladder_solver.hpp`), with a nested bracketing fallback where Newton does not converge in 8 iterations, and non-finite input taken as 0. The `[filter-stability]` rows are new: they replace stage 1's candidate rows (commit 26cd4ec) with `LadderFilter` itself at the normal settings, at the corner where every sample falls back, at F3's top within the knobs' ranges, and at the DSP's ceiling of k.
+
+| Benchmark (ns / sample) | this commit | previous |
+|---|---:|---:|
+| stability: normal (1 kHz, k 2, drive 2), Warm on / off | 98.13 / 65.91 | |
+| stability: **corner** (0.495 fs, k 8, self-oscillating), Warm on / off | **1,900.10 / 1,022.00** (9.1% / 4.9% of a core) | |
+| stability: F3's top (0.465 fs, k 6, drive 16, full-scale saw), Warm on / off | 411.09 / 232.03 | |
+| stability: ceiling (0.30 fs, k 64, drive 32, full-scale saw), Warm on / off | 316.46 / 197.78 | |
+| filter: Warm on (tanh), k 2, drive 2 / k 6, drive 16 | 96.69 / 126.99 | 97.92 / 124.01 |
+| filter: Warm off (cubic), k 2, drive 2 / k 6, drive 16 | 64.51 / 83.09 | 65.40 / 81.68 |
+| filter: stereo (2 channels), Warm on / off | 193.49 / 126.55 | 193.51 / 126.99 |
+| filter: a cutoff ramp every block, Warm on / off | 96.97 / 64.79 | 95.38 / 61.99 |
+| filter: modulation every 32 samples, Warm on / off | 97.07 / 64.52 | 93.85 / 65.66 |
+| filter: 2× with the Oversampler, Warm on / off | 204.85 / 140.90 | 200.36 / 140.85 |
+| filter: 4× with the Oversampler, Warm on / off | 391.96 / 272.41 | 390.49 / 271.24 |
+| filter: bypassed | 0.06 | 0.06 |
+| filter: 16 voices × 2 stereo filters (64 channels), Warm on | 6,168.15 (29.6% of a core) | 6,130.06 |
+
+### Observations
+
+- **The ordinary case is unchanged within noise**: every `[filter]` row is within −1.7% to +4.5% of the previous commit's, a mean of +0.9%, inside the spread of the runs themselves (the previous commit's own runs span up to 7%). That took a structure: with the fallback's call inside the per-sample solve the filter was 9% (tanh) and 12–17% (cubic) slower, because a function with any call in it, taken or not, saves and restores the callee-saved registers on every sample. As built, Newton's function calls nothing and returns by value, and the filter's run calls the fallback.
+- **The corner costs 1.90 µs (tanh) and 1.02 µs (cubic) per channel-sample**, where the solver before failed at 0.22 µs. Of that, 0.2 µs is Newton's 8 iterations before the fallback (the price of bit-identity), and the rest is about 57 stage evaluations of about 28 ns. The target was about 1 µs and the ceiling 2 µs. Stage 1's prototype took 2.07 and 1.04 µs with the same trigger.
+- A loud saw at F3's top within the knobs' ranges costs 4.2× (tanh) and 3.5× (cubic) the ordinary case: there the fallback runs on part of the samples.
+
+---
+
 ## 2026-11-15: M1.3 keytracking
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[keytrack]"`, 100 samples per benchmark.

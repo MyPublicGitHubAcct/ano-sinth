@@ -28,6 +28,7 @@ add_executable(anoesis_dsp_tests
     filters/keytrack_report.cpp
     filters/keytrack_test.cpp
     filters/ladder_filter_test.cpp
+    filters/ladder_stability_test.cpp
     generators/white_noise_test.cpp
     math/decibels_test.cpp
     math/fast_math_test.cpp

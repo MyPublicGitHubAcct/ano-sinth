@@ -7,7 +7,7 @@
 #include <anoesis/dsp/core/audio_block.hpp>
 #include <anoesis/dsp/core/denormals.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
-#include <anoesis/dsp/math/fast_math.hpp>
+#include <anoesis/dsp/filters/ladder_solver.hpp>
 
 #include <algorithm>
 #include <array>
@@ -30,8 +30,11 @@
 ///   (g = tan(pi fc / fs)) and no delay in the loop (zero-delay feedback),
 ///   so the cutoff, the response there, and the threshold are exact at every
 ///   cutoff and sample rate. The implicit equations are solved each sample
-///   by Newton-Raphson from the loop linearised at the state, to 1e-5, at
-///   most 8 iterations (the measured worst: 5).
+///   by LadderSolver (ladder_solver.hpp): Newton-Raphson from the loop
+///   linearised at the state, to 1e-5, at most 8 iterations; where Newton
+///   does not converge (near Nyquist, at high drive and resonance), a nested
+///   bracketing solve that cannot fail (docs/dsp/filter-stability.md). A
+///   non-finite input sample counts as 0.
 /// - The six responses are fixed mixes of the loop input u and the stage
 ///   outputs y1..y4 (filterTapMixes, data), so every response resonates at
 ///   the cutoff. A response change crossfades the mixes over 10 ms.
@@ -53,7 +56,7 @@
 /// drive gain); the knob laws are the parameter table's (M1.9). Satisfies
 /// BlockProcessor; nothing allocates, and every state is flushed below
 /// FLT_MIN, as is the output. prepare() and reset() finish every ramp.
-/// Doc: docs/dsp/filters.md
+/// Doc: docs/dsp/filters.md, docs/dsp/filter-stability.md
 namespace anoesis::dsp
 {
 
@@ -86,52 +89,6 @@ inline constexpr std::array<FilterTapMix, filterResponseCount> filterTapMixes{
     FilterTapMix{1.0f, -2.0f, 1.0f, 0.0f, 0.0f},  // HP12: p^2 (p - 1)^2
 };
 
-/// tanh: every odd harmonic (Warm Drive on).
-struct TanhSaturator
-{
-    [[nodiscard]] static float value(float x) noexcept
-    {
-        return fastTanh(x);
-    }
-    /// The slope at x, given value(x).
-    [[nodiscard]] static float slope(float /*x*/, float value) noexcept
-    {
-        return 1.0f - (value * value);
-    }
-    /// value(x) / x, 1 at 0.
-    [[nodiscard]] static float secant(float x) noexcept
-    {
-        return std::fabs(x) < 1e-4f ? 1.0f : fastTanh(x) / x;
-    }
-};
-
-/// x - (4/27) x^3 up to |x| = 1.5, then +-1: only the third harmonic below
-/// the knee, no division (Warm Drive off).
-struct CubicSaturator
-{
-    static constexpr float knee = 1.5f;
-    static constexpr float cubic = 4.0f / 27.0f;
-
-    [[nodiscard]] static float value(float x) noexcept
-    {
-        const float c = std::clamp(x, -knee, knee);
-        return c - (cubic * c * c * c);
-    }
-    [[nodiscard]] static float slope(float x, float /*value*/) noexcept
-    {
-        const float c = std::clamp(x, -knee, knee);
-        return 1.0f - (3.0f * cubic * c * c);
-    }
-    [[nodiscard]] static float secant(float x) noexcept
-    {
-        if (std::fabs(x) <= knee)
-        {
-            return 1.0f - (cubic * x * x);
-        }
-        return 1.0f / std::fabs(x);
-    }
-};
-
 class LadderFilter
 {
 public:
@@ -143,8 +100,8 @@ public:
     static constexpr float minCutoffHz = 1.0f;
     /// The highest cutoff, as a fraction of the sample rate (tan stays finite).
     static constexpr float maxCutoffRatio = 0.495f;
-    static constexpr float newtonTolerance = 1e-5f;
-    static constexpr std::uint32_t maxNewtonIterations = 8;
+    static constexpr float newtonTolerance = LadderSolver::newtonTolerance;
+    static constexpr std::uint32_t maxNewtonIterations = LadderSolver::maxNewtonIterations;
 
     LadderFilter() noexcept
     {
@@ -250,7 +207,7 @@ public:
         {
             return std::fpclassify(v) == FP_ZERO;
         };
-        return std::ranges::all_of(channels, [&](const ChannelState& c)
+        return std::ranges::all_of(channels, [&](const LadderState& c)
                                    { return std::ranges::all_of(c.s, zero) && zero(c.previousU); });
     }
 
@@ -290,19 +247,6 @@ public:
     }
 
 private:
-    struct ChannelState
-    {
-        std::array<float, 4> s{}; ///< the integrators' states
-        float previousU = 0.0f;   ///< the loop input, the input saturator's estimate
-    };
-
-    /// The loop's solution for one sample.
-    struct Solution
-    {
-        float u = 0.0f; ///< t(x - k y4), the first stage's input
-        std::array<float, 4> y{};
-    };
-
     [[nodiscard]] float cutoffAt(float log2Hz) const noexcept
     {
         const float hz = std::exp2(std::clamp(log2Hz + modulationOctaves, -40.0f, 40.0f));
@@ -352,105 +296,19 @@ private:
             const auto io = block.channel(ch).subspan(offset, length);
             for (std::size_t i = 0; i < length; ++i)
             {
-                const auto solution = solve<Sat>(state, io[i] * gain[i], g[i], k[i]);
+                // LadderSolver::solve(), in its two halves, so that the hot one
+                // stays a leaf (ladder_solver.hpp).
+                auto [solution, iterations] = LadderSolver::solveByNewton<Sat>(state, io[i] * gain[i], g[i], k[i]);
+                if (iterations == 0)
+                {
+                    solution = LadderSolver::solveNested<Sat>(state, io[i] * gain[i], g[i], k[i]);
+                }
                 const auto mix = blendedTaps(fade[i]);
                 const float out = (mix[0] * solution.u) + (mix[1] * solution.y[0]) + (mix[2] * solution.y[1]) +
                                   (mix[3] * solution.y[2]) + (mix[4] * solution.y[3]);
                 io[i] = flushDenormal(out);
             }
         }
-    }
-
-    /// One sample of the trapezoidal ladder: the residuals
-    /// F_i = y_i - s_i - g (t(y_(i-1)) - t(y_i)), y_0 = x - k y4, driven to
-    /// zero by Newton-Raphson from the loop linearised at the state. The
-    /// Jacobian is lower bidiagonal plus the feedback corner, so each step
-    /// writes Delta_i = p_i + q_i Delta_4 and solves the last row.
-    template <typename Sat>
-    [[nodiscard]] static Solution solve(ChannelState& state, float x, float g, float k) noexcept
-    {
-        auto& s = state.s;
-        Solution result;
-        auto& y = result.y;
-
-        // The first guess: each t(v) replaced by v t(v0)/v0 at an estimate v0
-        // from the state; the loop is then linear and solved in closed form.
-        {
-            const float inputSecant = Sat::secant(state.previousU);
-            float a = 1.0f;
-            float b = 0.0f;
-            std::array<float, 4> ai{};
-            std::array<float, 4> bi{};
-            float inSecant = inputSecant;
-            for (std::size_t i = 0; i < 4; ++i)
-            {
-                const float stageSecant = Sat::secant(s[i]);
-                const float scale = 1.0f / (1.0f + (g * stageSecant));
-                ai[i] = g * inSecant * scale;
-                bi[i] = s[i] * scale;
-                a *= ai[i];
-                b = (ai[i] * b) + bi[i];
-                inSecant = stageSecant;
-            }
-            float in = (x - (k * b)) / (1.0f + (k * a));
-            for (std::size_t i = 0; i < 4; ++i)
-            {
-                y[i] = (ai[i] * in) + bi[i];
-                in = y[i];
-            }
-        }
-
-        for (std::uint32_t iteration = 0; iteration < maxNewtonIterations; ++iteration)
-        {
-            const float u = x - (k * y[3]);
-            const float tu = Sat::value(u);
-            const float du = Sat::slope(u, tu);
-            std::array<float, 4> p{};
-            std::array<float, 4> q{};
-            float previousT = tu;
-            float previousSlope = du;
-            for (std::size_t i = 0; i < 4; ++i)
-            {
-                const float t = Sat::value(y[i]);
-                const float d = Sat::slope(y[i], t);
-                const float residual = y[i] - s[i] - (g * (previousT - t));
-                const float diagonal = 1.0f / (1.0f + (g * d));
-                if (i == 0)
-                {
-                    p[0] = -residual * diagonal;
-                    q[0] = -(g * k * du) * diagonal;
-                }
-                else
-                {
-                    p[i] = (-residual + (g * previousSlope * p[i - 1])) * diagonal;
-                    q[i] = g * previousSlope * q[i - 1] * diagonal;
-                }
-                previousT = t;
-                previousSlope = d;
-            }
-            // 1 - q4 >= 1: every q_i <= 0 because the slopes are >= 0.
-            const float delta4 = p[3] / (1.0f - q[3]);
-            float largest = 0.0f;
-            for (std::size_t i = 0; i < 4; ++i)
-            {
-                const float delta = i == 3 ? delta4 : p[i] + (q[i] * delta4);
-                y[i] += delta;
-                largest = std::max(largest, std::fabs(delta));
-            }
-            if (largest < newtonTolerance)
-            {
-                break;
-            }
-        }
-
-        const float u = x - (k * y[3]);
-        result.u = Sat::value(u);
-        for (std::size_t i = 0; i < 4; ++i)
-        {
-            s[i] = flushDenormal((2.0f * y[i]) - s[i]);
-        }
-        state.previousU = flushDenormal(u);
-        return result;
     }
 
     float sampleRate = 48000.0f;
@@ -464,7 +322,7 @@ private:
     FilterTapMix previousTaps = filterTapMixes[0];
     bool warm = true;
     bool bypassed = false;
-    std::array<ChannelState, maxChannels> channels{};
+    std::array<LadderState, maxChannels> channels{};
     std::size_t gridPosition = 0;
     float segmentStartGain = 0.0f;
     float segmentEndGain = 0.0f;

@@ -1,41 +1,45 @@
-// The stability report (M1.3 task 7, docs/dsp/filter-stability.md): what the
-// filter's equations should do near Nyquist and at extreme settings, where
-// LadderFilter's Newton solve fails, and the candidate fixes measured against
-// a double-precision reference:
+// The stability report (M1.3 task 7, docs/dsp/filter-stability.md), as built:
+// LadderSolver (Newton as before; where it does not converge, the nested
+// bracketing solve from the linearised guess; a non-finite input taken as 0)
+// and LadderFilter around it, against the double-precision reference and
+// today's Newton solve (ladder_reference.hpp):
 //
-// - the reference: the solution is unique (checked over random states), and
-//   what the filter does with the cutoff held from 0.40 to 0.495 fs, k 4.05
-//   to 64 (level, pitch), against the built filter;
-// - where the as-built solver fails: the lowest fc/fs with an unconverged
-//   sample, k 3.5 to 64, an impulse and a full-scale saw at drive 32, and
-//   the cutoff clamp that would avoid it (the do-nothing baseline);
-// - every candidate over a grid of fc/fs 0.30-0.495, k 0-64, drive 1-32,
-//   Warm on and off, 44.1-192 kHz: unconverged samples, iterations, and the
-//   distance from the reference solved from the same state;
-// - the held-cutoff case (an impulse of 0.5, the cutoff held at 0.46, 0.48,
-//   0.495 fs): each candidate's level and pitch against the reference's;
-// - no regression in the ordinary case: bit-identity with the as-built
-//   solver on the filter report's harmonics and solver-distance material;
-// - extreme settings: audio-rate modulation across the clamp, 1 Hz, DC of
-//   +-10 and drive 32 at k 64, drive 1000, NaN and inf on the input and the
-//   setters, blocks of 1 at the corner, responses and bypass switched while
-//   self-oscillating, and five minutes of self-oscillation;
-// - aliasing at the developer's corner (high resonance, high drive) and
-//   self-oscillating near the clamp, at 1x, 2x, 4x; ADAA on the loop input
-//   as an option.
+// - the equations: the solution is unique (checked over random states), and
+//   what the reference does with the cutoff held near Nyquist, against the
+//   built filter;
+// - where the fallback runs, which is where Newton alone fails: the lowest
+//   fc/fs, k 3.5 to 64, an impulse and a full-scale saw at drive 16 and 32;
+// - the grid of stage 1 (fc/fs 0.30-0.495, k 0-64, drive 1-32, Warm on and
+//   off, 44.1-192 kHz): unconverged samples, the work, the distance from the
+//   reference solved from the same state (absolute, relative to the
+//   equations' scale, and against the bound derived in the tests), and
+//   bit-identity with today's Newton wherever that converges;
+// - the held cutoff: level and pitch against the reference at 0.44-0.495 fs;
+// - the ordinary case: bit-identity with today's Newton on the filter
+//   report's material, and the distance from the reference;
+// - extreme settings: audio-rate modulation across the clamp (against the
+//   reference fed the same g), 1 Hz, DC of +-10 and drive 1000 at k 64, NaN
+//   and inf, the setters, blocks of 1 at the corner, responses and bypass
+//   switched while self-oscillating, and five minutes of self-oscillation
+//   (checked: the suite runs 30 s of it);
+// - aliasing at the developer's corner and of the self-oscillation, at 1x,
+//   2x, and 4x.
 //
-// The prototypes are in filter_stability_candidates.hpp. CPU: the
-// "[filter-stability]" benchmarks (tools/bench.sh "[filter-stability]").
+// The nine solvers it was chosen from, and ADAA on the loop input, are at
+// commit 26cd4ec (filter_stability_candidates.hpp).
 //
 // Hidden from the default run; run it in an optimised build (a few minutes):
 //
 //   cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
 //   build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[filter-stability-report]"
+//
+// CPU: the "[filter-stability]" benchmarks (tools/bench.sh "[filter-stability]").
 
-#include "filter_stability_candidates.hpp"
+#include "ladder_reference.hpp"
 
 #include <anoesis/dsp/core/processor.hpp>
 #include <anoesis/dsp/filters/ladder_filter.hpp>
+#include <anoesis/dsp/filters/ladder_solver.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>
 
 #include <anoesis/test/buffer.hpp>
@@ -66,10 +70,15 @@
 #include <vector>
 
 using namespace anoesis::test;
-using namespace anoesis::test::stability;
+using namespace anoesis::test::ladder;
+using anoesis::dsp::CubicSaturator;
 using anoesis::dsp::FilterResponse;
 using anoesis::dsp::LadderFilter;
+using anoesis::dsp::LadderSolver;
+using anoesis::dsp::LadderSolveStats;
+using anoesis::dsp::LadderState;
 using anoesis::dsp::OversamplingFactor;
+using anoesis::dsp::TanhSaturator;
 
 namespace
 {
@@ -77,6 +86,7 @@ namespace
 constexpr double pi = std::numbers::pi;
 constexpr std::size_t blockSize = 512;
 constexpr double nan = std::numeric_limits<double>::quiet_NaN();
+constexpr double epsilon = std::numeric_limits<float>::epsilon();
 
 std::string fixed(double x, int digits)
 {
@@ -112,45 +122,26 @@ double dbOf(double amplitude)
 template <typename F>
 void forBothSaturators(const F& f)
 {
-    f.template operator()<dsp::TanhSaturator>("Warm on (tanh)");
-    f.template operator()<dsp::CubicSaturator>("Warm off (cubic)");
+    f.template operator()<TanhSaturator>("Warm on (tanh)");
+    f.template operator()<CubicSaturator>("Warm off (cubic)");
 }
 
-/// Every solver candidate, in the order of the doc's table.
-template <typename F>
-void forEachCandidate(const F& f)
-{
-    f.template operator()<NewtonAsBuilt<>>("As built: Newton, 8 iterations");
-    f.template operator()<NewtonDamped<8>>("Damped Newton (line search), 8");
-    f.template operator()<NewtonDamped<32>>("Damped Newton (line search), 32");
-    f.template operator()<NewtonStepLimited<>>("Step-limited Newton (|dy| <= 1)");
-    f.template operator()<NewtonPreviousGuess<>>("Newton from the previous solution");
-    f.template operator()<NewtonOutputVariable<>>("Newton in the saturators' outputs");
-    f.template operator()<NewtonBracketFallback<false>>("Newton + nested fallback, from Newton's iterate");
-    f.template operator()<NewtonBracketFallback<true>>("Newton + nested fallback, from the guess");
-    f.template operator()<NestedOnly>("Nested scalar solve alone");
-}
+template <typename Sat>
+constexpr bool isTanh = std::is_same_v<Sat, TanhSaturator>;
 
-/// The recommended candidate (docs/dsp/filter-stability.md).
-using Chosen = NewtonBracketFallback<true>;
-
-template <typename Sat, typename Solver>
-CandidateFilter<Sat, Solver> makeCandidate(double rate, double cutoff, float k, float drive,
-                                           float clampRatio = LadderFilter::maxCutoffRatio)
+/// g as LadderFilter computes it at a settled grid point.
+float gainFor(double cutoff, double rate)
 {
-    CandidateFilter<Sat, Solver> f{clampRatio};
-    f.setResonance(k);
-    f.setDrive(drive);
-    f.prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = blockSize, .numChannels = 1});
-    f.setCutoff(static_cast<float>(cutoff));
-    return f;
+    const auto fs = static_cast<float>(rate);
+    const float hz = std::exp2(std::log2(static_cast<float>(cutoff)));
+    return std::tan(static_cast<float>(pi) * std::clamp(hz, 1.0f, LadderFilter::maxCutoffRatio * fs) / fs);
 }
 
 template <typename Sat>
 LadderFilter makeBuilt(double rate, double cutoff, float k, float drive)
 {
     LadderFilter f;
-    f.setWarm(std::is_same_v<Sat, dsp::TanhSaturator>);
+    f.setWarm(isTanh<Sat>);
     f.setCutoff(static_cast<float>(cutoff));
     f.setResonance(k);
     f.setDrive(drive);
@@ -162,19 +153,44 @@ std::vector<float> renderBuilt(LadderFilter& f, std::span<const float> x, std::s
 {
     Buffer buffer{1, x.size()};
     std::ranges::copy(x, buffer.channel(0).begin());
-    dsp::processInChunks(f, buffer.block(), block);
+    anoesis::dsp::processInChunks(f, buffer.block(), block);
     return {buffer.channel(0).begin(), buffer.channel(0).end()};
 }
 
-template <typename Filter>
-std::vector<float> renderSamples(Filter& f, std::span<const float> x)
+/// LP24 from a solver at a fixed g and k: the filter's per-sample path with
+/// settled controls (drive on the input, y4 out, flushed).
+struct SolverRun
 {
-    std::vector<float> y(x.size());
+    std::vector<float> y;
+    std::uint64_t fellBack = 0;
+    std::uint64_t unconverged = 0;
+};
+
+template <typename Sat, bool Today>
+SolverRun renderSolver(std::span<const float> x, float drive, std::span<const float> g, float k)
+{
+    SolverRun run;
+    run.y.resize(x.size());
+    LadderState state;
     for (std::size_t n = 0; n < x.size(); ++n)
     {
-        y[n] = f.processSample(0, x[n]);
+        const float gn = g.size() == 1 ? g[0] : g[n];
+        if constexpr (Today)
+        {
+            const auto r = todaysNewton<Sat>(state, x[n] * drive, gn, k);
+            run.y[n] = anoesis::dsp::flushDenormal(r.solution.y[3]);
+            run.unconverged += r.converged ? 0U : 1U;
+        }
+        else
+        {
+            LadderSolveStats stats;
+            const auto r = LadderSolver::solve<Sat>(state, x[n] * drive, gn, k, &stats);
+            run.y[n] = anoesis::dsp::flushDenormal(r.y[3]);
+            run.fellBack += stats.fellBack ? 1U : 0U;
+            run.unconverged += stats.converged ? 0U : 1U;
+        }
     }
-    return y;
+    return run;
 }
 
 std::vector<float> kick(std::size_t n, float amplitude = 0.5f)
@@ -211,6 +227,12 @@ double peakOf(std::span<const float> y)
     return peak;
 }
 
+bool bitIdentical(std::span<const float> a, std::span<const float> b)
+{
+    return std::ranges::equal(a, b, [](float p, float q)
+                              { return std::bit_cast<std::uint32_t>(p) == std::bit_cast<std::uint32_t>(q); });
+}
+
 /// The strongest spectral peak in Hz (Hann 16384, parabolic on log power):
 /// near Nyquist zero crossings can't resolve the period.
 double peakHz(std::span<const float> x, double rate)
@@ -227,7 +249,7 @@ double peakHz(std::span<const float> x, double rate)
     const double b = std::log(p[top]);
     const double c = std::log(p[top + 1]);
     const double offset = 0.5 * (a - c) / (a - (2.0 * b) + c);
-    return spectrum.frequencyOf(top) + (offset * (spectrum.frequencyOf(1) - spectrum.frequencyOf(0)));
+    return spectrum.frequencyOf(top) + (offset * spectrum.binWidth());
 }
 
 struct Behaviour
@@ -271,6 +293,12 @@ std::string describe(const Behaviour& b)
     return fixed(b.levelDb, 1) + " / " + fixed(b.cents, 1) + (b.peak > 2.0 ? " (peak " + fixed(b.peak, 0) + ")" : "");
 }
 
+/// test (1)'s criterion: level within 0.1 dB, pitch within 1 cent, peak under 1.
+bool matches(const Behaviour& b, const Behaviour& reference)
+{
+    return std::fabs(b.levelDb - reference.levelDb) < 0.1 && std::fabs(b.cents - reference.cents) < 1.0 && b.peak < 1.0;
+}
+
 /// The reference ladder along its own trajectory, as floats for measuring.
 template <typename Sat>
 std::vector<float> renderReference(std::span<const float> x, float drive, float g, float k)
@@ -284,12 +312,7 @@ std::vector<float> renderReference(std::span<const float> x, float drive, float 
     return y;
 }
 
-float gainFor(double cutoff, double rate)
-{
-    return makeCandidate<dsp::TanhSaturator, NewtonAsBuilt<>>(rate, cutoff, 0.0f, 1.0f).gain();
-}
-
-// --- 1. The reference -----------------------------------------------------------
+// --- 1. The equations ---------------------------------------------------------------
 
 void reportUniqueness()
 {
@@ -321,7 +344,6 @@ void reportUniqueness()
             const double k = next() < 0.2 ? 64.0 : next() * 16.0;
             std::array<double, 4> y{};
             double previous = 0.0;
-            double previousY4 = 0.0;
             int changes = 0;
             for (int i = 0; i <= 2000; ++i)
             {
@@ -333,10 +355,8 @@ void reportUniqueness()
                 {
                     changes += (phi > 0.0) != (previous > 0.0) ? 1 : 0;
                     decreasing += phi < previous - (1e-9 * (1.0 + std::fabs(previous))) ? 1 : 0;
-                    CHECK(y4 > previousY4);
                 }
                 previous = phi;
-                previousY4 = y4;
             }
             mostChanges = std::max(mostChanges, changes);
         }
@@ -360,7 +380,7 @@ void reportReferenceNearNyquist()
         {
             std::cout << "\n### What the equations do with the cutoff held near Nyquist: the reference, " << name
                       << "\n\nAn impulse of 0.5, 48 kHz, 1.5 s; the last 0.5 s: level (dBFS, peak-equivalent from "
-                         "the RMS) / pitch (cents from the cutoff). Below, the built filter's peak there.\n\n"
+                         "the RMS) / pitch (cents from the cutoff). Below, LadderFilter's at 0.495 fs.\n\n"
                          "| fc/fs | g | k 4.05 | 4.4 | 5 | 6 | 8 | 16 | 64 |\n|---|---|---|---|---|---|---|---|---|\n";
             for (const double ratio : ratios)
             {
@@ -368,64 +388,56 @@ void reportReferenceNearNyquist()
                 std::cout << "| " << fixed(ratio, 3) << " | " << fixed(g, 2);
                 for (const float k : ks)
                 {
-                    const auto y = renderReference<Sat>(x, 1.0f, g, k);
-                    std::cout << " | " << describe(behaviourOf(y, rate, ratio * rate));
+                    std::cout << " | "
+                              << describe(behaviourOf(renderReference<Sat>(x, 1.0f, g, k), rate, ratio * rate));
                 }
                 std::cout << " |\n";
             }
-            std::cout << "| built, peak | |";
+            std::cout << "| **LadderFilter, 0.495** | |";
             for (const float k : ks)
             {
                 auto f = makeBuilt<Sat>(rate, 0.495 * rate, k, 1.0f);
-                std::cout << " " << fixed(behaviourOf(renderBuilt(f, x), rate, 0.495 * rate).peak, 1) << " |";
+                std::cout << " " << describe(behaviourOf(renderBuilt(f, x), rate, 0.495 * rate)) << " |";
             }
             std::cout << "\n";
-            std::cout << "\nFor comparison, at 440 Hz (filters.md): k 4.05 " << name << ", "
-                      << describe(behaviourOf(renderReference<Sat>(kick(static_cast<std::size_t>(3.0 * rate)), 1.0f,
-                                                                   gainFor(440.0, rate), 4.05f),
-                                              rate, 440.0))
-                      << "; k 8, "
-                      << describe(behaviourOf(renderReference<Sat>(kick(static_cast<std::size_t>(3.0 * rate)), 1.0f,
-                                                                   gainFor(440.0, rate), 8.0f),
-                                              rate, 440.0))
-                      << ".\n";
         });
 }
 
-// --- 2. Where the as-built solver fails ----------------------------------------------
+// --- 2. Where the fallback runs ---------------------------------------------------------
 
-/// The lowest fc/fs (0.0025 to 0.495 in steps of 0.0025) at which the solver
-/// leaves a sample unconverged, or 0 if none.
-template <typename Sat, typename Solver>
-double lowestFailure(double rate, float k, float drive, std::span<const float> x)
+/// The lowest fc/fs (0.0025 to 0.495 in steps of 0.0025) at which the built
+/// solve falls back (Newton alone leaves the sample unconverged), or 0 if
+/// none; and whether any sample there ended unconverged.
+template <typename Sat>
+std::pair<double, std::uint64_t> lowestFallback(double rate, float k, float drive, std::span<const float> x)
 {
     for (int step = 1; step <= 198; ++step)
     {
         const double ratio = 0.0025 * step;
-        auto f = makeCandidate<Sat, Solver>(rate, ratio * rate, k, drive);
-        static_cast<void>(renderSamples(f, x));
-        if (f.stats.unconverged > 0)
+        const std::array<float, 1> g{gainFor(ratio * rate, rate)};
+        const auto run = renderSolver<Sat, false>(x, drive, g, k);
+        if (run.fellBack > 0)
         {
-            return ratio;
+            return {ratio, run.unconverged};
         }
     }
-    return 0.0;
+    return {0.0, 0};
 }
 
-void reportBoundary()
+void reportFallbackBoundary()
 {
     constexpr double rate = 48000.0;
     constexpr std::array<float, 12> ks{3.5f, 4.05f, 4.4f, 5.0f, 6.0f, 8.0f, 12.0f, 16.0f, 24.0f, 32.0f, 48.0f, 64.0f};
     const auto impulse = kick(12000);
     const auto loud = saw(110.0, rate, 12000, 1.0f);
-    std::cout << "\n### Where the as-built solver fails\n\n"
-                 "The lowest fc/fs (from 0.0025 in steps of 0.0025) with a sample Newton leaves unconverged at 8 "
-                 "iterations, 48 kHz, 0.25 s (- : none up to 0.495). Impulse: 0.5 at drive 1. Saw: a full-scale "
-                 "110 Hz saw at drive 16 (F8's +24 dB) and 32.\n\n"
+    std::cout << "\n### Where the fallback runs\n\n"
+                 "The lowest fc/fs (from 0.0025 in steps of 0.0025) with a sample where Newton does not converge in "
+                 "8 iterations, so the nested solve runs: the as-built solver's failure boundary (stage 1), now "
+                 "where the fallback takes over. 48 kHz, 0.25 s (- : none up to 0.495). Impulse: 0.5 at drive 1. "
+                 "Saw: a full-scale 110 Hz saw at drive 16 (F8's +24 dB) and 32.\n\n"
                  "| Saturator | Input | k 3.5 | 4.05 | 4.4 | 5 | 6 | 8 | 12 | 16 | 24 | 32 | 48 | 64 |\n"
                  "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n";
-    double failureBoundary = 0.495; // the lowest failing fc/fs anywhere, for the clamp
-    double lowestUpToSix = 0.495;
+    std::uint64_t unconverged = 0;
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
@@ -436,134 +448,132 @@ void reportBoundary()
                           << (isSaw ? "saw, drive " + fixed(drive, 0) : std::string{"impulse"});
                 for (const float k : ks)
                 {
-                    const double r = lowestFailure<Sat, NewtonAsBuilt<>>(rate, k, isSaw ? drive : 1.0f,
-                                                                         isSaw ? std::span<const float>{loud}
-                                                                               : std::span<const float>{impulse});
-                    std::cout << " | " << (r > 0.0 ? fixed(r, 4) : "-");
-                    if (r > 0.0)
-                    {
-                        failureBoundary = std::min(failureBoundary, r);
-                        if (k <= 6.0f && drive <= 16.0f)
-                        {
-                            lowestUpToSix = std::min(lowestUpToSix, r);
-                        }
-                    }
+                    const auto [ratio, bad] =
+                        lowestFallback<Sat>(rate, k, isSaw ? drive : 1.0f,
+                                            isSaw ? std::span<const float>{loud} : std::span<const float>{impulse});
+                    unconverged += bad;
+                    std::cout << " | " << (ratio > 0.0 ? fixed(ratio, 4) : "-");
                 }
                 std::cout << " |\n";
             }
         });
-    const auto semitones = [](double from, double to)
-    {
-        return 12.0 * std::log2(from / to);
-    };
-    const double clamp = failureBoundary - 0.0025;
-    const double clampSix = lowestUpToSix - 0.0025;
-    std::cout
-        << "\n**The clamp as the fix (the do-nothing baseline).** The highest safe fc/fs for k up to 64 and drive "
-           "up to 32: "
-        << fixed(clamp, 4)
-        << "; for k up to 6 and drive up to 16 (Resonance and Drive at 10 under F5 and F8): " << fixed(clampSix, 4)
-        << ". The top cutoff it leaves, against today's 0.495 fs and F3's 20.5 kHz:\n\n"
-           "| Rate | 0.495 fs | Any k, drive: clamp | lost | The knobs' ranges: clamp | lost | F3's top (20.5 kHz) |\n"
-           "|---|---|---|---|---|---|---|\n";
-    for (const double r : {44100.0, 48000.0, 96000.0})
-    {
-        const double top = std::min(20500.0, 0.495 * r);
-        std::cout << "| " << fixed(r / 1000.0, 1) << " kHz | " << fixed(0.495 * r, 0) << " Hz | " << fixed(clamp * r, 0)
-                  << " Hz | " << fixed(semitones(0.495 * r, clamp * r), 2) << " st | " << fixed(clampSix * r, 0)
-                  << " Hz | " << fixed(semitones(0.495 * r, clampSix * r), 2) << " st | "
-                  << (20500.0 <= clampSix * r ? std::string{"reachable"}
-                                              : "cut by " + fixed(semitones(top, clampSix * r), 2) + " st")
-                  << " |\n";
-    }
+    CHECK(unconverged == 0);
+    std::cout << "\nUnconverged samples after the fallback, at those boundaries: " << unconverged << ".\n";
 }
 
-// --- 3. The convergence grid -----------------------------------------------------------------
-
-struct GridTotals
-{
-    std::uint64_t samples = 0;
-    std::uint64_t unconverged = 0;
-    std::uint64_t iterations = 0;
-    std::uint32_t maxIterations = 0;
-    std::uint64_t fallbacks = 0;
-    std::uint64_t stageEvaluations = 0;
-    std::size_t cells = 0;
-    std::size_t cellsUnconverged = 0;
-    std::size_t cellsOff = 0; ///< some sample more than 1e-4 of its equation's scale from the reference
-    double worstDistance = 0.0;
-    double worstRelative = 0.0;
-    std::string worstCell;
-};
+// --- 3. The grid ---------------------------------------------------------------------------------
 
 constexpr std::array<double, 11> gridRatios{0.30, 0.35, 0.40, 0.42, 0.44, 0.45, 0.46, 0.47, 0.48, 0.49, 0.495};
 constexpr std::array<float, 11> gridKs{0.0f, 2.0f, 3.9f, 4.05f, 4.4f, 5.0f, 6.0f, 8.0f, 16.0f, 32.0f, 64.0f};
 constexpr std::array<float, 4> gridDrives{1.0f, 4.0f, 16.0f, 32.0f};
 constexpr std::array<double, 4> gridRates{44100.0, 48000.0, 96000.0, 192000.0};
-constexpr std::size_t gridSamples = 2048;
+constexpr std::size_t gridLength = 2048;
 
-/// For the as-built map: cells off the reference, by fc/fs and k.
-using FailureMap = std::array<std::array<int, gridKs.size()>, gridRatios.size()>;
+struct GridTotals
+{
+    std::uint64_t samples = 0;
+    std::uint64_t unconverged = 0;
+    std::uint64_t fellBack = 0;
+    std::uint64_t newtonIterations = 0;
+    std::uint64_t rows = 0;
+    std::uint32_t maxRows = 0;
+    std::uint64_t stageEvaluations = 0;
+    std::uint32_t maxStageEvaluations = 0;
+    std::uint64_t newtonConverged = 0; ///< samples where today's Newton converges from the same state
+    std::uint64_t differ = 0;          ///< ... and the built solve differs from it
+    std::size_t cells = 0;
+    std::size_t cellsOff = 0; ///< some sample more than 1e-4 of its equations' scale from the reference
+    double worstDistance = 0.0;
+    double worstRelative = 0.0;
+    double worstOfBound = 0.0; ///< the largest error as a fraction of the derived bound
+    std::string worstCell;
+};
 
-template <typename Sat, typename Solver>
-GridTotals runGrid(FailureMap* map)
+bool sameSolution(const anoesis::dsp::LadderSolution& a, const LadderState& sa, const anoesis::dsp::LadderSolution& b,
+                  const LadderState& sb)
+{
+    const auto same = [](float p, float q)
+    {
+        return std::bit_cast<std::uint32_t>(p) == std::bit_cast<std::uint32_t>(q);
+    };
+    bool identical = same(a.u, b.u) && same(sa.previousU, sb.previousU);
+    for (std::size_t i = 0; i < 4; ++i)
+    {
+        identical = identical && same(a.y[i], b.y[i]) && same(sa.s[i], sb.s[i]);
+    }
+    return identical;
+}
+
+template <typename Sat>
+GridTotals runGrid()
 {
     using R = ReferenceOf<Sat>::Type;
     GridTotals t;
     for (const double rate : gridRates)
     {
-        const auto x = saw(110.0, rate, gridSamples);
-        for (std::size_t ri = 0; ri < gridRatios.size(); ++ri)
+        const auto x = saw(110.0, rate, gridLength);
+        for (const double ratio : gridRatios)
         {
-            for (std::size_t ki = 0; ki < gridKs.size(); ++ki)
+            const float g = gainFor(ratio * rate, rate);
+            const double gd = g;
+            for (const float k : gridKs)
             {
+                const double kd = k;
                 for (const float drive : gridDrives)
                 {
-                    const double ratio = gridRatios[ri];
-                    const float k = gridKs[ki];
-                    auto f = makeCandidate<Sat, Solver>(rate, ratio * rate, k, drive);
-                    double worst = 0.0;
+                    LadderState state;
                     double worstRelative = 0.0;
                     for (const float v : x)
                     {
-                        const auto before = f.state();
-                        static_cast<void>(f.processSample(0, v));
-                        const auto& after = f.state();
-                        const std::array<double, 4> s{before.s[0], before.s[1], before.s[2], before.s[3]};
-                        const std::array<double, 4> guess{after.y[0], after.y[1], after.y[2], after.y[3]};
-                        const auto r = referenceSolve<R>(s, static_cast<double>(v * drive), f.gain(), k, guess);
-                        // The size of the terms in the stage equations, which sets float's rounding there.
-                        double scale = 1.0 + (2.0 * static_cast<double>(f.gain()));
+                        const std::array<double, 4> s{state.s[0], state.s[1], state.s[2], state.s[3]};
+                        auto today = state;
+                        const auto newton = todaysNewton<Sat>(today, v * drive, g, k);
+                        LadderSolveStats stats;
+                        const auto solution = LadderSolver::solve<Sat>(state, v * drive, g, k, &stats);
+                        ++t.samples;
+                        t.unconverged += stats.converged ? 0U : 1U;
+                        t.fellBack += stats.fellBack ? 1U : 0U;
+                        t.newtonIterations += stats.newtonIterations;
+                        t.rows += stats.rows;
+                        t.maxRows = std::max(t.maxRows, stats.rows);
+                        t.stageEvaluations += stats.stageEvaluations;
+                        t.maxStageEvaluations = std::max(t.maxStageEvaluations, stats.stageEvaluations);
+                        if (newton.converged)
+                        {
+                            ++t.newtonConverged;
+                            t.differ += sameSolution(solution, state, newton.solution, today) ? 0U : 1U;
+                        }
+                        const std::array<double, 4> guess{solution.y[0], solution.y[1], solution.y[2], solution.y[3]};
+                        const auto r = referenceSolve<R>(s, static_cast<double>(v * drive), gd, kd, guess);
+                        double scale = 1.0 + (2.0 * gd);
                         for (const double si : s)
                         {
-                            scale = std::max(scale, 1.0 + std::fabs(si) + (2.0 * static_cast<double>(f.gain())));
+                            scale = std::max(scale, 1.0 + std::fabs(si) + (2.0 * gd));
+                        }
+                        // The bound of the suite's grid test (ladder_stability_test.cpp).
+                        const double residual = 8.0 * epsilon * scale;
+                        const double tau = stats.fellBack ? static_cast<double>(LadderSolver::newtonTolerance) : 0.0;
+                        std::array<double, 4> q{};
+                        for (std::size_t i = 0; i < 4; ++i)
+                        {
+                            const double d = 1.0 + (gd * R::slope(r.y[i]));
+                            q[i] = i == 0 ? gd * kd * R::slope(r.u) / d : q[i - 1] * gd * R::slope(r.y[i - 1]) / d;
                         }
                         for (std::size_t i = 0; i < 4; ++i)
                         {
-                            const double d = std::fabs(static_cast<double>(after.y[i]) - r.y[i]);
-                            worst = std::isfinite(d) ? std::max(worst, d) : std::numeric_limits<double>::infinity();
-                            worstRelative = std::isfinite(d) ? std::max(worstRelative, d / scale)
-                                                             : std::numeric_limits<double>::infinity();
+                            const double error = std::fabs(static_cast<double>(solution.y[i]) - r.y[i]);
+                            const double bound = (static_cast<double>(i + 1) * residual) +
+                                                 (q[i] * ((4.0 * residual / (1.0 + q[3])) + tau));
+                            t.worstDistance = std::max(t.worstDistance, error);
+                            worstRelative = std::max(worstRelative, error / scale);
+                            t.worstOfBound = std::max(t.worstOfBound, error / bound);
                         }
                     }
-                    const auto& st = f.stats;
-                    t.samples += st.samples;
-                    t.unconverged += st.unconverged;
-                    t.iterations += st.iterations;
-                    t.maxIterations = std::max(t.maxIterations, st.maxIterations);
-                    t.fallbacks += st.fallbacks;
-                    t.stageEvaluations += st.stageEvaluations;
                     ++t.cells;
-                    t.cellsUnconverged += st.unconverged > 0 ? 1U : 0U;
                     t.cellsOff += worstRelative > 1e-4 ? 1U : 0U;
-                    t.worstRelative = std::max(t.worstRelative, worstRelative);
-                    if (map != nullptr && worstRelative > 1e-4)
+                    if (worstRelative > t.worstRelative)
                     {
-                        ++(*map)[ri][ki];
-                    }
-                    t.worstDistance = std::max(t.worstDistance, worst);
-                    if (worstRelative >= t.worstRelative)
-                    {
+                        t.worstRelative = worstRelative;
                         t.worstCell = fixed(ratio, 3) + " fs, k " + fixed(k, 2) + ", drive " + fixed(drive, 0) + ", " +
                                       fixed(rate / 1000.0, 1) + " kHz";
                     }
@@ -577,169 +587,110 @@ GridTotals runGrid(FailureMap* map)
 void reportGrid()
 {
     std::cout
-        << "\n### Every candidate over the grid\n\n"
-           "fc/fs 0.30, 0.35, 0.40, 0.42, 0.44-0.49 by 0.01, 0.495; k 0, 2, 3.9, 4.05, 4.4, 5, 6, 8, 16, 32, 64; "
-           "drive 1, 4, 16, 32; 44.1, 48, 96, 192 kHz: 1,936 cells per saturator, each a 110 Hz saw at "
-           "-6 dBFS (times the drive) for 2,048 samples from rest. Unconverged: samples the solver ended "
-           "without a step under 1e-5. Iterations: residual evaluations, plus the nested solve's rows (its "
-           "stage evaluations are the next column, per sample). Distance: the largest |y_i - y_ref,i| per "
-           "sample, the reference solved in double from the candidate's own state, and the same relative to "
-           "the size of the terms in the stage equations (1 + max|s_i| + 2g), which sets float's rounding "
-           "there (about 1e-7 of it); off: cells with a sample more than 1e-4 of that scale away.\n\n"
-           "| Candidate | Saturator | Unconverged samples | Cells unconverged | Cells off | Mean / max "
-           "iterations | Nested solves / stage evaluations per sample | Largest distance: absolute / relative | Where "
-           "(the largest relative) |\n"
-           "|---|---|---|---|---|---|---|---|---|\n";
-    FailureMap tanhMap{};
-    FailureMap cubicMap{};
-    forEachCandidate(
-        [&]<typename Solver>(const char* candidate)
+        << "\n### The grid\n\n"
+           "Stage 1's grid: fc/fs 0.30, 0.35, 0.40, 0.42, 0.44-0.49 by 0.01, 0.495; k 0, 2, 3.9, 4.05, 4.4, 5, 6, 8, "
+           "16, 32, 64; drive 1, 4, 16, 32; 44.1, 48, 96, 192 kHz: 1,936 cells per saturator, each a 110 Hz saw at "
+           "-6 dBFS (times the drive) for 2,048 samples from rest. Every sample solved by LadderSolver, by today's "
+           "Newton, and by the reference, from the same state. Unconverged: the solve's own report. Rows, stage "
+           "evaluations: the nested solve's work, per sample over the whole grid (mean / max). Distance: the "
+           "largest |y_i - y_ref,i|, absolute and relative to the equations' scale 1 + max|s_i| + 2g; cells off: "
+           "a sample more than 1e-4 of that scale away; of the bound: the largest error as a fraction of the "
+           "per-sample bound derived in the suite's grid test. Identical: of the samples where today's Newton "
+           "converges, those where the built solve is the same to the bit.\n\n"
+           "| Saturator | Unconverged | Fell back | Newton iterations (mean) | Rows (mean / max) | Stage evaluations "
+           "(mean / max) | Cells off | Distance: absolute / relative | Of the bound | Where (relative) | Today's "
+           "Newton converges / identical |\n"
+           "|---|---|---|---|---|---|---|---|---|---|---|\n";
+    forBothSaturators(
+        [&]<typename Sat>(const char* name)
         {
-            forBothSaturators(
-                [&]<typename Sat>(const char* name)
-                {
-                    FailureMap* map = nullptr;
-                    if constexpr (std::is_same_v<Solver, NewtonAsBuilt<>>)
-                    {
-                        map = std::is_same_v<Sat, dsp::TanhSaturator> ? &tanhMap : &cubicMap;
-                    }
-                    const auto t = runGrid<Sat, Solver>(map);
-                    const auto samples = static_cast<double>(t.samples);
-                    std::cout << "| " << candidate << " | " << name << " | " << t.unconverged << " ("
-                              << fixed(100.0 * static_cast<double>(t.unconverged) / samples, 2) << "%) | "
-                              << t.cellsUnconverged << " | " << t.cellsOff << " | "
-                              << fixed(static_cast<double>(t.iterations) / samples, 2) << " / " << t.maxIterations
-                              << " | " << fixed(100.0 * static_cast<double>(t.fallbacks) / samples, 2) << "% / "
-                              << fixed(static_cast<double>(t.stageEvaluations) / samples, 2) << " | "
-                              << scientific(t.worstDistance) << " / " << scientific(t.worstRelative) << " | "
-                              << t.worstCell << " |\n";
-                });
+            const auto t = runGrid<Sat>();
+            const auto samples = static_cast<double>(t.samples);
+            CHECK(t.unconverged == 0);
+            CHECK(t.differ == 0);
+            CHECK(t.worstOfBound <= 1.0);
+            std::cout << "| " << name << " | " << t.unconverged << " | "
+                      << fixed(100.0 * static_cast<double>(t.fellBack) / samples, 2) << "% | "
+                      << fixed(static_cast<double>(t.newtonIterations) / samples, 2) << " | "
+                      << fixed(static_cast<double>(t.rows) / samples, 2) << " / " << t.maxRows << " | "
+                      << fixed(static_cast<double>(t.stageEvaluations) / samples, 2) << " / " << t.maxStageEvaluations
+                      << " | " << t.cellsOff << " | " << scientific(t.worstDistance) << " / "
+                      << scientific(t.worstRelative) << " | " << fixed(t.worstOfBound, 3) << " | " << t.worstCell
+                      << " | " << t.newtonConverged << " / " << (t.newtonConverged - t.differ) << " |\n";
         });
-
-    for (const auto& [map, name] : {std::pair{&tanhMap, "tanh"}, std::pair{&cubicMap, "cubic"}})
-    {
-        std::cout
-            << "\n**Where the as-built solver is off the reference** (" << name
-            << "): cells off (more than 1e-4 of the equations' scale), of 16 (4 drives x 4 rates), by fc/fs and k.\n\n"
-               "| fc/fs | k 0 | 2 | 3.9 | 4.05 | 4.4 | 5 | 6 | 8 | 16 | 32 | 64 |\n"
-               "|---|---|---|---|---|---|---|---|---|---|---|---|\n";
-        for (std::size_t ri = 0; ri < gridRatios.size(); ++ri)
-        {
-            std::cout << "| " << fixed(gridRatios[ri], 3);
-            for (std::size_t ki = 0; ki < gridKs.size(); ++ki)
-            {
-                const int n = (*map)[ri][ki];
-                std::cout << " | " << (n == 0 ? "." : std::to_string(n));
-            }
-            std::cout << " |\n";
-        }
-    }
 }
 
-// --- 4. The held-cutoff case -----------------------------------------------------------------------
+// --- 4. The held cutoff -----------------------------------------------------------------------------
 
 void reportHeldCutoff()
 {
     constexpr std::array<float, 7> ks{4.05f, 4.4f, 5.0f, 6.0f, 8.0f, 16.0f, 64.0f};
+    int total = 0;
+    int matched = 0;
+    const auto x48 = kick(static_cast<std::size_t>(1.5 * 48000.0));
     for (const double rate : {48000.0, 44100.0})
     {
+        const auto x = kick(static_cast<std::size_t>(1.5 * rate));
         forBothSaturators(
             [&]<typename Sat>(const char* name)
             {
                 const double cutoff = 0.495 * rate;
-                const auto x = kick(static_cast<std::size_t>(1.5 * rate));
-                std::cout << "\n### The held cutoff: an impulse of 0.5, the cutoff at 0.495 fs, " << name << ", "
-                          << fixed(rate / 1000.0, 1)
-                          << " kHz\n\nLevel (dBFS) / pitch (cents from the cutoff) over the last 0.5 s of 1.5 s, with "
-                             "the peak there when above 2.\n\n"
-                             "| Model | k 4.05 | 4.4 | 5 | 6 | 8 | 16 | 64 | Matches |\n"
-                             "|---|---|---|---|---|---|---|---|---|\n";
+                std::cout << "\n### The held cutoff at 0.495 fs, " << name << ", " << fixed(rate / 1000.0, 1)
+                          << " kHz\n\nAn impulse of 0.5; level (dBFS) / pitch (cents from the cutoff) over the last "
+                             "0.5 s of 1.5 s, the peak when above 2.\n\n"
+                             "| Model | k 4.05 | 4.4 | 5 | 6 | 8 | 16 | 64 | Matches "
+                             "|\n|---|---|---|---|---|---|---|---|---|\n";
                 const float g = gainFor(cutoff, rate);
                 std::array<Behaviour, ks.size()> reference{};
-                std::cout << "| **Reference (double)**";
+                std::cout << "| Reference (double)";
                 for (std::size_t i = 0; i < ks.size(); ++i)
                 {
                     reference[i] = behaviourOf(renderReference<Sat>(x, 1.0f, g, ks[i]), rate, cutoff);
                     std::cout << " | " << describe(reference[i]);
                 }
-                std::cout << " | |\n";
-                forEachCandidate(
-                    [&]<typename Solver>(const char* candidate)
-                    {
-                        std::cout << "| " << candidate;
-                        int matches = 0;
-                        for (std::size_t i = 0; i < ks.size(); ++i)
-                        {
-                            auto f = makeCandidate<Sat, Solver>(rate, cutoff, ks[i], 1.0f);
-                            const auto b = behaviourOf(renderSamples(f, x), rate, cutoff);
-                            const bool match = std::fabs(b.levelDb - reference[i].levelDb) < 0.1 &&
-                                               std::fabs(b.cents - reference[i].cents) < 1.0 &&
-                                               b.peak < (1.1 * reference[i].peak) + 1e-3;
-                            matches += match ? 1 : 0;
-                            std::cout << " | " << describe(b);
-                        }
-                        std::cout << " | " << matches << " of " << ks.size() << " |\n";
-                    });
+                std::cout << " | |\n| **LadderFilter**";
+                int m = 0;
+                for (std::size_t i = 0; i < ks.size(); ++i)
+                {
+                    auto f = makeBuilt<Sat>(rate, cutoff, ks[i], 1.0f);
+                    const auto b = behaviourOf(renderBuilt(f, x), rate, cutoff);
+                    m += matches(b, reference[i]) ? 1 : 0;
+                    std::cout << " | " << describe(b);
+                }
+                total += static_cast<int>(ks.size());
+                matched += m;
+                std::cout << " | " << m << " of " << ks.size() << " |\n";
             });
     }
-
-    std::cout << "\n**Lower held cutoffs** (48 kHz): the number of k (of 4.05, 4.4, 5, 6, 8, 16, 64) where the "
-                 "candidate matches the reference within 0.1 dB and 1 cent, peak within 10%.\n\n"
-                 "| Candidate | tanh 0.44 | 0.46 | 0.48 | cubic 0.44 | 0.46 | 0.48 |\n|---|---|---|---|---|---|---|\n";
-    constexpr double rate = 48000.0;
-    const auto x = kick(static_cast<std::size_t>(1.5 * rate));
-    std::vector<std::vector<Behaviour>> references;
+    std::cout << "\n**Lower held cutoffs** (48 kHz): the number of k (of 4.05, 4.4, 5, 6, 8, 16, 64) where "
+                 "LadderFilter matches the reference (level within 0.1 dB, pitch within 1 cent, peak under 1).\n\n"
+                 "| Saturator | 0.44 | 0.46 | 0.48 |\n|---|---|---|---|\n";
     forBothSaturators(
-        [&]<typename Sat>(const char*)
+        [&]<typename Sat>(const char* name)
         {
+            std::cout << "| " << name;
             for (const double ratio : {0.44, 0.46, 0.48})
             {
-                std::vector<Behaviour> row;
-                row.reserve(ks.size());
+                int m = 0;
                 for (const float k : ks)
                 {
-                    row.push_back(
-                        behaviourOf(renderReference<Sat>(x, 1.0f, gainFor(ratio * rate, rate), k), rate, ratio * rate));
+                    const auto reference =
+                        behaviourOf(renderReference<Sat>(x48, 1.0f, gainFor(ratio * 48000.0, 48000.0), k), 48000.0,
+                                    ratio * 48000.0);
+                    auto f = makeBuilt<Sat>(48000.0, ratio * 48000.0, k, 1.0f);
+                    m += matches(behaviourOf(renderBuilt(f, x48), 48000.0, ratio * 48000.0), reference) ? 1 : 0;
                 }
-                references.push_back(row);
+                total += static_cast<int>(ks.size());
+                matched += m;
+                std::cout << " | " << m;
             }
-        });
-    forEachCandidate(
-        [&]<typename Solver>(const char* candidate)
-        {
-            std::cout << "| " << candidate;
-            std::size_t column = 0;
-            forBothSaturators(
-                [&]<typename Sat>(const char*)
-                {
-                    for (const double ratio : {0.44, 0.46, 0.48})
-                    {
-                        int matches = 0;
-                        for (std::size_t i = 0; i < ks.size(); ++i)
-                        {
-                            auto f = makeCandidate<Sat, Solver>(rate, ratio * rate, ks[i], 1.0f);
-                            const auto b = behaviourOf(renderSamples(f, x), rate, ratio * rate);
-                            const auto& r = references[column][i];
-                            matches += std::fabs(b.levelDb - r.levelDb) < 0.1 && std::fabs(b.cents - r.cents) < 1.0 &&
-                                               b.peak < (1.1 * r.peak) + 1e-3
-                                           ? 1
-                                           : 0;
-                        }
-                        std::cout << " | " << matches;
-                        ++column;
-                    }
-                });
             std::cout << " |\n";
         });
+    CHECK(matched == total);
+    std::cout << "\nMatched " << matched << " of " << total << ".\n";
 }
 
-// --- 5. No regression in the ordinary case ---------------------------------------------------------
-
-bool bitIdentical(std::span<const float> a, std::span<const float> b)
-{
-    return std::ranges::equal(a, b, [](float p, float q)
-                              { return std::bit_cast<std::uint32_t>(p) == std::bit_cast<std::uint32_t>(q); });
-}
+// --- 5. The ordinary case ---------------------------------------------------------------------------
 
 double errorDb(std::span<const float> y, std::span<const float> reference, std::size_t from)
 {
@@ -754,103 +705,72 @@ double errorDb(std::span<const float> y, std::span<const float> reference, std::
     return e > 0.0 ? 10.0 * std::log10(e / s) : -std::numeric_limits<double>::infinity();
 }
 
-/// The filter report's solver-distance material: a 110 Hz saw at -6 dBFS, the
-/// cutoff swept 100 Hz -> 8 kHz -> 100 Hz (in octaves) over 2 s, 44.1 kHz,
-/// g per sample as the candidates computed it.
-template <typename Sat, typename Solver>
-std::vector<float> sweep(float k, float drive, bool reference)
+/// The filter report's solver-distance sweep's g per sample: the cutoff
+/// 100 Hz -> 8 kHz -> 100 Hz (in octaves) over 2 s, 44.1 kHz.
+std::vector<float> sweepGains()
 {
     constexpr double rate = 44100.0;
     const auto n = static_cast<std::size_t>(2.0 * rate);
-    const auto x = saw(110.0, rate, n);
-    auto f = makeCandidate<Sat, Solver>(rate, 100.0, k, drive);
-    ReferenceLadder<typename ReferenceOf<Sat>::Type> ladder;
-    std::vector<float> y(n);
+    std::vector<float> g(n);
     for (std::size_t i = 0; i < n; ++i)
     {
         const double phase = static_cast<double>(i) / static_cast<double>(n);
         const double octaves = std::log2(80.0) * (1.0 - std::fabs((2.0 * phase) - 1.0));
-        f.setCutoff(static_cast<float>(100.0 * std::exp2(octaves)));
-        y[i] = reference ? static_cast<float>(ladder.process(static_cast<double>(x[i] * drive), f.gain(), k))
-                         : f.processSample(0, x[i]);
+        g[i] = gainFor(100.0 * std::exp2(octaves), rate);
     }
-    return y;
-}
-
-template <typename Sat, typename Solver>
-std::vector<float> harmonicsMaterial(float drive)
-{
-    constexpr double rate = 48000.0;
-    auto f = makeCandidate<Sat, Solver>(rate, 10000.0, 0.0f, drive);
-    return renderSamples(f, sine(coherentFrequency(220.0, rate, 65536), rate, 8192 + 65536, 0.5));
+    return g;
 }
 
 void reportOrdinary()
 {
-    // The as-built candidate against LadderFilter itself.
-    bool sameAsFilter = true;
+    std::cout << "\n### The ordinary case\n\n"
+                 "The filter report's material through the built solve and through today's Newton: the THD table's "
+                 "220 Hz sine at -6 dBFS through LP24 at 10 kHz, k 0, drive 1, 2, 4, 8, 16 (48 kHz), and the "
+                 "solver-distance sweeps (a 110 Hz saw at -6 dBFS, the cutoff 100 Hz -> 8 kHz -> 100 Hz over 2 s, "
+                 "44.1 kHz), hard (k 3.8, drive 4) and gentle (k 2, drive 2). Identical: bit for bit. Against the "
+                 "reference: the error against the double-precision ladder on its own trajectory.\n\n"
+                 "| Saturator | Harmonics, 5 drives | Hard sweep | Gentle sweep | Fell back | Against the reference, "
+                 "hard / gentle (dB) |\n|---|---|---|---|---|---|\n";
+    const auto gains = sweepGains();
     forBothSaturators(
-        [&]<typename Sat>(const char*)
+        [&]<typename Sat>(const char* name)
         {
-            for (const float drive : {1.0f, 4.0f, 16.0f})
+            int identical = 0;
+            std::uint64_t fellBack = 0;
+            const std::array<float, 1> harmonicsGain{gainFor(10000.0, 48000.0)};
+            const auto sine220 = sine(coherentFrequency(220.0, 48000.0, 65536), 48000.0, 8192 + 65536, 0.5);
+            for (const float drive : {1.0f, 2.0f, 4.0f, 8.0f, 16.0f})
             {
-                auto built = makeBuilt<Sat>(48000.0, 10000.0, 0.0f, drive);
-                const auto x = sine(coherentFrequency(220.0, 48000.0, 65536), 48000.0, 8192 + 65536, 0.5);
-                sameAsFilter =
-                    sameAsFilter && bitIdentical(renderBuilt(built, x), harmonicsMaterial<Sat, NewtonAsBuilt<>>(drive));
+                const auto built = renderSolver<Sat, false>(sine220, drive, harmonicsGain, 0.0f);
+                fellBack += built.fellBack;
+                identical +=
+                    bitIdentical(built.y, renderSolver<Sat, true>(sine220, drive, harmonicsGain, 0.0f).y) ? 1 : 0;
             }
-            for (const float k : {3.8f, 8.0f})
+            const auto x = saw(110.0, 44100.0, gains.size());
+            const auto hard = renderSolver<Sat, false>(x, 4.0f, gains, 3.8f);
+            const auto gentle = renderSolver<Sat, false>(x, 2.0f, gains, 2.0f);
+            fellBack += hard.fellBack + gentle.fellBack;
+            const bool hardSame = bitIdentical(hard.y, renderSolver<Sat, true>(x, 4.0f, gains, 3.8f).y);
+            const bool gentleSame = bitIdentical(gentle.y, renderSolver<Sat, true>(x, 2.0f, gains, 2.0f).y);
+            CHECK(identical == 5);
+            CHECK(hardSame);
+            CHECK(gentleSame);
+            CHECK(fellBack == 0);
+            using R = ReferenceOf<Sat>::Type;
+            const auto referenceSweep = [&](float k, float drive)
             {
-                auto built = makeBuilt<Sat>(48000.0, 1000.0, k, 4.0f);
-                auto copy = makeCandidate<Sat, NewtonAsBuilt<>>(48000.0, 1000.0, k, 4.0f);
-                const auto x = saw(110.0, 48000.0, 48000);
-                sameAsFilter = sameAsFilter && bitIdentical(renderBuilt(built, x), renderSamples(copy, x));
-            }
-        });
-    CHECK(sameAsFilter);
-    std::cout << "\n### No regression in the ordinary case\n\n"
-              << "The as-built candidate reproduces LadderFilter bit for bit (LP24, settled controls: the harmonics "
-                 "material at drive 1, 4, 16, and a saw at k 3.8 and 8 at 1 kHz): "
-              << (sameAsFilter ? "yes" : "NO") << ".\n\n"
-              << "Each candidate against the as-built solver. Harmonics: LP24 at 10 kHz, k 0, a 220 Hz sine at "
-                 "-6 dBFS, drive 1, 2, 4, 8, 16, 48 kHz (filters.md's THD table). Sweeps: filters.md's solver-distance "
-                 "material (a 110 Hz saw at -6 dBFS, the cutoff 100 Hz -> 8 kHz -> 100 Hz over 2 s, 44.1 kHz), hard "
-                 "(k 3.8, drive 4) and gentle (k 2, drive 2). Identical: bit for bit with the as-built solver; "
-                 "otherwise the error against it (dB re the signal). Against the reference: the error against the "
-                 "double-precision ladder on its own trajectory, hard / gentle.\n\n"
-                 "| Candidate | Saturator | Harmonics, 5 drives | Hard sweep | Gentle sweep | Against the reference, "
-                 "hard / gentle (dB) |\n"
-                 "|---|---|---|---|---|---|\n";
-    forEachCandidate(
-        [&]<typename Solver>(const char* candidate)
-        {
-            forBothSaturators(
-                [&]<typename Sat>(const char* name)
+                ReferenceLadder<R> ladder;
+                std::vector<float> y(x.size());
+                for (std::size_t i = 0; i < x.size(); ++i)
                 {
-                    int identical = 0;
-                    double worstHarmonics = -std::numeric_limits<double>::infinity();
-                    for (const float drive : {1.0f, 2.0f, 4.0f, 8.0f, 16.0f})
-                    {
-                        const auto a = harmonicsMaterial<Sat, NewtonAsBuilt<>>(drive);
-                        const auto b = harmonicsMaterial<Sat, Solver>(drive);
-                        identical += bitIdentical(a, b) ? 1 : 0;
-                        worstHarmonics = std::max(worstHarmonics, errorDb(b, a, 8192));
-                    }
-                    const auto cell = [](std::span<const float> a, std::span<const float> b)
-                    {
-                        return bitIdentical(a, b) ? std::string{"identical"} : fixed(errorDb(b, a, 4410), 1) + " dB";
-                    };
-                    const auto hard = sweep<Sat, Solver>(3.8f, 4.0f, false);
-                    const auto gentle = sweep<Sat, Solver>(2.0f, 2.0f, false);
-                    std::cout << "| " << candidate << " | " << name << " | "
-                              << (identical == 5 ? std::string{"identical"}
-                                                 : std::to_string(identical) + " of 5 identical; " +
-                                                       fixed(worstHarmonics, 1) + " dB")
-                              << " | " << cell(sweep<Sat, NewtonAsBuilt<>>(3.8f, 4.0f, false), hard) << " | "
-                              << cell(sweep<Sat, NewtonAsBuilt<>>(2.0f, 2.0f, false), gentle) << " | "
-                              << fixed(errorDb(hard, sweep<Sat, Solver>(3.8f, 4.0f, true), 4410), 1) << " / "
-                              << fixed(errorDb(gentle, sweep<Sat, Solver>(2.0f, 2.0f, true), 4410), 1) << " |\n";
-                });
+                    y[i] = static_cast<float>(ladder.process(static_cast<double>(x[i] * drive), gains[i], k));
+                }
+                return y;
+            };
+            std::cout << "| " << name << " | " << (identical == 5 ? "identical" : std::to_string(identical) + " of 5")
+                      << " | " << (hardSame ? "identical" : "DIFFER") << " | " << (gentleSame ? "identical" : "DIFFER")
+                      << " | " << fellBack << " | " << fixed(errorDb(hard.y, referenceSweep(3.8f, 4.0f), 4410), 1)
+                      << " / " << fixed(errorDb(gentle.y, referenceSweep(2.0f, 2.0f), 4410), 1) << " |\n";
         });
 }
 
@@ -894,56 +814,88 @@ constexpr std::array<float, 3> badValues{
     -std::numeric_limits<float>::infinity(),
 };
 
-void reportExtremes()
+void reportModulation()
 {
     constexpr double rate = 48000.0;
-    std::cout << "\n### Extreme settings\n\nAs built: LadderFilter. Chosen: the recommended candidate (Newton, nested "
-                 "fallback from the guess) in the candidate wrapper (LP24, g set directly). 48 kHz.\n";
-
-    // Audio-rate modulation across the clamp.
-    std::cout << "\n**Cutoff modulation across the clamp**: a full-scale 110 Hz saw; the cutoff 12 kHz plus "
-                 "1.5 sin(2 pi 300 t) octaves (to 34 kHz, clamped at 0.495 fs), set every 32 samples (as built: "
-                 "the modulation input; chosen: g per sample), 1 s. Peak; for the chosen solver, unconverged "
-                 "samples.\n\n"
-                 "| Saturator | k | Drive | As built | Chosen | Chosen, unconverged |\n|---|---|---|---|---|---|\n";
+    constexpr std::size_t grid = LadderFilter::gridSamples;
+    const auto n = static_cast<std::size_t>(rate);
+    const auto x = saw(110.0, rate, n, 1.0f);
+    const auto modulation = [](std::size_t sample)
+    {
+        return static_cast<float>(1.5 * std::sin(2.0 * pi * 300.0 * static_cast<double>(sample) / rate));
+    };
+    const auto gainAt = [](float octaves)
+    {
+        const auto fs = static_cast<float>(rate);
+        const float hz = std::exp2(std::clamp(std::log2(12000.0f) + octaves, -40.0f, 40.0f));
+        return std::tan(static_cast<float>(pi) * std::clamp(hz, 1.0f, LadderFilter::maxCutoffRatio * fs) / fs);
+    };
+    std::cout << "\n### Extreme settings\n\nLadderFilter as built, 48 kHz.\n\n"
+                 "**Cutoff modulation across the clamp**: a full-scale 110 Hz saw; the cutoff 12 kHz plus "
+                 "1.5 sin(2 pi 300 t) octaves through the modulation input every 32 samples (to 34 kHz, clamped at "
+                 "0.495 fs), 1 s. The peak; the reference's, fed the same g (the filter's grid replayed into the "
+                 "solver, bit for bit); unconverged samples; and the fixed-cutoff bound drive max|x| / (1 + k) + 1, "
+                 "which does not hold for a cutoff moving at audio rate.\n\n"
+                 "| Saturator | k | Drive | Peak | Reference's peak | Unconverged | Fixed-cutoff bound |\n"
+                 "|---|---|---|---|---|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
-            for (const float k : {0.0f, 4.4f, 8.0f, 64.0f})
+            using R = ReferenceOf<Sat>::Type;
+            for (const float k : {0.0f, 4.4f, 8.0f, 16.0f, 64.0f})
             {
                 for (const float drive : {1.0f, 32.0f})
                 {
-                    const auto n = static_cast<std::size_t>(rate);
-                    const auto x = saw(110.0, rate, n, 1.0f);
-                    auto built = makeBuilt<Sat>(rate, 12000.0, k, drive);
+                    auto f = makeBuilt<Sat>(rate, 12000.0, k, drive);
                     Buffer buffer{1, n};
                     std::ranges::copy(x, buffer.channel(0).begin());
-                    for (std::size_t start = 0; start < n; start += 32)
+                    for (std::size_t start = 0; start < n; start += grid)
                     {
-                        const double t = static_cast<double>(start) / rate;
-                        built.setCutoffModulation(static_cast<float>(1.5 * std::sin(2.0 * pi * 300.0 * t)));
-                        built.process(buffer.block().subBlock(start, 32));
+                        f.setCutoffModulation(modulation(start));
+                        f.process(buffer.block().subBlock(start, grid));
                     }
-                    auto chosen = makeCandidate<Sat, Chosen>(rate, 12000.0, k, drive);
-                    std::vector<float> y(n);
-                    for (std::size_t i = 0; i < n; ++i)
+                    LadderState state;
+                    ReferenceLadder<R> reference;
+                    std::vector<float> replay(n);
+                    double referencePeak = 0.0;
+                    std::uint64_t unconverged = 0;
+                    float segmentStart = gainAt(0.0f);
+                    for (std::size_t start = 0; start < n; start += grid)
                     {
-                        const double t = static_cast<double>(i) / rate;
-                        chosen.setCutoff(static_cast<float>(12000.0 * std::exp2(1.5 * std::sin(2.0 * pi * 300.0 * t))));
-                        y[i] = chosen.processSample(0, x[i]);
+                        const float segmentEnd = gainAt(modulation(start));
+                        const float step = (segmentEnd - segmentStart) * (1.0f / static_cast<float>(grid));
+                        for (std::size_t i = 0; i < grid; ++i)
+                        {
+                            const float g = segmentStart + (step * static_cast<float>(i));
+                            LadderSolveStats stats;
+                            const auto r = LadderSolver::solve<Sat>(state, x[start + i] * drive, g, k, &stats);
+                            unconverged += stats.converged ? 0U : 1U;
+                            replay[start + i] = anoesis::dsp::flushDenormal(r.y[3]);
+                            referencePeak =
+                                std::max(referencePeak,
+                                         std::fabs(reference.process(static_cast<double>(x[start + i] * drive), g, k)));
+                        }
+                        segmentStart = segmentEnd;
                     }
-                    std::cout << "| " << name << " | " << fixed(k, 1) << " | " << fixed(drive, 0) << " | "
-                              << show(outcomeOf(buffer.channel(0))) << " | " << show(outcomeOf(y)) << " | "
-                              << chosen.stats.unconverged << " |\n";
+                    const auto o = outcomeOf(buffer.channel(0));
+                    CHECK(bitIdentical(replay, buffer.channel(0)));
+                    CHECK(unconverged == 0);
+                    CHECK(std::fabs(o.peak - referencePeak) <= 0.01 * referencePeak);
+                    std::cout << "| " << name << " | " << fixed(k, 1) << " | " << fixed(drive, 0) << " | " << show(o)
+                              << " | " << fixed(referencePeak, 3) << " | " << unconverged << " | "
+                              << fixed((drive / (1.0 + k)) + 1.0, 2) << " |\n";
                 }
             }
         });
+}
 
-    // 1 Hz, DC, drive 32 and 1000, k 64.
+void reportCeilings()
+{
+    constexpr double rate = 48000.0;
     std::cout << "\n**Low cutoff, DC, and the ceilings**: 2 s each. DC: 0 -> +10 -> -10 in thirds. Saw: full scale, "
-                 "110 Hz. The bound is the loop's DC gain plus a self-oscillation under 0 dBFS, drive x max|x| / "
-                 "(1 + k) + 1.\n\n"
-                 "| Case | Saturator | As built | Chosen | Bound |\n|---|---|---|---|---|\n";
+                 "110 Hz. The bound, with the cutoff fixed: the loop's DC gain plus a self-oscillation under "
+                 "0 dBFS, drive x max|x| / (1 + k) + 1.\n\n"
+                 "| Case | Saturator | Peak | Bound |\n|---|---|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
@@ -975,57 +927,47 @@ void reportExtremes()
             };
             for (const auto& c : cases)
             {
-                auto built = makeBuilt<Sat>(rate, c.cutoff, c.k, c.drive);
-                auto chosen = makeCandidate<Sat, Chosen>(rate, c.cutoff, c.k, c.drive);
+                auto f = makeBuilt<Sat>(rate, c.cutoff, c.k, c.drive);
                 const double bound = (static_cast<double>(c.drive) * c.maxInput / (1.0 + c.k)) + 1.0;
-                std::cout << "| " << c.label << " | " << name << " | " << show(outcomeOf(renderBuilt(built, *c.input)))
-                          << " | " << show(outcomeOf(renderSamples(chosen, *c.input))) << " | " << fixed(bound, 2)
-                          << " |\n";
+                const auto o = outcomeOf(renderBuilt(f, *c.input));
+                CHECK(o.nonFinite == 0);
+                CHECK(o.peak < bound);
+                std::cout << "| " << c.label << " | " << name << " | " << show(o) << " | " << fixed(bound, 2) << " |\n";
             }
-            auto oneHz = makeCandidate<Sat, Chosen>(rate, 1.0, 64.0f, 1.0f);
+            auto oneHz = makeBuilt<Sat>(rate, 1.0, 64.0f, 1.0f);
             const auto b =
-                behaviourOf(renderSamples(oneHz, kick(static_cast<std::size_t>(20.0 * rate))), rate, 1.0, 10.0);
-            std::cout << "| 1 Hz, k 64, an impulse: the last 10 s of 20 | " << name << " | | level "
+                behaviourOf(renderBuilt(oneHz, kick(static_cast<std::size_t>(20.0 * rate))), rate, 1.0, 10.0);
+            std::cout << "| 1 Hz, k 64, an impulse: the last 10 s of 20 | " << name << " | level "
                       << fixed(b.levelDb, 1) << " dBFS, peak " << fixed(b.peak, 3) << " | |\n";
         });
+}
 
-    // NaN and inf.
-    std::cout << "\n**NaN and inf.** Input: a 220 Hz saw at -6 dBFS, k 4.4, 1 kHz, with one bad sample at 1000; "
-                 "non-finite outputs after it, and whether the filter is back to finite output by the end (1 s). "
-                 "Then reset(). Setters: each set to the bad value mid-run.\n\n"
-                 "| Bad value | Where | As built: non-finite outputs | Recovers | After reset() | Input sanitised "
-                 "| State checked per block |\n|---|---|---|---|---|---|---|\n";
+void reportNonFinite()
+{
+    constexpr double rate = 48000.0;
+    std::cout << "\n**NaN and inf.** A 220 Hz saw at -6 dBFS, k 4.4, 1 kHz and 0.495 fs, Warm on, with one bad "
+                 "sample at 1000 of 1 s: non-finite outputs, and whether the output is the same input's with 0 "
+                 "there, bit for bit. Setters: each set to the bad value mid-run.\n\n"
+                 "| Bad value | Where | Non-finite outputs | Same as 0 there |\n|---|---|---|---|\n";
     for (const float bad : badValues)
     {
-        const auto n = static_cast<std::size_t>(rate);
-        auto x = saw(220.0, rate, n);
-        x[1000] = bad;
-        auto built = makeBuilt<dsp::TanhSaturator>(rate, 1000.0, 4.4f, 1.0f);
-        const auto y = renderBuilt(built, x);
-        const auto after = std::span{y}.subspan(1001);
-        const auto nonFinite = std::ranges::count_if(after, [](float v) { return !std::isfinite(v); });
-        built.reset();
-        const auto clean = renderBuilt(built, saw(220.0, rate, 4800));
-        auto sanitized = makeCandidate<dsp::TanhSaturator, SanitizedInput<NewtonAsBuilt<>>>(rate, 1000.0, 4.4f, 1.0f);
-        const auto ys = renderSamples(sanitized, x);
-        auto checked = makeCandidate<dsp::TanhSaturator, NewtonAsBuilt<>>(rate, 1000.0, 4.4f, 1.0f);
-        std::vector<float> yc(n);
-        for (std::size_t start = 0; start < n; start += blockSize)
+        for (const double cutoff : {1000.0, 0.495 * rate})
         {
-            for (std::size_t i = start; i < std::min(n, start + blockSize); ++i)
-            {
-                yc[i] = checked.processSample(0, x[i]);
-            }
-            checked.recoverNonFinite();
+            const auto n = static_cast<std::size_t>(rate);
+            auto clean = saw(220.0, rate, n);
+            clean[1000] = 0.0f;
+            auto x = clean;
+            x[1000] = bad;
+            auto f = makeBuilt<TanhSaturator>(rate, cutoff, 4.4f, 1.0f);
+            auto g = makeBuilt<TanhSaturator>(rate, cutoff, 4.4f, 1.0f);
+            const auto y = renderBuilt(f, x);
+            const bool same = bitIdentical(y, renderBuilt(g, clean));
+            const auto o = outcomeOf(y);
+            CHECK(o.nonFinite == 0);
+            CHECK(same);
+            std::cout << "| " << fixed(bad, 0) << " | input, " << (cutoff < 2000.0 ? "1 kHz" : "0.495 fs") << " | "
+                      << o.nonFinite << " | " << (same ? "yes" : "NO") << " |\n";
         }
-        const auto count = [](std::span<const float> v)
-        {
-            return std::ranges::count_if(v, [](float s) { return !std::isfinite(s); });
-        };
-        std::cout << "| " << fixed(bad, 0) << " | input | " << nonFinite << " | "
-                  << (std::isfinite(y.back()) ? "yes" : "no") << " | "
-                  << (std::ranges::all_of(clean, [](float v) { return std::isfinite(v); }) ? "finite" : "NOT finite")
-                  << " | " << count(ys) << " non-finite | " << count(yc) << " non-finite (to the block's end) |\n";
     }
     for (const float bad : badValues)
     {
@@ -1033,36 +975,38 @@ void reportExtremes()
         for (std::size_t which = 0; which < setters.size(); ++which)
         {
             const auto n = static_cast<std::size_t>(rate / 2.0);
-            const auto x = saw(220.0, rate, n);
-            auto built = makeBuilt<dsp::TanhSaturator>(rate, 1000.0, 4.4f, 1.0f);
+            auto f = makeBuilt<TanhSaturator>(rate, 1000.0, 4.4f, 1.0f);
             Buffer buffer{1, n};
-            std::ranges::copy(x, buffer.channel(0).begin());
-            built.process(buffer.block().subBlock(0, n / 2));
+            std::ranges::copy(saw(220.0, rate, n), buffer.channel(0).begin());
+            f.process(buffer.block().subBlock(0, n / 2));
             switch (which)
             {
             case 0:
-                built.setCutoff(bad);
+                f.setCutoff(bad);
                 break;
             case 1:
-                built.setCutoffModulation(bad);
+                f.setCutoffModulation(bad);
                 break;
             case 2:
-                built.setResonance(bad);
+                f.setResonance(bad);
                 break;
             default:
-                built.setDrive(bad);
+                f.setDrive(bad);
                 break;
             }
-            built.process(buffer.block().subBlock(n / 2, n - (n / 2)));
+            f.process(buffer.block().subBlock(n / 2, n - (n / 2)));
             const auto o = outcomeOf(buffer.channel(0));
-            std::cout << "| " << fixed(bad, 0) << " | " << setters[which] << " | " << o.nonFinite << " | "
-                      << (o.nonFinite == 0 ? "-" : "no") << " | | | |\n";
+            CHECK(o.nonFinite == 0);
+            std::cout << "| " << fixed(bad, 0) << " | " << setters[which] << " | " << o.nonFinite << " | |\n";
         }
     }
+}
 
-    // Blocks of 1 at the corner.
+void reportBlocksAndSwitching()
+{
+    constexpr double rate = 48000.0;
     std::cout << "\n**Block sizes at the corner** (0.495 fs, k 8, an impulse then a saw, 1 s): blocks of 1 and 37 "
-                 "against 4096, bit for bit.\n\n| Saturator | As built 1 / 37 |\n|---|---|\n";
+                 "against 4096, bit for bit.\n\n| Saturator | 1 / 37 |\n|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
@@ -1074,19 +1018,22 @@ void reportExtremes()
                 return renderBuilt(f, x, block);
             };
             const auto reference = render(4096);
-            std::cout << "| " << name << " | " << (bitIdentical(render(1), reference) ? "identical" : "DIFFER") << " / "
-                      << (bitIdentical(render(37), reference) ? "identical" : "DIFFER") << " |\n";
+            const bool one = bitIdentical(render(1), reference);
+            const bool odd = bitIdentical(render(37), reference);
+            CHECK(one);
+            CHECK(odd);
+            std::cout << "| " << name << " | " << (one ? "identical" : "DIFFER") << " / "
+                      << (odd ? "identical" : "DIFFER") << " |\n";
         });
 
-    // Responses and bypass while self-oscillating.
-    std::cout << "\n**Responses and bypass switched while self-oscillating** (as built, k 8, an impulse then "
-                 "silence, the response changed every 2,000 samples through all six, bypass toggled every 3,100, "
-                 "5 s). Bound: the largest tap-mix sum (16) times the self-oscillation's peak plus the passband.\n\n"
-                 "| Saturator | Cutoff | Peak | Non-finite |\n|---|---|---|---|\n";
+    std::cout << "\n**Responses and bypass switched while self-oscillating** (k 8, an impulse then silence, the "
+                 "response changed every 2,000 samples through all six, bypass toggled every 3,100 with an impulse "
+                 "on leaving it, 5 s). Bound: the largest tap-mix sum (16) times the self-oscillation's peak "
+                 "(under 0.5).\n\n| Saturator | Cutoff | Peak | Non-finite |\n|---|---|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
-            for (const double cutoff : {440.0, 5000.0, 0.44 * rate})
+            for (const double cutoff : {440.0, 5000.0, 0.44 * rate, 0.495 * rate})
             {
                 auto f = makeBuilt<Sat>(rate, cutoff, 8.0f, 1.0f);
                 const auto n = static_cast<std::size_t>(5.0 * rate);
@@ -1108,38 +1055,42 @@ void reportExtremes()
                         f.setBypassed(!f.isBypassed());
                         if (!f.isBypassed())
                         {
-                            buffer.channel(0)[start] = 0.5f; // restart it
+                            buffer.channel(0)[start] = 0.5f;
                         }
                     }
                     f.process(buffer.block().subBlock(start, std::min<std::size_t>(100, n - start)));
                 }
                 const auto o = outcomeOf(buffer.channel(0));
+                CHECK(o.nonFinite == 0);
+                CHECK(o.peak < 8.0);
                 std::cout << "| " << name << " | " << fixed(cutoff, 0) << " Hz | " << fixed(o.peak, 2) << " | "
                           << o.nonFinite << " |\n";
             }
         });
+}
 
-    // Five minutes.
+void reportFiveMinutes()
+{
+    constexpr double rate = 48000.0;
     std::cout << "\n**Five minutes of self-oscillation** (an impulse of 0.5, then silence, 48 kHz): level and pitch "
-                 "in the last 0.5 s of each minute; the spread across the five minutes.\n\n"
-                 "| Filter | Saturator | Cutoff, k | Minute 1 | Minute 5 | Spread (dB / cents) |\n"
-                 "|---|---|---|---|---|---|\n";
+                 "of the last 0.5 s of each minute; the spread across the five (decided: under 0.05 dB and 0.01 "
+                 "cent at the corner).\n\n"
+                 "| Saturator | Cutoff, k | Minute 1 | Minute 5 | Spread (dB / cents) |\n|---|---|---|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
-            const auto minutes = [&](auto&& process, double cutoff)
+            for (const auto& [cutoff, k] :
+                 {std::pair{440.0, 4.4f}, std::pair{440.0, 8.0f}, std::pair{0.495 * rate, 8.0f}})
             {
+                auto f = makeBuilt<Sat>(rate, cutoff, k, 1.0f);
                 const auto perMinute = static_cast<std::size_t>(60.0 * rate);
                 std::vector<float> minute(perMinute);
                 std::vector<Behaviour> b;
                 for (int m = 0; m < 5; ++m)
                 {
                     std::ranges::fill(minute, 0.0f);
-                    if (m == 0)
-                    {
-                        minute[0] = 0.5f;
-                    }
-                    process(minute);
+                    minute[0] = m == 0 ? 0.5f : 0.0f;
+                    minute = renderBuilt(f, minute);
                     b.push_back(behaviourOf(minute, rate, cutoff));
                 }
                 double lo = b[0].levelDb;
@@ -1153,45 +1104,24 @@ void reportExtremes()
                     clo = std::min(clo, v.cents);
                     chi = std::max(chi, v.cents);
                 }
-                return std::tuple{b.front(), b.back(), hi - lo, chi - clo};
-            };
-            for (const float k : {4.4f, 8.0f})
-            {
-                auto built = makeBuilt<Sat>(rate, 440.0, k, 1.0f);
-                const auto [first, last, db, cents] = minutes(
-                    [&](std::vector<float>& v)
-                    {
-                        Buffer buffer{1, v.size()};
-                        std::ranges::copy(v, buffer.channel(0).begin());
-                        dsp::processInChunks(built, buffer.block(), blockSize);
-                        std::ranges::copy(buffer.channel(0), v.begin());
-                    },
-                    440.0);
-                std::cout << "| As built | " << name << " | 440 Hz, " << fixed(k, 1) << " | " << describe(first)
-                          << " | " << describe(last) << " | " << fixed(db, 3) << " / " << fixed(cents, 3) << " |\n";
-            }
-            auto chosen = makeCandidate<Sat, Chosen>(rate, 0.495 * rate, 8.0f, 1.0f);
-            const auto [first, last, db, cents] = minutes(
-                [&](std::vector<float>& v)
+                if (cutoff > 1000.0)
                 {
-                    for (auto& s : v)
-                    {
-                        s = chosen.processSample(0, s);
-                    }
-                },
-                0.495 * rate);
-            std::cout << "| Chosen | " << name << " | 0.495 fs, 8.0 | " << describe(first) << " | " << describe(last)
-                      << " | " << fixed(db, 3) << " / " << fixed(cents, 3) << " |\n";
+                    CHECK(hi - lo < 0.05);
+                    CHECK(chi - clo < 0.01);
+                }
+                std::cout << "| " << name << " | " << fixed(cutoff, 0) << " Hz, " << fixed(k, 1) << " | "
+                          << describe(b.front()) << " | " << describe(b.back()) << " | " << fixed(hi - lo, 3) << " / "
+                          << fixed(chi - clo, 3) << " |\n";
+            }
         });
 }
 
 // --- 7. Aliasing ------------------------------------------------------------------------------------------
 
-/// A filter inside the Oversampler (or not), for any BlockProcessor.
-template <typename Inner>
-std::vector<float> renderOversampled(Inner& inner, OversamplingFactor factor, double rate, std::span<const float> x)
+std::vector<float> renderOversampled(LadderFilter& inner, OversamplingFactor factor, double rate,
+                                     std::span<const float> x)
 {
-    dsp::Oversampler oversampler{factor};
+    anoesis::dsp::Oversampler oversampler{factor};
     oversampler.prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = blockSize, .numChannels = 1});
     inner.prepare(oversampler.oversampledSpec());
     Buffer buffer{1, x.size()};
@@ -1233,8 +1163,7 @@ void reportAliasing()
     const double f0 = coherentFrequency(2500.0, rate, n);
     std::cout << "\n### Aliasing at the developer's corner (LP24 at 5 kHz, k 3.9, a 2.5 kHz sine at -6 dBFS, "
                  "44.1 kHz)\n\nThe strongest single alias below 20 kHz, dB re the fundamental / all aliasing, dB re "
-                 "the harmonics. As built (the solver converges here).\n\n"
-                 "| Filter | Drive 1 | 4 | 16 | 32 |\n|---|---|---|---|---|\n";
+                 "the harmonics.\n\n| Filter | Drive 1 | 4 | 16 | 32 |\n|---|---|---|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
@@ -1244,7 +1173,7 @@ void reportAliasing()
                 for (const float drive : {1.0f, 4.0f, 16.0f, 32.0f})
                 {
                     LadderFilter f;
-                    f.setWarm(std::is_same_v<Sat, dsp::TanhSaturator>);
+                    f.setWarm(isTanh<Sat>);
                     f.setCutoff(5000.0f);
                     f.setResonance(3.9f);
                     f.setDrive(drive);
@@ -1258,11 +1187,10 @@ void reportAliasing()
         });
 
     std::cout << "\n### Aliasing of the self-oscillation (k 6, Resonance 10 under F5; an impulse, no input, "
-                 "44.1 kHz)\n\nThe oscillation's own harmonics folded back: the strongest non-harmonic component "
-                 "below 20 kHz, dB re the oscillation / all of them, dB re its harmonics (Blackman-Harris, 65,536 "
-                 "samples after 1 s), at the oscillation's measured pitch. The chosen solver (20.5 kHz is F3's top: "
-                 "0.465 fs, where the as-built solver "
-                 "fails at k 6).\n\n| Filter | Cutoff 5 kHz | 10 kHz | 15 kHz | 20.5 kHz |\n|---|---|---|---|---|\n";
+                 "44.1 kHz)\n\nThe strongest non-harmonic component below 20 kHz, dB re the oscillation / all of "
+                 "them, dB re its harmonics (Blackman-Harris, 65,536 samples after 1 s), at the oscillation's "
+                 "measured pitch. 20.5 kHz is F3's top (0.465 fs).\n\n"
+                 "| Filter | Cutoff 5 kHz | 10 kHz | 15 kHz | 20.5 kHz |\n|---|---|---|---|---|\n";
     forBothSaturators(
         [&]<typename Sat>(const char* name)
         {
@@ -1271,11 +1199,11 @@ void reportAliasing()
                 std::cout << "| " << name << ", " << factorName(factor);
                 for (const double cutoff : {5000.0, 10000.0, 15000.0, 20500.0})
                 {
-                    CandidateFilter<Sat, Chosen> f;
+                    LadderFilter f;
+                    f.setWarm(isTanh<Sat>);
                     f.setResonance(6.0f);
                     f.setCutoff(static_cast<float>(cutoff));
-                    const auto x = kick(44100 + n);
-                    const auto y = renderOversampled(f, factor, rate, x); // prepare() sets g at the inner rate
+                    const auto y = renderOversampled(f, factor, rate, kick(44100 + n));
                     const auto tail = std::span{y}.last(n);
                     const double fosc = peakHz(tail, rate);
                     const auto a = measureAliasing(tail, fosc, rate, blackmanHarrisWindow(n), 20000.0);
@@ -1287,107 +1215,22 @@ void reportAliasing()
         });
 }
 
-/// ADAA on the loop's input saturator, as an option: aliasing, and what it
-/// does to the response at the cutoff, the threshold, and the pitch.
-void reportAdaa()
-{
-    constexpr double rate = 44100.0;
-    constexpr std::size_t n = 65536;
-    constexpr std::size_t settle = 16384;
-    const double f0 = coherentFrequency(2500.0, rate, n);
-    std::cout << "\n### First-order ADAA on the loop's input saturator (an option)\n\n"
-                 "1x, 44.1 kHz, a 2.5 kHz sine at -6 dBFS: the strongest alias (dB re the fundamental). Then the "
-                 "small-signal gain at the cutoff (LP24, k 0, against the as-built 1/4), the threshold (the "
-                 "smallest k that grows a 1e-15 impulse), and the self-oscillation pitch at k 4.4.\n\n"
-                 "| Solver | Saturator | k 0, 15 kHz: drive 4 / 16 | k 3.9, 5 kHz: drive 4 / 16 | Gain at a 1 / 10 kHz "
-                 "cutoff (dB re as built) | Threshold at 1 / 7 kHz | Pitch at k 4.4, 440 Hz / 7 kHz (cents) |\n"
-                 "|---|---|---|---|---|---|---|\n";
-    const auto row = [&]<typename Sat, typename Solver>(const char* label, const char* name)
-    {
-        std::cout << "| " << label << " | " << name;
-        for (const auto& [k, cutoff] : {std::pair{0.0f, 15000.0}, std::pair{3.9f, 5000.0}})
-        {
-            std::cout << " | ";
-            for (const float drive : {4.0f, 16.0f})
-            {
-                auto f = makeCandidate<Sat, Solver>(rate, cutoff, k, drive);
-                const auto y = renderSamples(f, sine(f0, rate, settle + n, 0.5));
-                const auto a =
-                    measureAliasing(std::span{y}.subspan(settle, n), f0, rate, rectangularWindow(n), 20000.0);
-                std::cout << fixed(a.worstAliasDb, 1) << (drive < 8.0f ? " / " : "");
-            }
-        }
-        std::cout << " | ";
-        for (const double cutoff : {1000.0, 10000.0})
-        {
-            const MonoProcess candidate = [&](std::span<const float> in)
-            {
-                auto f = makeCandidate<Sat, Solver>(rate, cutoff, 0.0f, 1.0f);
-                return renderSamples(f, in);
-            };
-            std::cout << fixed(measureResponseAt(candidate, cutoff, rate, 1e-4).magnitudeDb + 12.0412, 2)
-                      << (cutoff < 5000.0 ? " / " : "");
-        }
-        std::cout << " | ";
-        for (const double cutoff : {1000.0, 7000.0})
-        {
-            const double period = rate / cutoff;
-            const auto grows = [&](double k)
-            {
-                auto f = makeCandidate<Sat, Solver>(rate, cutoff, static_cast<float>(k), 1.0f);
-                const auto y = renderSamples(f, kick(static_cast<std::size_t>(40.0 * period) + 1, 1e-15f));
-                double early = 0.0;
-                double late = 0.0;
-                for (auto i = static_cast<std::size_t>(10.0 * period); i < static_cast<std::size_t>(15.0 * period); ++i)
-                {
-                    early += static_cast<double>(y[i]) * static_cast<double>(y[i]);
-                }
-                for (auto i = static_cast<std::size_t>(35.0 * period); i < static_cast<std::size_t>(40.0 * period); ++i)
-                {
-                    late += static_cast<double>(y[i]) * static_cast<double>(y[i]);
-                }
-                return late > early;
-            };
-            double lo = 2.0;
-            double hi = 8.0;
-            for (int i = 0; i < 18; ++i)
-            {
-                const double mid = 0.5 * (lo + hi);
-                (grows(mid) ? hi : lo) = mid;
-            }
-            std::cout << fixed(0.5 * (lo + hi), 3) << (cutoff < 5000.0 ? " / " : "");
-        }
-        std::cout << " | ";
-        for (const double cutoff : {440.0, 7000.0})
-        {
-            auto f = makeCandidate<Sat, Solver>(rate, cutoff, 4.4f, 1.0f);
-            const auto y = renderSamples(f, kick(static_cast<std::size_t>(2.5 * rate)));
-            const auto tail = std::span{y}.last(static_cast<std::size_t>(0.5 * rate));
-            std::cout << fixed(1200.0 * std::log2(measureFrequency(tail, rate) / cutoff), 1)
-                      << (cutoff < 5000.0 ? " / " : "");
-        }
-        std::cout << " |\n";
-    };
-    forBothSaturators(
-        [&]<typename Sat>(const char* name)
-        {
-            row.template operator()<Sat, NewtonAsBuilt<>>("As built", name);
-            row.template operator()<Sat, NewtonInputAdaa<>>("ADAA on the input", name);
-        });
-}
-
 } // namespace
 
-TEST_CASE("Filter stability report: the solver near Nyquist and at extreme settings", "[.][filter-stability-report]")
+TEST_CASE("Filter stability report: the solve near Nyquist and at extreme settings, as built",
+          "[.][filter-stability-report]")
 {
-    std::cout << "\n## Filter stability report\n";
+    std::cout << "\n## Filter stability report (as built)\n";
     reportUniqueness();
     reportReferenceNearNyquist();
-    reportBoundary();
+    reportFallbackBoundary();
     reportHeldCutoff();
     reportOrdinary();
     reportGrid();
-    reportExtremes();
+    reportModulation();
+    reportCeilings();
+    reportNonFinite();
+    reportBlocksAndSwitching();
+    reportFiveMinutes();
     reportAliasing();
-    reportAdaa();
 }

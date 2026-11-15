@@ -19,6 +19,7 @@
 #include <anoesis/dsp/core/processor.hpp>
 #include <anoesis/dsp/filters/keytrack.hpp>
 #include <anoesis/dsp/filters/ladder_filter.hpp>
+#include <anoesis/dsp/filters/ladder_solver.hpp>
 #include <anoesis/dsp/generators/white_noise.hpp>
 #include <anoesis/dsp/library.hpp>
 #include <anoesis/dsp/math/decibels.hpp>

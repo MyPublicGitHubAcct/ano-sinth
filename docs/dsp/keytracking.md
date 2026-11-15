@@ -170,7 +170,7 @@ Keytrack can push the cutoff past the filter's clamp at 0.495 fs: a high note wi
 | (b) | −99.9 (1,976 Hz) | −96.6 (3,959) | −91.8 (7,940) | −28.1 (16,475) | **locked, peak 239** | **locked, peak 239** |
 | (d) | +1.3 (2,095) | +4.8 (4,198) | +11.5 (8,428) | +79.7 (17,533) | **locked, peak 239** | **locked, peak 239** |
 
-Up to 0.38 fs the cramping only shrinks the detune (−101 → −28 cents), so (d)'s fixed table overcorrects by up to 80 cents. Above about 0.45 fs, **the filter as built fails**. It neither oscillates nor decays: the output locks at a large level (239 from an impulse of 0.5). The next table shows where.
+Up to 0.38 fs the cramping only shrinks the detune (−101 → −28 cents), so (d)'s fixed table overcorrects by up to 80 cents. Above about 0.45 fs, **the filter as then built failed**. It neither oscillates nor decays: the output locks at a large level (239 from an impulse of 0.5). The next table shows where. **Fixed in task 7** ([filter-stability.md](filter-stability.md#as-built)): with the nested fallback, (b) at C9 and G9 self-oscillates at the clamp, 21,819 Hz (0.9 cents under 0.495 fs, as the double-precision reference does there), and the keytrack report's scan finds no lock-up anywhere up to the clamp.
 
 ### Where the solver fails near Nyquist (a finding for task 7)
 
@@ -182,6 +182,8 @@ The lowest cutoff, as a fraction of fs, at which an impulse of 0.5 leaves `Ladde
 | cubic | 44.1 / 96 kHz | − | 0.4925 | 0.4575 | 0.4325 | 0.4225 | 0.4175 |
 
 It depends only on fc/fs and k, not on the rate, and it starts lower with the cubic. A diagnostic build found the cause: **Newton–Raphson stops converging**. Its steps cycle at 30–65 in y and hit the 8-iteration cap on every sample, and with 64 iterations it fails the same way. At these cutoffs g = tan(π·fc/fs) is 4 to 64, and an undamped Newton step on a bounded saturator overshoots into a cycle. This is not a keytracking problem. The cutoff knob alone reaches it: at 44.1 kHz, F3's placeholder law tops out at 20.5 kHz (0.465 fs), and Resonance 10 is k 6. The filter round's stress test swept through the top too fast to stay there. It belongs to M1.3's stability task (task 7), which needs a convergent solve there, for example a damped or step-limited Newton, a better first guess, or a bracketing fallback, and a test that holds the cutoff near the clamp at high k.
+
+**Fixed in task 7 (2026-11-15).** Newton as before, and where it has not converged after its 8 iterations, a nested bracketing solve that cannot fail ([filter-stability.md](filter-stability.md#as-built)). The scan above now finds no lock-up at any k, either saturator, 44.1 or 96 kHz, and the filter matches the double-precision reference's level and pitch with the cutoff held at 0.44–0.495 fs.
 
 ### The master tune
 
@@ -337,14 +339,14 @@ Every figure matches the chosen prototype's, model (b) with the aligned feed, to
 | The law, keytrack 0 / 5 / 10, A-1 to C7 (48 kHz, k 4.4) | 13.47 Hz everywhere / A4 at 76.19 Hz / A4 at 431.0 Hz: the law, 35.8 cents flat, within 0.5 cents |
 | Intervals at keytrack 10, C1–C7, 44.1 kHz, k 4.05 / 6 / 8 | spread 0.08 / 1.33 / 1.69 cents (tanh), 0.08 / 1.20 / 1.75 (cubic) |
 | The same at 192 kHz | at most 0.10 cents |
-| Near the clamp (44.1 kHz, k 6, the cutoff two octaves above the note) | −99.9 (C5) to −28.1 cents (C8, 0.38 fs); locked from C9 (the solver failure) |
+| Near the clamp (44.1 kHz, k 6, the cutoff two octaves above the note) | −99.9 (C5) to −28.1 cents (C8, 0.38 fs); from C9 at the clamp, 21,819 Hz (locked before task 7's fix) |
 | The master tune at 432 / 444 Hz | the filter stays with the oscillators: −35.8 cents (the detune) as at 440; without the term −4.0 / −51.4 |
 | A 100 ms octave glide / a ±2 semitone bend, largest / RMS | 3.2 / 0.6 cents; 0.1 / 0.0 cents |
 | The key alone, the same glide and bend | 1,144.7 / 553.7; 200.0 / 141.6 cents |
 | Zipper against the aligned feed: grid start / per block of 64 / 512 | −26.5 / −23.0 / −8.4 dB (glide) |
 | A legato step at k 3.6, a fifth / an octave: none / 30 ms / 100 ms portamento | −49.0 / −97.9 / −110.3; −47.8 / −87.7 / −106.8 dB re a unit step (steady −115) |
 | Block sizes 1 / 37 / 4096, aligned or grid-start feed; subnormals; allocations | identical; 0; 0 (fed per host block: differs) |
-| The solver failure (tanh, k 4.4 / 6 / 8) | from 0.4800 / 0.4500 / 0.4400 fs, at 44.1 and 96 kHz: task 7 |
+| The solver failure (tanh, k 4.4 / 6 / 8) | from 0.4800 / 0.4500 / 0.4400 fs, at 44.1 and 96 kHz, before task 7; since its fix, none up to the clamp |
 
 **CPU** (`tools/bench.sh "[keytrack]"`, `relwithdebinfo`, Apple M1 Ultra):
 

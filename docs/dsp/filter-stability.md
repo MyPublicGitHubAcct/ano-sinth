@@ -7,7 +7,8 @@
 - where the as-built solver fails (more widely than first found), and the candidate fixes measured against the reference: convergence over a grid, the held-cutoff case, the ordinary case, and CPU;
 - extreme settings beyond the known defect: what the voice can request, and the filter under audio-rate modulation across the clamp, at 1 Hz, with DC of ±10, at the ceilings of k and drive, with NaN and inf, in blocks of 1, switching responses and bypass while self-oscillating, and over five minutes;
 - aliasing at the developer's corner and while self-oscillating near the clamp, at 1×, 2×, and 4×, and antiderivative antialiasing as an option;
-- the recommendations, for the project owner's decision.
+- the recommendations, and the project owner's decision;
+- [as built](#as-built): `LadderSolver`, Newton with the nested bracketing fallback where Newton does not converge and a guard on the input, what it measures, the tests that pin it (with a per-sample error bound derived from float rounding and the step tolerance), and its CPU.
 
 Read [filter-theory.md](filter-theory.md) (the trapezoidal ladder and its Newton solve) and [filters.md](filters.md) first.
 
@@ -105,6 +106,8 @@ The **cutoff clamp** (the do-nothing baseline) is the as-built solver with `maxC
 The reference is the same nested method in double with `std::tanh`, to 10⁻¹⁴ (stages to 10⁻¹⁵), with up to 400 evaluations per level. It cannot fail: every bracket holds the unique root.
 
 ## What they measured
+
+*Stage 1, before the build. "As built" in this section means the solver as it was then: Newton alone. The fix as built is measured in [As built](#as-built).*
 
 From the hidden `[filter-stability-report]` ([filter_stability_report.cpp](../../tests/dsp/filters/filter_stability_report.cpp)) and the `[filter-stability]` benchmarks ([filter_stability_benchmark.cpp](../../tests/dsp/benchmarks/filter_stability_benchmark.cpp)):
 
@@ -319,7 +322,7 @@ ADAA takes up to 39 dB off the strongest alias at k 3.9 and drive 16 with tanh. 
 
 ## Recommendations
 
-*For the project owner's decision. Round 2 builds what is chosen, test-first.*
+*For the project owner's decision (stage 1). Chosen on 2026-11-15: every recommendation ([the decision](#the-decision)).*
 
 | Question | Recommendation | The figure behind it |
 |---|---|---|
@@ -329,6 +332,136 @@ ADAA takes up to 39 dB off the strongest alias at k 3.9 and drive 16 with tanh. 
 | **NaN handling** | **Replace a non-finite input sample by 0 before the solve** (option 1). Keep the setters' clamps. | Today one NaN, +∞, or −∞ sample poisons every later output (46,999 of 46,999) until `reset()`. Sanitised: no non-finite output. Per-block state check: 24 non-finite samples to the block's end. Both are within noise for CPU (111.4 and 113.4 against 112.9 ns). The input guard never lets a non-finite value reach the state, so it is the simpler contract: finite in, finite out, whatever the input. |
 | **Aliasing** | **No filter-local measure. F10 stands**: the filter runs at whatever rate it is prepared at; the v3 options oversample the voice (M1.8), with Render at 4×. **No ADAA in the loop.** | At the developer's corner (k 3.9, drive 16) the strongest alias is −31.6 / −57.0 / −110.3 dB at 1× / 2× / 4× (tanh). Self-oscillating at F3's top it is −16.9 / −31.5 / −64.9 dB, inherent to a saturated tone above fs/4. ADAA on the input: the threshold falls to 3.0 at 7 kHz, the pitch moves −419 cents, the gain at a 10 kHz cutoff −2.4 dB, the cubic aliases worse, and it costs 72–142% more. |
 | **Test thresholds (Round 2)** | (1) **The held cutoff**: an impulse of 0.5, the cutoff at 0.44, 0.46, 0.48, and 0.495 fs, k 4.05 to 8 (and 16, 64), Warm on and off, 44.1 and 48 kHz. Level within 0.1 dB and pitch within 1 cent of the reference's, peak under 1. (2) **The grid**: no unconverged sample, and every sample within 2·10⁻⁴ of its equations' scale of the double reference. (3) **The extremes**: finite and within drive·max\|x\|/(1 + k) + 1 under audio-rate modulation across the clamp, DC ±10, drive 1000 at k 64, at 0.495 fs. (4) **NaN**: one NaN, ±∞ input sample changes nothing but that sample (the output equals the filter's with 0 there, bit for bit). (5) **Long run**: five minutes self-oscillating at 0.495 fs, k 8, level spread under 0.05 dB and pitch under 0.01 cents. (6) **Unchanged**: every existing filter test and figure, bit for bit where Newton converges. | Today's solver fails (1) at every k but 4.05 with tanh and at all of them with the cubic: that is the red. Each tolerance is to be derived in the test. For (1): the reference and the chosen solver agree to the printed 0.1 dB and 0.1 cent, and a stable limit cycle doesn't accumulate per-sample error. For (2): float rounding of terms of size 1 + max\|s\| + 2g is about 10⁻⁷ of it, and the 10⁻⁵ step tolerance, propagated by g, gives up to 10⁻⁴; measured 8.7·10⁻⁵, so Round 2 derives the bound before fixing 2·10⁻⁴. For (3), measured: 6.1 against 33, 5.0 against 5.9, 6.5 against 16.4. For (5), measured: 0.010 dB and 0.000 cents. |
+
+## The decision
+
+*The project owner, 2026-11-15: every recommendation.* Three details were settled with the project owner during the build, when measuring the decided thresholds and trigger on the code showed that one of them could not hold as worded, and one more follows from the instruction to derive each tolerance:
+
+| Question | Decided | Settled in the build, and why |
+|---|---|---|
+| **The solver** | Newton as built; the nested bracketing fallback, restarted from the linearised guess (rtsafe on the last row over [s4 − 2g, s4 + 2g], each stage rtsafe over [c − g, c + g] from its hard-clip model, stopping at the rounding level); caps of 64 rows and 64 evaluations per stage; bit-identical to today wherever Newton converges. Rejected: a line search, a step limit, a previous-sample guess, a change of variable, a nested-only solve, a lower cutoff clamp. | **The trigger is Newton's cap, not the first iteration that doesn't reduce ‖F‖².** Measured on the prototype before building: on 5–8% of the samples where Newton converges within its 8 iterations (265,630 tanh and 161,350 cubic, over the grid), ‖F‖² rises at some iteration along the way, so the decided trigger abandoned a converging Newton and changed the output; below 0.25 fs it did so only at k 16–64 with drive 16–32 (11 and 303 samples of 3.5 million). Falling back only when Newton has not converged after its 8 iterations is bit-identical wherever Newton converges, by construction, for 0.2 µs more at the corner (the prototype: 2.07 against 1.87 µs with tanh). The project owner chose it. |
+| **Ceilings** | Keep k ≤ 64 and drive ≤ 1000 in the DSP and be correct up to them. Clamp each control plus its modulation to the knob's range in the parameter layer (M1.5/M1.9), not now. | As decided; the clamp is recorded on M1.5 and M1.9 in PLAN.md. |
+| **NaN** | Replace a non-finite input sample by 0 before the solve; keep the setters' clamps. | As decided. The guard sits on the driven input (x · drive), so a finite sample that the drive takes past FLT_MAX counts as 0 too. |
+| **Aliasing** | No filter-local measure, no ADAA; F10 stands (oversampling is the voice's, M1.8). | As decided. |
+| **Threshold (2)** | Every sample within 2·10⁻⁴ of its equations' scale of the double reference, the bound to be derived first. | **A per-sample bound, derived** ([below](#the-tests)): 2·10⁻⁴ as one number is not derivable, because the sensitivity of y1 to y4 reaches g·k ≈ 4,000 at k 64 near Nyquist, where float cannot know y1 to better than about 4,000 ε of the scale. The derived bound is 32 ε (4·10⁻⁶) of the scale at k = 0 and widens only with the equations' own conditioning. |
+| **Threshold (3)** | Finite and within drive·max\|x\|/(1 + k) + 1 under audio-rate modulation across the clamp, DC ±10, and drive 1000 at k 64, at 0.495 fs. | **That bound holds with the cutoff fixed, not under audio-rate modulation.** Measured on the built filter, the cutoff swept across the clamp at 300 Hz peaks at 2.14–3.79 at k 64 and 2.13 with the cubic at k 0, against bounds of 1.02–2.00; the double reference fed the same g sequence peaks at the same values to three decimals, so it is the equations' own behaviour (with g changing every sample, the trapezoidal states carry energy across the change). The project owner chose: the bound for the fixed-cutoff extremes; under modulation, finite, every sample converged, and the peak within 1% of the reference's. |
+| **Threshold (5)** | Five minutes self-oscillating at 0.495 fs, k 8: level spread under 0.05 dB, pitch under 0.01 cents. | **30 s in the suite, the five minutes in the report.** Every sample there falls back: five minutes for both saturators is about 160 s in the debug suite and 6 minutes under ASan. The project owner chose 30 s in the suite with the same thresholds, and the full five minutes checked in the hidden `[filter-stability-report]`. |
+
+## As built
+
+### How it is applied here
+
+[ladder_solver.hpp](../../libs/dsp/include/anoesis/dsp/filters/ladder_solver.hpp) holds the per-sample solve, moved out of `LadderFilter` and made public so tests can drive it from a known state: `TanhSaturator` and `CubicSaturator` (moved with it, unchanged), `LadderState` (a channel's four integrators and its last loop input), `LadderSolution`, and `LadderSolver`:
+
+- **`solveByNewton<Sat>()`** is the solve that was built before this round, operation for operation: the loop linearised at the state, then Newton to 10⁻⁵, at most 8 iterations. If Newton converges it finishes the sample and returns the iterations taken; if not, it returns 0 and leaves the state untouched. A non-finite x is taken as 0 first.
+- **`solveNested<Sat>()`** is the fallback: the linearised guess (recomputed: the same values), then the nested bracketing solve, then the integrators' update.
+- **`solve<Sat>()`** is the two in sequence, with an optional `LadderSolveStats` (Newton's iterations, whether it fell back, the rows and stage evaluations, whether it converged) for the tests and the report. `LadderFilter` calls the two halves itself, in its run of up to 32 samples.
+
+The nested solve:
+
+- **The safeguard** is one rtsafe step (Numerical Recipes §9.4): Newton's step, or a bisection when Newton's would leave the bracket or would not be at most half the step before last. Whether Newton's point is inside is tested by multiplying, as Numerical Recipes does, (y − lo)·f′ > f and (hi − y)·f′ > −f, and the division happens only when the step is taken. **The prototype tested the point after dividing, and that was a defect**: when the iterate is itself the end of the bracket and Newton's step is under half an ulp, y − f/f′ rounds back onto the end, counts as outside, and the solve bisects away from a root it has already found. Traced on the prototype's worst grid sample (0.35 fs, k 64, drive 16): the row reached φ = 7·10⁻⁹ at row 7, bisected away, took 10 more rows to come back, and stopped τ off, which the stage-1 grid reported as its largest distance (8.6·10⁻⁵ of the scale). The build lands there to rounding in 7 rows.
+- **A stage** solves y + g·t(y) = c by rtsafe over [c − g, c + g] from its hard-clip model (c/(1 + g) if that is within ±1, else c ∓ g), stopping when the residual is at most 4 ε (|c| + g), or, as a backstop, on a step under 10⁻⁷|y|; at most 64 evaluations. It returns t and t′ at its root, so the chain doesn't evaluate the saturator again.
+- **The row** is rtsafe on φ(y4) = y4 − H(y4) over [s4 − 2g, s4 + 2g], from the guess's y4, to a step of 10⁻⁵, at most 64 rows; then the chain once more at the root, so y1–y3 are those of the final y4 (skipped when the last step rounded to nothing, which would repeat it exactly).
+- **Its worst case is bounded by the caps**: at most 64 rows of four stage solves of at most 64 evaluations each, plus the final chain. The worst measured over the grid is 19 rows and 339 stage evaluations in one sample.
+
+**Why the solve is split in two.** The first build kept the fallback inside one `solve()` and cost the ordinary case 9% (tanh) and 12–17% (cubic). The arithmetic was the same, so the cost was elsewhere: Newton's function was no longer a leaf. With a call anywhere in it, even one never taken, every sample saved and restored eight FP and four integer registers, and its hot values moved into callee-saved registers (+10% with tanh). Returning the result through an out-parameter cost another 2–5%. As built, Newton's function calls nothing and returns by value, and the call to the fallback sits one level up, in the filter's run, which already has a frame per run. The ordinary case is then within noise of the solver before this round ([CPU](#cpu)). Keeping the linearised guess live through Newton's loop for the restart cost nothing measurable, but the fallback recomputes it anyway, since that keeps Newton's function exactly as it was.
+
+`sizeof(LadderFilter)` is unchanged at 344 bytes. Nothing allocates, throws, or uses RTTI; the state is `float`; the code is standard C++23 with no compiler-specific attribute (the leaf structure is how the ordinary case stays fast, not an inlining hint).
+
+**One property of the nested solve alone**: its row stops on an absolute step of 10⁻⁵, so on signals near 10⁻⁴ it is not accurate (forcing it on every sample fails four of the filter tests that use a 10⁻⁴ impulse). It never runs there: at small signals the equations are nearly linear and Newton converges in one or two iterations. The fallback runs only where Newton has failed, which takes large states.
+
+### What it measures
+
+From the hidden `[filter-stability-report]`, rewritten to measure the code as built ([filter_stability_report.cpp](../../tests/dsp/filters/filter_stability_report.cpp); 2.5 minutes in `relwithdebinfo`):
+
+| Measurement | As built | Stage 1 (the chosen prototype) |
+|---|---|---|
+| The held cutoff at 0.495 fs (k 4.05–64, tanh and cubic, 44.1 and 48 kHz) and at 0.44–0.48 fs (48 kHz): level within 0.1 dB, pitch within 1 cent, peak under 1 | **70 of 70**; at 0.495 fs and k 8, tanh: −11.8 dBFS, −0.8 cents, as the reference | 70 of 70 |
+| Where the fallback runs (Newton alone fails): the lowest fc/fs, impulse and loud saw, k 3.5–64 | the stage-1 boundary table, unchanged (from 0.2375 fs at k 64, cubic, drive 32); 0 unconverged after the fallback | the same |
+| The grid (3.96 million samples per saturator): unconverged / fell back | **0** / 17.25% (tanh), **0** / 21.28% (cubic) | 0 / 23.9%, 0 / 25.4% |
+| The grid: largest distance, absolute / of the scale | 3.7·10⁻⁴ / **2.5·10⁻⁶** (tanh), 8.6·10⁻⁴ / **1.0·10⁻⁵** (cubic); 0 cells off | 2.6·10⁻³ / 8.6·10⁻⁵, 1.3·10⁻³ / 8.2·10⁻⁵ |
+| The grid: the largest error as a fraction of the derived bound | 0.23 (tanh), 0.34 (cubic) | |
+| The grid: rows (mean / max), stage evaluations per sample (mean / max) | 0.65 / 19, 9.4 / 223 (tanh); 0.75 / 19, 9.9 / 339 (cubic) | |
+| The grid: of the samples where today's Newton converges, identical to the bit | **3,281,165 of 3,281,165** (tanh), **3,121,143 of 3,121,143** (cubic) | |
+| The ordinary case (the filter report's harmonics and solver-distance sweeps) | identical to the bit, no fallback; −126.2 / −128.4 dB from the reference (tanh), −128.7 / −130.7 (cubic) | the same |
+| Modulation across the clamp, k 0–64, drive 1 and 32 | peaks 0.47–5.78 (tanh), 0.55–3.36 (cubic), each the reference's to three decimals; 0 unconverged | (per-sample g) 0.42–6.11, 0.47–3.46 |
+| 0.495 fs, k 64: DC ±10 at drive 32 / a saw at drive 1000 | 4.99 / 6.52 (tanh), 4.06 / 3.58 (cubic), against 5.92 / 16.4 | 4.99 / 6.52, 4.06 / 3.62 |
+| 1 Hz and 1 kHz at k 64, DC and drive 1000 | as stage 1 (for example 1 kHz, DC ±10: 4.17 / 1.50) | the same |
+| One NaN, +∞, or −∞ input sample, at 1 kHz and at 0.495 fs | no non-finite output; the output is the same input's with 0 there, bit for bit | (sanitised option) no non-finite output |
+| Responses and bypass switched while self-oscillating at 0.44 and 0.495 fs | peak 1.18–1.28 | (as built then: 377 and 184) |
+| Five minutes at 0.495 fs, k 8: level / pitch spread | 0.012 dB / 0.000 cents (tanh), 0.003 / 0.000 (cubic) | 0.010 / 0.000 (tanh) |
+| Blocks of 1 and 37 against 4096 at the corner | identical | |
+| Aliasing at the developer's corner and of the self-oscillation, 1× / 2× / 4× | unchanged: −31.6 / −57.0 / −110.3 dB (k 3.9, drive 16, tanh); −16.9 / −31.5 / −64.9 dB at F3's top | the same |
+
+Every figure matches stage 1's to the printed digit except these, each explained:
+
+- **Fewer fallbacks over the grid** (17.25% against 23.9% with tanh): the trigger is Newton's cap, not the first rising ‖F‖², so samples where Newton converges along a path that isn't monotone stay Newton's.
+- **The largest distance from the reference is 9–35 times smaller** (2.5·10⁻⁶ against 8.6·10⁻⁵ of the scale with tanh): the prototype's divide-then-test defect, above, which left its worst samples a row tolerance off.
+- **Modulation across the clamp**: stage 1 drove its wrapper with g per sample, and the filter takes modulation on its 32-sample grid, so the inputs differ (5.78 against 6.11 at k 0, drive 32). The test replays the filter's own grid into the reference, and the peaks agree to three decimals.
+- **The cubic at drive 1000 and 0.495 fs** (3.58 against 3.62) and **the five-minute spread** (0.012 against 0.010 dB): both are self-oscillating trajectories at the corner, where every sample falls back. A rounding-level difference in the path (the trigger, the safeguard) gives a different but equally correct trajectory. Its peak differs by 1%, and the spread by less than the measurement's own variation between windows (up to 0.022 dB at k 8).
+
+The keytracking report's near-Nyquist scan finds no lock-up anywhere up to the clamp ([keytracking.md](keytracking.md#where-the-solver-fails-near-nyquist-a-finding-for-task-7)).
+
+### The tests
+
+[ladder_stability_test.cpp](../../tests/dsp/filters/ladder_stability_test.cpp), against two oracles in [ladder_reference.hpp](../../tests/dsp/filters/ladder_reference.hpp): the double-precision reference (moved from the prototypes) and today's Newton solve restated operation for operation.
+
+| Test | What it pins |
+|---|---|
+| **(1) The held cutoff** | LadderFilter against the reference at 0.44–0.495 fs, k 4.05–64, Warm on and off, 44.1 and 48 kHz (112 cases): level within 0.1 dB, pitch within 1 cent, peak under 1. One reference trajectory per case serves both rates (g depends only on fc/fs; in float the two differ by at most 2·10⁻⁶, under 0.001 cent). The settling time and the tolerances are measured on the reference: steady within 0.01 dB from 4,000 samples, 10,000 at k 4.05 and 0.48 fs, 53,000 at k 4.05 and 0.495 fs; its own level moves by up to 0.045 dB between windows of 16,384 (the beat between the oscillation and the sampling), its pitch by 0.001 cent. |
+| **(2) The grid** | LadderSolver against the reference from the same state, over fc/fs 0.30–0.495, k 0–64, drive 1–32, 44.1 and 192 kHz: no unconverged sample; every stage within the derived bound (below); every stage equation it settles at the rounding level (backward error at most 8 ε S); never more rows than bisection over the whole bracket would take, ⌈log₂(4g/τ)⌉. |
+| **Bit-identity** | Wherever today's Newton converges from the same state, over the ordinary range (0.01–0.25 fs) and near Nyquist: the same solution and state, to the bit. |
+| **The nested solve alone** | `solveNested` from 4,000 random states (s in ±50, x in ±32, g 0.1–64, k 0–64): converged, within the bound, at the rounding level, within the row budget. In about 1,600 of them the root is more than g from s4, which the filters' own trajectories never reach, so the brackets are exercised to their ends. |
+| **The work at the corner** | At 0.495 fs and k 8, every sample falls back; never more rows than bisection's ⌈log₂(4g/τ)⌉ = 25; at most 64 stage evaluations per sample on average, which is the decided 2 µs ceiling at about 28 ns per evaluation plus Newton's 0.2 µs. Measured: 56 (tanh), 48 (cubic). |
+| **(3) The ceilings** | k 64 at 1 kHz and 0.495 fs: DC 0 → +10 → −10 at drive 32 and a full-scale saw at drive 1000, within drive·max\|x\|/(1 + k) + 1. |
+| **(3) Modulation across the clamp** | The filter's grid replayed into LadderSolver (checked bit for bit against the filter), k 0–64, drive 1 and 32: finite, every sample converged, the peak within 1% of the reference's fed the same g. |
+| **(4) NaN and inf** | One NaN, +∞, −∞, or a finite sample that drive 1000 takes past FLT_MAX: the output is the same input's with 0 there, bit for bit, at 1 kHz and at the corner. |
+| **(5) The corner, 30 s** | Level spread under 0.05 dB and pitch under 0.01 cent over five windows, peak under 1. The report checks the full five minutes. |
+| **(6) Unchanged** | Every existing filter test passes unchanged; the ordinary-case figures are bit-identical (the report). |
+
+**The derived bound (threshold 2).** Let S = 1 + max|sᵢ| + 2g. Every term of every equation is at most S, so float rounds each to about ε S. The float solution is the exact solution of the equations perturbed by its residual r, so to first order its error e solves J e = r. With the Jacobian's structure (diagonal Dᵢ = 1 + g tᵢ′, subdiagonal g tᵢ₋₁′, the feedback corner g k t′(u)):
+
+```text
+e_i = p_i + q_i e_4,   p_1 = r_1/D_1,   p_i = (r_i + g t'_(i-1) p_(i-1)) / D_i,
+q_1 = g k t'(u)/D_1,   q_i = q_(i-1) g t'_(i-1) / D_i,   e_4 = p_4 / (1 + q_4)
+```
+
+Each link g tᵢ₋₁′/Dᵢ₋₁ is under 1, so |pᵢ| ≤ i R for R = max|rⱼ|, and
+
+```text
+|e_i| ≤ i R + q_i (4R / (1 + q_4) + τ_f)
+```
+
+R = 8 ε S: rounding the residual's four terms (2 ε S), `fastTanh`'s 2·10⁻⁷ in two terms of size g ≤ S/2 (1.7 ε S; the cubic is exact), and a stage's stop at a residual of 4 ε (|c| + g) ≤ 4 ε S. A converged Newton step leaves an error quadratic in a step under 10⁻⁵, negligible. τ_f = 10⁻⁵ where the nested solve ran (its row stops on a step), else 0. The qᵢ are the equations' own sensitivities, computed from the reference's solution. At k = 0 the bound is 32 ε (4·10⁻⁶) of S; it widens only where the equations are ill-conditioned (q₁ = g k t′(u)/D₁ reaches 4,000 at k 64 near Nyquist). Measured: the worst error is 0.23 (tanh) and 0.34 (cubic) of it over the report's grid, and 0.30 over the random states.
+
+**Red first.** Against the solver before this round (the fallback and the guard disabled, which is that solver bit for bit), 6 of the first 7 tests failed (314 of 440 assertions). Bit-identity passed, as it must, since it compares that solver with itself.
+
+**Deliberate breaks.** 20 breaks, one at a time:
+
+- **The trigger:** never fall back; always fall back; fall back on the first rising ‖F‖².
+- **The restart:** from Newton's last iterate; from the bracket's centre.
+- **The brackets:** the row over s4 ± g; each stage over c ± g/2; each stage started from c instead of its hard-clip model.
+- **The caps:** 4 rows; 3 evaluations per stage.
+- **The stop:** the row at 10⁻³; the stages at 1000× the rounding level, or on a step under 10⁻³|y|; no final chain at the root.
+- **The input guard:** removed; NaN only; on the output instead of the input.
+- **The safeguard and the row:** without its second rule; Newton's point tested after dividing; the row's slope without the stages' t′.
+
+The first pass caught 14. Six survived: both restarts, the narrowed row bracket, the stage start from c, the divide-then-test, and the stage step backstop. All cost only work or touch states the trajectories never reached. That led to two tests (the nested solve from random states; the work at the corner) and two checks in the grid test (the backward error and the row budget). With them **19 of 20 are caught**. Always falling back is also caught by four existing filter tests (the small-signal property above). The one that survives is the stage's step backstop at 10⁻³|y|. Every stage solve on every material ends on its residual check or on a Newton step, whose remainder is quadratic and stays under the rounding level even at that step size (the worst stage residual moves from 4.6 to 6.1 ε S, inside the 8 ε S bound). It would matter only for a stage ending on a bisection step, which nothing reaches. No test can tell it apart, and no requirement pins those bits.
+
+### CPU
+
+ns per channel-sample, 48 kHz, `relwithdebinfo`, Apple M1 Ultra (`tools/bench.sh "[filter-stability]"`; the ordinary case also against the solver before this round, built from commit 26cd4ec and measured in the same session, four alternating runs each):
+
+| Setting | Warm on (tanh) | Warm off (cubic) |
+|---|---:|---:|
+| Normal (1 kHz, k 2, drive 2): this commit / before | 96.7 / 97.9 | 64.5 / 65.4 |
+| k 6, drive 16 (the filter benchmarks): this commit / before | 127.0 / 124.0 | 83.1 / 81.7 |
+| **The corner** (0.495 fs, k 8, self-oscillating; every sample falls back) | **1,900** | **1,022** |
+| F3's top within the knobs' ranges (0.465 fs, k 6, drive 16, a full-scale saw) | 411 | 232 |
+| The DSP's ceiling of k (0.30 fs, k 64, drive 32, a full-scale saw) | 316 | 198 |
+
+- **The ordinary case is within noise of the solver before this round**: every `[filter]` benchmark row is within −1.7% to +4.5% of it, a mean of +0.9%, inside the spread of the runs themselves (the old solver's own runs span up to 7%).
+- **The corner costs 1.90 µs (tanh) and 1.02 µs (cubic)**, against the target of about 1 µs and the ceiling of 2 µs. That is 8 wasted Newton iterations (0.2 µs, the price of bit-identity) and about 57 stage evaluations of about 28 ns each. The prototype took 2.07 and 1.04 µs with the same trigger. One stereo voice with both filters parked there at Warm on is 7.6 µs of the 20.8 µs a sample has at 48 kHz. Only a cutoff held near Nyquist with resonance above the threshold, or a large drive at high k, gets there. At F3's top within the knobs' ranges a loud saw costs 4× the ordinary case. Phase 3's SIMD across channels applies to the fallback as to Newton.
 
 ## References
 

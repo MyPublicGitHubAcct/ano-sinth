@@ -6,7 +6,8 @@
 //   and 10 across the keyboard;
 // - intervals at keytrack 10: the self-oscillation pitch from C1 to C7 at
 //   44.1 and 192 kHz, Warm on and off, at the threshold and at k 6 and 8;
-// - near the clamp, and where LadderFilter's solver fails near Nyquist;
+// - near the clamp, and near Nyquist, where LadderFilter's solve failed
+//   before the stability round's fallback (M1.3 task 7);
 // - the master tune, a portamento glide, and a bend: how closely a
 //   self-oscillating filter follows the oscillators, against the key alone
 //   and against the other ways of feeding it (once per host block, or at
@@ -203,7 +204,7 @@ void reportIntervals()
                  "note)\n\n"
                  "Cents from 4 x the note's frequency (in the header) and the spectral peak; the cutoff clamps at "
                  "0.495 fs = 21,830 Hz. Locked: the output stuck at a large level (its peak over the last 0.5 s), "
-                 "the solver failure in the next table.\n\n"
+                 "as the solve failed here before the stability round.\n\n"
                  "| C5 (2093) | C6 (4186) | C7 (8372) | C8 (16744) | C9 (33488) | G9 (50175) |\n"
                  "|---|---|---|---|---|---|\n";
     for (const double note : {72.0, 84.0, 96.0, 108.0, 120.0, 127.0})
@@ -228,15 +229,16 @@ void reportIntervals()
 
 /// The lowest cutoff, as a fraction of the sample rate, at which a 0.5
 /// impulse leaves LadderFilter stuck above 2 in the second half of a 1 s
-/// render, scanned in steps of 0.0025 from 0.30 to 0.495 fs.
+/// render, scanned in steps of 0.0025 from 0.30 to 0.495 fs. Before the
+/// stability round's fallback (M1.3 task 7) the solve failed from 0.44 fs
+/// (tanh, k 8) and 0.4175 fs (cubic, k 8); now nowhere.
 void reportNearNyquist()
 {
-    std::cout << "\n### Where LadderFilter's solver fails near Nyquist (scanned 0.30 - 0.495 fs in steps of "
-                 "0.0025)\n\n"
+    std::cout << "\n### Near Nyquist: no lock-up (scanned 0.30 - 0.495 fs in steps of 0.0025)\n\n"
                  "The lowest cutoff, as a fraction of fs, where an impulse of 0.5 leaves the output stuck above 2 "
-                 "(it should self-oscillate under 0 dBFS, or decay). Newton stops converging there: its steps cycle "
-                 "at 30-65 in y, the same with 64 iterations as with 8. - : bounded up to the clamp. For M1.3's "
-                 "stability task.\n\n"
+                 "(it should self-oscillate under 0 dBFS, or decay). Before the stability round Newton stopped "
+                 "converging there (tanh from 0.4800 / 0.4625 / 0.4500 / 0.4400 fs at k 4.4 / 5 / 6 / 8); the "
+                 "nested fallback now solves it. - : bounded up to the clamp.\n\n"
                  "| Saturator | Rate | k 3.5 | 4.05 | 4.4 | 5 | 6 | 8 |\n|---|---|---|---|---|---|---|---|\n";
     for (const bool warm : {true, false})
     {
@@ -245,7 +247,7 @@ void reportNearNyquist()
             std::cout << "| " << (warm ? "tanh" : "cubic") << " | " << fixed(rate / 1000.0, 1);
             for (const float k : {3.5f, 4.05f, 4.4f, 5.0f, 6.0f, 8.0f})
             {
-                double first = std::numeric_limits<double>::quiet_NaN();
+                double first = 0.0;
                 for (int step = 0; step <= 78; ++step)
                 {
                     const double ratio = 0.30 + (0.0025 * static_cast<double>(step));
@@ -259,7 +261,8 @@ void reportNearNyquist()
                         break;
                     }
                 }
-                std::cout << " | " << fixed(first, 4);
+                CHECK_FALSE(first > 0.0);
+                std::cout << " | " << (first > 0.0 ? fixed(first, 4) : std::string{"-"});
             }
             std::cout << " |\n";
         }

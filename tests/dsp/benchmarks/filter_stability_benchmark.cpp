@@ -1,14 +1,19 @@
-// CPU cost of the stability round's solver candidates
-// (tests/dsp/filters/filter_stability_candidates.hpp, docs/dsp/filter-stability.md):
-// one channel for a 512-sample block at 48 kHz, Warm Drive on (tanh) and off
-// (cubic), at the filter benchmarks' normal settings (LP24 at 1 kHz, k 2,
-// drive 2, a 110 Hz saw at -6 dBFS) and at the hard corner (the cutoff held
-// at 0.495 fs, k 8, self-oscillating after an impulse, where the as-built
-// solver fails); the two NaN guards on the as-built solver; and LadderFilter
-// itself for scale. Tagged [!benchmark][filter-stability]: run with
+// CPU cost of the ladder's solve where Newton fails and the nested fallback
+// runs (LadderSolver, docs/dsp/filter-stability.md): one LadderFilter channel
+// for a 512-sample block, Warm Drive on (tanh) and off (cubic):
+//
+// - normal: the filter benchmarks' settings (LP24 at 1 kHz, k 2, drive 2, a
+//   110 Hz saw at -6 dBFS), where Newton converges and the fallback never
+//   runs (the filter's ordinary cost, with the input guard);
+// - the corner: the cutoff held at 0.495 fs, k 8, self-oscillating after an
+//   impulse, where every sample falls back (the worst case);
+// - F3's top within the knobs' ranges: a full-scale saw at drive 16 (F8's
+//   +24 dB), k 6 (F5's Resonance 10), the cutoff at 0.465 fs (20.5 kHz at
+//   44.1 kHz), where stage 1 found Newton failing from 0.315 fs;
+// - the DSP's ceiling of k: k 64, drive 32, a full-scale saw at 0.30 fs.
+//
+// Tagged [!benchmark][filter-stability]: run with
 // tools/bench.sh "[filter-stability]" in relwithdebinfo.
-
-#include "../filters/filter_stability_candidates.hpp"
 
 #include <anoesis/dsp/filters/ladder_filter.hpp>
 
@@ -17,13 +22,13 @@
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <string>
-#include <type_traits>
 #include <vector>
 
-using namespace anoesis::test::stability;
+using anoesis::dsp::LadderFilter;
 using anoesis::test::Buffer;
 
 namespace
@@ -32,106 +37,86 @@ namespace
 constexpr std::size_t blockSize = 512;
 constexpr float rate = 48000.0f;
 
-std::vector<float> sawInput()
+/// n samples of a 110 Hz saw from -amplitude to +amplitude.
+std::vector<float> sawInput(float amplitude, std::size_t n)
 {
-    std::vector<float> x(blockSize);
+    std::vector<float> x(n);
     double phase = 0.0;
     for (auto& v : x)
     {
-        v = static_cast<float>(phase - 0.5);
+        v = amplitude * static_cast<float>((2.0 * phase) - 1.0);
         phase += 110.0 / static_cast<double>(rate);
         phase -= std::floor(phase);
     }
     return x;
 }
 
-template <typename Sat, typename Solver>
-void benchmarkCandidate(const std::string& name, const std::vector<float>& input)
+LadderFilter makeFilter(bool warm, float cutoff, float k, float drive)
 {
-    const std::string warm = std::is_same_v<Sat, dsp::TanhSaturator> ? "Warm on" : "Warm off";
-    {
-        CandidateFilter<Sat, Solver> f;
-        f.setResonance(2.0f);
-        f.setDrive(2.0f);
-        f.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
-        f.setCutoff(1000.0f);
-        Buffer buffer{1, blockSize};
-        BENCHMARK("stability: " + name + ", " + warm + ", normal (1 kHz, k 2, drive 2), x512")
-        {
-            std::ranges::copy(input, buffer.channel(0).begin());
-            f.process(buffer.block());
-            return buffer.channel(0)[blockSize - 1];
-        };
-    }
-    {
-        CandidateFilter<Sat, Solver> f;
-        f.setResonance(8.0f);
-        f.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
-        f.setCutoff(0.495f * rate);
-        static_cast<void>(f.processSample(0, 0.5f));
-        for (int i = 0; i < 4096; ++i)
-        {
-            static_cast<void>(f.processSample(0, 0.0f));
-        }
-        Buffer buffer{1, blockSize};
-        BENCHMARK("stability: " + name + ", " + warm + ", corner (0.495 fs, k 8, self-oscillating), x512")
-        {
-            std::ranges::fill(buffer.channel(0), 0.0f);
-            f.process(buffer.block());
-            return buffer.channel(0)[blockSize - 1];
-        };
-    }
+    LadderFilter f;
+    f.setWarm(warm);
+    f.setCutoff(cutoff);
+    f.setResonance(k);
+    f.setDrive(drive);
+    f.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
+    return f;
 }
 
-template <typename Sat>
-void benchmarkAll(const std::vector<float>& input)
+/// The filter on a looping input, starting `skip` blocks in (past the
+/// transient from rest).
+void benchmarkInput(const std::string& name, LadderFilter& f, const std::vector<float>& input, std::size_t skip)
 {
-    benchmarkCandidate<Sat, NewtonAsBuilt<>>("as built", input);
-    benchmarkCandidate<Sat, NewtonDamped<8>>("damped, 8", input);
-    benchmarkCandidate<Sat, NewtonDamped<32>>("damped, 32", input);
-    benchmarkCandidate<Sat, NewtonStepLimited<>>("step-limited", input);
-    benchmarkCandidate<Sat, NewtonPreviousGuess<>>("previous guess", input);
-    benchmarkCandidate<Sat, NewtonOutputVariable<>>("output variable", input);
-    benchmarkCandidate<Sat, NewtonBracketFallback<false>>("nested fallback from Newton", input);
-    benchmarkCandidate<Sat, NewtonBracketFallback<true>>("nested fallback from the guess", input);
-    benchmarkCandidate<Sat, NestedOnly>("nested alone", input);
-    benchmarkCandidate<Sat, NewtonInputAdaa<>>("ADAA on the input", input);
-    benchmarkCandidate<Sat, SanitizedInput<NewtonAsBuilt<>>>("as built, input sanitised", input);
+    Buffer buffer{1, blockSize};
+    std::size_t offset = 0;
+    const auto nextBlock = [&]
+    {
+        std::copy_n(input.begin() + static_cast<std::ptrdiff_t>(offset), blockSize, buffer.channel(0).begin());
+        offset = (offset + blockSize) % input.size();
+    };
+    for (std::size_t i = 0; i < skip; ++i)
+    {
+        nextBlock();
+        f.process(buffer.block());
+    }
+    BENCHMARK(name.c_str())
+    {
+        nextBlock();
+        f.process(buffer.block());
+        return buffer.channel(0)[blockSize - 1];
+    };
 }
 
 } // namespace
 
-TEST_CASE("Filter stability: CPU of the solver candidates", "[!benchmark][filter-stability]")
+TEST_CASE("Filter stability: CPU of the solve where the fallback runs", "[!benchmark][filter-stability]")
 {
-    const auto input = sawInput();
-    benchmarkAll<dsp::TanhSaturator>(input);
-    benchmarkAll<dsp::CubicSaturator>(input);
-
-    // The per-block state check, on the as-built solver at normal settings.
-    CandidateFilter<dsp::TanhSaturator, NewtonAsBuilt<>> checked;
-    checked.setResonance(2.0f);
-    checked.setDrive(2.0f);
-    checked.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
-    checked.setCutoff(1000.0f);
-    Buffer buffer{1, blockSize};
-    BENCHMARK("stability: as built, Warm on, state checked per block, normal (1 kHz, k 2, drive 2), x512")
+    // 96 blocks: a whole number of blocks, close to a whole number of saw periods.
+    const auto quiet = sawInput(0.5f, 96 * blockSize);
+    const auto loud = sawInput(1.0f, 96 * blockSize);
+    const std::vector<float> silence(blockSize, 0.0f);
+    for (const bool warm : {true, false})
     {
-        std::ranges::copy(input, buffer.channel(0).begin());
-        checked.process(buffer.block());
-        checked.recoverNonFinite();
-        return buffer.channel(0)[blockSize - 1];
-    };
-
-    // LadderFilter itself at the same normal settings, for scale.
-    anoesis::dsp::LadderFilter built;
-    built.setCutoff(1000.0f);
-    built.setResonance(2.0f);
-    built.setDrive(2.0f);
-    built.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 1});
-    BENCHMARK("stability: LadderFilter, Warm on, normal (1 kHz, k 2, drive 2), x512")
-    {
-        std::ranges::copy(input, buffer.channel(0).begin());
-        built.process(buffer.block());
-        return buffer.channel(0)[blockSize - 1];
-    };
+        const std::string label = warm ? "Warm on" : "Warm off";
+        {
+            auto f = makeFilter(warm, 1000.0f, 2.0f, 2.0f);
+            benchmarkInput("stability: " + label + ", normal (1 kHz, k 2, drive 2), x512", f, quiet, 8);
+        }
+        {
+            auto f = makeFilter(warm, 0.495f * rate, 8.0f, 1.0f);
+            Buffer kick{1, blockSize};
+            kick.channel(0)[0] = 0.5f;
+            f.process(kick.block());
+            benchmarkInput("stability: " + label + ", corner (0.495 fs, k 8, self-oscillating), x512", f, silence, 8);
+        }
+        {
+            auto f = makeFilter(warm, 0.465f * rate, 6.0f, 16.0f);
+            benchmarkInput("stability: " + label + ", F3's top (0.465 fs, k 6, drive 16, full-scale saw), x512", f,
+                           loud, 8);
+        }
+        {
+            auto f = makeFilter(warm, 0.30f * rate, 64.0f, 32.0f);
+            benchmarkInput("stability: " + label + ", ceiling (0.30 fs, k 64, drive 32, full-scale saw), x512", f, loud,
+                           8);
+        }
+    }
 }
