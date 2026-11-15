@@ -4,6 +4,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/foundations_benchmark.cpp
     benchmarks/drift_benchmark.cpp
     benchmarks/envelope_benchmark.cpp
+    benchmarks/filter_benchmark.cpp
     benchmarks/lfo_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     benchmarks/tempo_sync_benchmark.cpp
@@ -20,6 +21,7 @@ add_executable(anoesis_dsp_tests
     control/stereo_gain_test.cpp
     control/tempo_sync_report.cpp
     control/tempo_sync_test.cpp
+    filters/filter_report.cpp
     generators/white_noise_test.cpp
     math/decibels_test.cpp
     math/fast_math_test.cpp
