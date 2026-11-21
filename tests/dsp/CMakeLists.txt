@@ -11,6 +11,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/lfo_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     benchmarks/tempo_sync_benchmark.cpp
+    benchmarks/voice_allocation_benchmark.cpp
     benchmarks/voice_benchmark.cpp
     core/allocation_counter_test.cpp
     core/audio_block_test.cpp
@@ -56,6 +57,7 @@ add_executable(anoesis_dsp_tests
     oscillators/waveform_test.cpp
     resampling/oversampler_test.cpp
     support/allocation_counter.cpp
+    voice/allocation_report.cpp
     voice/voice_report.cpp
     voice/voice_test.cpp)
 

@@ -149,6 +149,10 @@ struct Engine
     Schedule schedule = Schedule::grid32;
     bool monoWhenCentred = false;
     bool skipUnheard = false; ///< task 5: don't render a part nothing hears
+    /// M1.4 task 2 (allocation_candidates.hpp): a note-on on a sounding voice
+    /// (a steal or retrigger in place) keeps the filters' state and the
+    /// voice's grid, instead of feeding and resetting them as from silence.
+    bool keepFiltersOnRetrigger = false;
 };
 
 struct FilterSettings
@@ -192,14 +196,17 @@ public:
     static constexpr std::size_t grid = dsp::LadderFilter::gridSamples;
     static constexpr std::size_t slotCount = partCount * slotsPerPart;
 
-    PrototypeVoice(const dsp::MinBlepTable& table, const Readings& readings, const Engine& engine) noexcept
+    /// `seed` as dsp::Voice's (0, the default, gives the sequences task 1
+    /// measured).
+    PrototypeVoice(const dsp::MinBlepTable& table, const Readings& readings, const Engine& engine,
+                   std::uint64_t seed = 0) noexcept
         : slots{Slot{table}, Slot{table}, Slot{table}, Slot{table}}, readings(readings), engine(engine)
     {
         for (std::size_t s = 0; s < slotCount; ++s)
         {
-            slots[s].setRandomSeed(0x9E3779B97F4A7C15U * (s + 1));
+            slots[s].setRandomSeed(seed ^ (0x9E3779B97F4A7C15U * (s + 1)));
         }
-        pitchDrift.setSeed(0x3C6EF372FE94F82BU);
+        pitchDrift.setSeed(seed ^ 0x3C6EF372FE94F82BU);
         setPatch({});
     }
 
@@ -287,6 +294,7 @@ public:
     /// sample, then reset() so their grid starts here.
     void noteOn(float noteNumber, const FilterFeed& feed, std::size_t at) noexcept
     {
+        const bool sounding = isActive();
         note = noteNumber;
         for (auto& s : slots)
         {
@@ -296,6 +304,12 @@ public:
         for (auto& e : envelopes)
         {
             e.gateOn();
+        }
+        if (sounding && engine.keepFiltersOnRetrigger)
+        {
+            // The filters ring on, on the voice's grid; the new note's
+            // keytrack reaches them at the next grid point.
+            return;
         }
         mono = engine.monoWhenCentred && allCentred();
         feedFilters(feed, at);

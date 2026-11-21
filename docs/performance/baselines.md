@@ -6,6 +6,30 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 voice allocation, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-allocation]"`, 100 samples per benchmark, one run, followed by `tools/bench.sh "[voice]"` for the built voice's rows.
+- **What is measured** ([voice-allocation.md](../dsp/voice-allocation.md#cpu)): the stage-1 `Allocator` (tests/dsp/voice/allocation_candidates.hpp) driving `dsp::Voice`, 512 samples per run at 48 kHz, stereo. The per-sample figures are for **all 16 voices** (the share-of-a-core column is the whole instrument's voices), except where a row says otherwise. *Init*: A1 one saw, both filters LP24 on their own parts. *Worst*: 4 oscillators × 8 unison saws, both filters on AB, drive ×4. The bookkeeping rows use a stub voice that renders nothing.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| allocation: 16 voices held, init patch | 5,775.35 (361 per voice; 27.7% of a core) |
+| allocation: 16 voices held, worst case | 11,216.15 (701 per voice; 53.8%) |
+| allocation: 64 note events (32 steals) per block on silent voices | 21.57 (11.0 µs per block) |
+| allocation: no events on silent voices | 1.95 (1.0 µs per block) |
+| allocation: a steal per block, init, cut / retrigger | 6,185.41 / 6,202.34 |
+| allocation: a steal per block, init, 5 ms fade on a spare / 5 ms fade then the note | 6,365.02 / 6,168.16 |
+| voice: built, init patch / filter B at `--` / worst case (one voice, the same session) | 360.90 / 240.29 / 700.12 |
+
+### Observations
+
+- **The allocator adds nothing measurable to the voices**: 16 voices through it cost 16 × one voice within noise (361 and 701 ns per voice against 361 and 700 for one voice in the same session). The full instrument's voices at 48 kHz: 27.7% of a core for the init patch, 53.8% for the worst case.
+- **The bookkeeping is about 157 ns per note event** ((11,045 − 999) ns / 64 events per block), a linear scan of a 32-voice pool, 0.3 samples' worth at 48 kHz.
+- **A fade on a spare voice costs 2.9% over a cut** at one steal in every block (an extreme rate): the spare renders for 5 ms of each 10.7 ms block. A retrigger or a delayed fade costs what a cut does.
+- The `[voice]` rows are within 1–5% of the last entry (360.90 against 357.76, 240.29 against 229.20, 700.12 against 688.03): noise, as no library code changed.
+
+---
+
 ## 2026-11-21: M1.4 voice, as built
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice]"`, 100 samples per benchmark, one run, with the stage-1 rows in the same session.
