@@ -1,12 +1,12 @@
 # The voice: parts, filter routing, and the level into the filter
 
-A Sylenth1 voice is two **parts**, A and B, each with two oscillators, a filter and an amp envelope (inventory [§1](../reference/sylenth1-features.md#1-architecture-and-signal-flow-pp-89)). Each filter's **Input Select** chooses what it filters: its own part, both parts (AB), or nothing (`--`). The two parts then go to the mixer (Mix A, Mix B), the master effects, and Main Volume. Everything up to the mixer is per voice. This page covers M1.4 task 1, stage 1:
+A Sylenth1 voice is two **parts**, A and B, each with two oscillators, a filter and an amp envelope (inventory [§1](../reference/sylenth1-features.md#1-architecture-and-signal-flow-pp-89)). Each filter's **Input Select** chooses what it filters: its own part, both parts (AB), or nothing (`--`). The two parts then go to the mixer (Mix A, Mix B), the master effects, and Main Volume. Everything up to the mixer is per voice. This page covers M1.4 task 1:
 
 - the theory: what a voice composes, where an amplifier can sit relative to a saturating filter, how sums of oscillators grow, gain staging into a saturator, buffer layouts and in-place processing, chunked and stage-major schedules, a mono path, and where an oversampling boundary can sit;
 - what is known about Sylenth1's voice, including evidence the inventory didn't have: the developer's 2015 answer on which envelopes act when a filter takes the other part, a user's report that an unrouted part is silent even with its filter on Bypass, the Input Select's options, the Mix's internal scale, and velocity in the init patch;
 - the candidate structures prototyped here, on the real DSP classes;
 - what they measured: each reading of the routing, the level each kind of patch presents to the filter and the Drive at which the filter's saturation reaches 1%, the knee against Volume, the engines' equality to the bit at every block size, memory, and CPU;
-- the recommendations, which are stage 1's: the project owner decides, and stage 2 builds a voice in `libs/dsp`.
+- the recommendations, the project owner's decision (every recommendation), and `dsp::Voice` as built, with the tests that pin it.
 
 Read [filters.md](filters.md) (the filter, its saturators, and its 32-sample grid), [filter-control.md](filter-control.md#how-a-voice-uses-it-m14) (how a voice feeds each filter), [oscillator-unison.md](oscillator-unison.md) (the stack's level and headroom), and [envelopes.md](envelopes.md) first.
 
@@ -40,6 +40,8 @@ When a filter takes the *other* part, the other part's envelope can sit in eithe
 ### Gain staging into a saturator
 
 A saturator is linear for small inputs and compresses large ones. tanh(x) ≈ x − x³/3, so a sine of amplitude a gets a third harmonic of about a²/12 of the fundamental: 1% at a ≈ 0.35. Where the oscillators' level sits against that knee decides where Drive "bites". If one oscillator at full Volume already sits past the knee, every patch is distorted at Drive 0, and a unison stack, 4–30 dB louder, is distorted a lot. The level into the filter is therefore a voice question, not only a mixer one. The mixer comes after the filter and can't undo it.
+
+In a transistor ladder the knee also depends on the cutoff. Each stage integrates the difference t(y₍ᵢ₋₁₎) − t(yᵢ), so far below the cutoff every stage follows the one before and the saturations largely cancel. The distortion comes from the part of the signal near and above the cutoff. Measured on ours with stage 2's tests: a 220 Hz sine at a peak of 2 is distorted 0.23% with the cutoff at 0.495 fs, against several percent at the default 4,677 Hz. So a knee is only comparable at a stated cutoff, and V8's protocol fixes it at the defaults.
 
 The level of a sum depends on correlation. N copies in phase have N times the peak (+20 log₁₀ N dB). N detuned or free-running copies have √N times the RMS, with peaks somewhere between √N and N times one copy's, depending on how the phases line up.
 
@@ -245,7 +247,7 @@ Of the voice object, the four slots are 22,240 B (5.6 KB each, 8 unison oscillat
 
 ## Recommendations
 
-*Stage 1: these are recommendations for the project owner's decision. Nothing here is built; stage 2 builds what is chosen in `libs/dsp`, test-first, and replaces the prototypes.*
+*Stage 1's recommendations, as written. The project owner chose every one ([The decision](#the-decision)), and stage 2 built them ([As built](#as-built)).*
 
 | # | Question | Recommendation | Why |
 |---|---|---|---|
@@ -267,6 +269,97 @@ Of the voice object, the four slots are 22,240 B (5.6 KB each, 8 unison oscillat
 - **O15 (unison level)**: no normalisation means a free 8-voice unison enters the filter at +12.8 dB peak over one saw, 28% distorted at drive ×1. O15's measurement on the demo (RMS against the voice count) gains weight: if Sylenth1 normalises, this changes a lot.
 - **The inventory's "A, B, AB, or `--`"** for each filter becomes "its own part, AB, or `--`" (V1), and "vice versa" means through AB.
 - **E11** (whether a held note at sustain 0 frees its voice): untouched, for task 2.
+
+## The decision
+
+Chosen by the project owner on 2026-11-21: every recommendation above (Decisions log).
+
+- **Routing**: each filter's Input Select is its own part, AB, or `--`. **AB is a plain sum.**
+- **Envelopes**: a part crossing into the other filter goes through **its own amp envelope before that filter**, and **the filter's part's envelope after**. A filter's own part goes through the filter, then its envelope.
+- **What isn't heard isn't run**: a `--` filter passes nothing and isn't run. A part no filter reads is silent and its oscillators aren't rendered. **A bypassed filter still takes its Input Select**, and passes that sum unfiltered.
+- **The level**: unchanged. Volume 10 is unity, centred is −3 dB per channel, the parts add. **One filter input level** (a gain before each filter, its inverse after) **at 1 until V8 is measured.**
+- **The amp envelope** is a linear gain of the `Adsr`'s level. **Velocity doesn't reach the amp** (it is a misc source, M1.5).
+- **The mono path goes to task 5**, with a filter channel-state copy to leave it mid-note.
+- **Structure**: per-filter buffers, the 32-sample grid schedule, fixed scratch, no allocation.
+- **Oversampling**: recorded for M1.8, as one decimator on the summed voice bus.
+
+## As built
+
+### The class
+
+[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp): `Voice<Taps>`, `FilterInput` (`none`, `own`, `both`), and `VoiceFilterKnobs`. The knobs struct holds the six global knob ramps as `const LinearSmoother*`, positioned at the block's first sample (null reads as 0), and the Keytrack knob.
+
+- **What it holds:** 4 `OscillatorSlot`s (`slot(0..3)`: A1, A2, B1, B2), 2 `LadderFilter`s, 2 `Adsr`s (`envelope(0..1)`), and a `PitchDrift`.
+- **Seeds:** the constructor's seed sets every random sequence: slot s gets seed ⊕ 0x9E37…·(s + 1), and the drift seed ⊕ 0x3C6E…. Give each voice its own seed.
+- **The filters' controls are the voice's:** `setFilterInput`, `setFilterBypassed`, `setFilterResponse`, `setFilterDrive`, `setWarm`, and `setFilterInputLevel`. A level outside [10⁻³, 10³], or NaN, counts as 1. `filter(part)` is read-only, for measurement.
+- **Lifecycle:** `prepare()`, `reset()` (as freshly prepared), `noteOn(note, knobs)`, `noteOff()`, `isActive()` (until both amp envelopes reach 0), and `process(out, knobs)`, which adds into channels 0 and 1.
+- **Size:** about 25 KB at 64 taps, with the scratch inside (10 buffers of 32 samples). Nothing allocates, `prepare()` included.
+
+How `process()` runs:
+- **Chunks:** it works in chunks that stop at the voice's grid, counted from the note-on.
+- **At each grid point:**
+  - pending Input Select and Bypass changes apply. A filter that comes on, from `--` or out of Bypass, is fed for this sample and `reset()`, so it starts from rest on the voice's grid.
+  - each running filter is fed through the Filter Control for the end of the coming segment:
+    - `filterCutoffOctaves` with keytrack (`keytrackOctaves`, computed once for both filters) goes into `setCutoffModulation`, with `setCutoff` held at the anchor;
+    - `filterResonanceK` goes into `setResonanceModulation`, with `setResonance(0)`;
+    - a non-finite value keeps the last finite one.
+- **Per chunk:**
+  1. The heard parts' slots are added into their buffers, at the note plus drift, in drift's runs.
+  2. Both envelopes run.
+  3. Each running filter's input is built in its own buffer: its own part, or its own part plus the other through the other's envelope, then × the input level when it isn't 1.
+  4. The filter runs in place.
+  5. Its output × its part's envelope (× 1/level) is added to `out`.
+- **No fused multiply-add on the crossing part:** its product sits in its own statement, so it is rounded before the sum on every compiler.
+
+Two things were settled in the build:
+- **Routing changes apply at the voice's next grid point.** A filter is then always on the voice's grid. Leaving Bypass through `LadderFilter::setBypassed` mid-segment would restart the filter's own grid off the voice's, so it would read feeds meant for another segment's end.
+- **The voice feeds only running filters.** A bypassed or `--` filter isn't fed, and is fed for its starting sample when it comes on.
+
+What it leaves to later tasks:
+- the per-voice modulation terms of the Filter Control (Cutoff X / AB, Reso X / AB), until M1.5 supplies them;
+- the note's glide, bend, and master tune (task 3);
+- Mix and the output bus (task 4);
+- skipping filters on silence, and the mono path (task 5);
+- voice allocation, and what a retrigger of a sounding voice does (task 2).
+
+This completes M1.4's last bullet, the feed through the Filter Control, except for its modulation terms.
+
+### Tests
+
+[voice_test.cpp](../../tests/dsp/voice/voice_test.cpp), 13 tests. The stage-1 prototype, kept in [voice_candidates.hpp](../../tests/dsp/voice/voice_candidates.hpp) for the alternatives (I1, unselected dry, Bypass on its own part, the AB laws, the per-part layout, the block schedule, the mono path), is the reference in its decided configuration:
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| Matches the prototype | six routings (own/own, AB/`--`, own/AB, AB/AB, `--`/own, own/AB with B bypassed) on the worst patch, with a Cutoff step and a Resonance step mid-note (off the grid) and a note-off off the grid | bit for bit: the same classes, seeds, and arithmetic in the same order |
+| `--` on both | silence | exact zeros |
+| An unselected part | silence, its slot never run, its filter at rest | exact |
+| Both envelopes on a crossing part | either envelope closing silences B1 through filter A | exact zeros from 200 ms (the filter's tail at 4,677 Hz is flushed below FLT_MIN within a few ms) |
+| The crossing envelope acts before the filter | envelope B at 0.25 against 1, a 220 Hz sine at drive ×2.83 | THD below half (after the filter the ratio would be exactly 1) |
+| AB a plain sum | A1 and B1 the same saw into a bypassed AB filter | exactly twice A1 alone (0 ULP) |
+| Bypass takes its select | B bypassed on `--` silent; on B exactly the bare slot | exact |
+| The input level | bypassed: 0.3 against 1 within 2 ULP (three half-ulp roundings); NaN, 0, −1, inf bit-identical to 1. Driven: 0.25 halves the THD or better | derived as stated |
+| Block sizes 1/37/4096 | two routings, a knob ramp, keytrack, a note-off off the grid; no allocation from `prepare()` on | bit for bit; 0 allocations |
+| Changes at the next grid point | an Input Select change at 2005 is the one at 2016; switched back on from `--` it starts from rest (against off from the start); leaving Bypass the same, on the grid | bit for bit |
+| The Filter Control feed | Cutoff A 2, B 4, the Filter Control 3, Keytrack 10 at note 57: 4.5675 Hz × 2⁹ and × 2¹¹ after the note-on and after a block | 2⁻¹⁹ + 2⁻²⁴ relative, as filter_control_test.cpp |
+| NaN from the knobs | the cutoff stays where it was; the output finite and sounding | 0 ULP |
+| The lifecycle | `isActive()` through the release; `reset()` as freshly prepared; another seed differs | bit for bit |
+
+Red against an inert stub: 11 of 13 failed. The two that passed check for silence, which an inert voice also gives. Then 20 deliberate breaks of the routing, the envelopes, the sum, the skipping, the grid deferral, the restarts, the feed, the NaN guards, the level, the drift, the seed, and reset. The first pass caught 14; 3 didn't compile as written, and 2 survived. One survivor was the NaN guard on k: the filter takes a NaN k as 0 without complaint, so the test now compares against a voice whose knobs stay finite. The other was `reset()` keeping the drift's sequence: `PitchDrift` is off unless set, so no test exercised it, and the test patches now turn it on at the plugin's 1.5 cents. With those, all 20 are caught.
+
+### Results, as built
+
+The `[voice-report]` adds a section for the library: `dsp::Voice` against the prototype's decided configuration, drift on, for the six engine patches at host blocks of 1, 37 and 4096. It is **identical to the bit in 18 of 18 renders, with 0 allocations from `prepare()` on**. Every stage-1 table reproduces to the printed digit.
+
+**CPU** (`tools/bench.sh "[voice]"`, `relwithdebinfo`, Apple M1 Ultra, virtualised; per voice):
+
+| Benchmark | ns per sample | 16 voices, share of a core |
+|---|---:|---:|
+| `dsp::Voice`, init patch | 358 | 27% |
+| `dsp::Voice`, init patch, filter B at `--` | 229 | 18% |
+| `dsp::Voice`, worst case | 688 | 53% |
+| the prototype's per-filter grid rows, the same session | 360 / 697 | |
+
+The built voice costs what the prototype's per-filter grid engine did, within noise. Task 5 has the next saving: a filter whose input has nothing sounding still costs 126–129 ns, and the mono path roughly halves centred patches.
 
 ## References
 

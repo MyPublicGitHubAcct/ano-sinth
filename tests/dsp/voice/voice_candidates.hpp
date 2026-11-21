@@ -199,7 +199,7 @@ public:
         {
             slots[s].setRandomSeed(0x9E3779B97F4A7C15U * (s + 1));
         }
-        drift.setSeed(0x3C6EF372FE94F82BU);
+        pitchDrift.setSeed(0x3C6EF372FE94F82BU);
         setPatch({});
     }
 
@@ -218,9 +218,9 @@ public:
     {
         return envelopes[part];
     }
-    [[nodiscard]] dsp::PitchDrift& pitchDrift() noexcept
+    [[nodiscard]] dsp::PitchDrift& drift() noexcept
     {
-        return drift;
+        return pitchDrift;
     }
     [[nodiscard]] const std::array<Route, partCount>& routes() const noexcept
     {
@@ -261,7 +261,7 @@ public:
         {
             e.prepare(spec);
         }
-        drift.prepare(spec);
+        pitchDrift.prepare(spec);
         capacity = engine.schedule == Schedule::grid32 ? grid : spec.maxBlockSize;
         // Parts and filters: 2 x 2 channels each; the two envelopes.
         storage.assign(capacity * ((2 * partCount * stereo) + partCount), 0.0f);
@@ -292,7 +292,7 @@ public:
         {
             s.noteOn();
         }
-        drift.noteOn();
+        pitchDrift.noteOn();
         for (auto& e : envelopes)
         {
             e.gateOn();
@@ -485,26 +485,26 @@ private:
                 partBlock(p, stereo, length).clear();
             }
         }
-        drift.process(length,
-                      [&](std::size_t start, std::size_t run, float offset) noexcept
-                      {
-                          for (std::size_t p = 0; p < partCount; ++p)
-                          {
-                              if (!heard[p] && engine.skipUnheard)
-                              {
-                                  continue;
-                              }
-                              const auto block = partBlock(p, stereo, length).subBlock(start, run);
-                              for (std::size_t s = 0; s < slotsPerPart; ++s)
-                              {
-                                  auto& slot = slots[(p * slotsPerPart) + s];
-                                  if (slot.soundingVoices() > 0)
-                                  {
-                                      slot.process(block, note + offset);
-                                  }
-                              }
-                          }
-                      });
+        pitchDrift.process(length,
+                           [&](std::size_t start, std::size_t run, float offset) noexcept
+                           {
+                               for (std::size_t p = 0; p < partCount; ++p)
+                               {
+                                   if (!heard[p] && engine.skipUnheard)
+                                   {
+                                       continue;
+                                   }
+                                   const auto block = partBlock(p, stereo, length).subBlock(start, run);
+                                   for (std::size_t s = 0; s < slotsPerPart; ++s)
+                                   {
+                                       auto& slot = slots[(p * slotsPerPart) + s];
+                                       if (slot.soundingVoices() > 0)
+                                       {
+                                           slot.process(block, note + offset);
+                                       }
+                                   }
+                               }
+                           });
 
         // 2. The amp envelopes' levels.
         for (std::size_t p = 0; p < partCount; ++p)
@@ -587,7 +587,7 @@ private:
     std::array<Slot, slotCount> slots;
     std::array<dsp::LadderFilter, partCount> filters{};
     std::array<dsp::Adsr, partCount> envelopes{};
-    dsp::PitchDrift drift;
+    dsp::PitchDrift pitchDrift;
     Readings readings;
     Engine engine;
     Patch patch;

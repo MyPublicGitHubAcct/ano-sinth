@@ -13,11 +13,17 @@
 // - the init patch at 96 kHz (1024 samples per run: the voice's own cost at
 //   2x, without a decimator).
 //
+// - the built dsp::Voice (stage 2) at the init patch, with filter B at "--",
+//   and at the worst case: the decided structure (per-filter buffers, the
+//   grid schedule), which the prototype's per-filter grid rows measured.
+//
 // Tagged [!benchmark][voice]: run with tools/bench.sh "[voice]" in
 // relwithdebinfo. The per-sample figures are per voice.
 
 #include "../oscillators/oscillator_support.hpp"
 #include "../voice/voice_candidates.hpp"
+
+#include <anoesis/dsp/voice/voice.hpp>
 
 #include <anoesis/test/buffer.hpp>
 
@@ -104,6 +110,100 @@ void initWithoutFilterB(Voice& v)
     Patch patch;
     patch.filters[1].input = Input::none;
     v.setPatch(patch);
+}
+
+/// The built voice with its note held, as Bench.
+class BuiltBench
+{
+public:
+    using Built = dsp::Voice<dsp::minBlepTaps>;
+
+    explicit BuiltBench(const std::function<void(Built&)>& configure)
+        : voice(anoesis::test::d6::minBlepTable64()),
+          rampsA(knobs(), 48000.0f),
+          rampsB(knobs(), 48000.0f),
+          out(2, blockSize)
+    {
+        configure(voice);
+        voice.prepare({.sampleRate = 48000.0f, .maxBlockSize = blockSize, .numChannels = 2});
+        voice.noteOn(45.0f, feed());
+        for (int i = 0; i < 100; ++i)
+        {
+            run();
+        }
+    }
+
+    float run()
+    {
+        out.block().clear();
+        voice.process(out.block(), feed());
+        rampsA.advance(blockSize);
+        rampsB.advance(blockSize);
+        return out.channel(0)[0];
+    }
+
+private:
+    [[nodiscard]] static const Knobs& knobs()
+    {
+        static const Knobs defaults;
+        return defaults;
+    }
+
+    [[nodiscard]] dsp::VoiceFilterKnobs feed() const
+    {
+        return {
+            .cutoff = {&rampsA.cutoff, &rampsB.cutoff},
+            .resonance = {&rampsA.resonance, &rampsB.resonance},
+            .controlCutoff = &rampsA.controlCutoff,
+            .controlResonance = &rampsA.controlResonance,
+            .keytrack = 0.0f,
+        };
+    }
+
+    Built voice;
+    KnobRamps rampsA;
+    KnobRamps rampsB;
+    Buffer out;
+};
+
+/// The init and worst patches on the built voice, as setInitPatch() and
+/// setWorstPatch() set them on the prototype.
+void builtOscillators(BuiltBench::Built& v, bool worst)
+{
+    for (std::size_t s = 0; s < 4; ++s)
+    {
+        auto& slot = v.slot(s);
+        slot.setWaveform(dsp::Waveform::saw);
+        int voices = s == 0 ? 1 : 0;
+        if (worst)
+        {
+            voices = 8;
+        }
+        slot.setVoices(voices);
+        if (worst)
+        {
+            slot.setDetune(0.548f);
+            slot.setStereo(1.0f);
+            slot.setRetrigger(false);
+            slot.setTuning({.octaves = 0, .semitones = s < 2 ? 0 : 7, .fine = 0.0f});
+        }
+    }
+    for (std::size_t p = 0; p < 2; ++p)
+    {
+        auto& e = v.envelope(p);
+        e.setAttack(worst ? 0.005f : 0.0f);
+        e.setDecay(worst ? 0.3f : 0.0f);
+        e.setSustain(worst ? 0.7f : 1.0f);
+        e.setRelease(worst ? 0.2f : 0.0f);
+    }
+    if (worst)
+    {
+        for (std::size_t f = 0; f < 2; ++f)
+        {
+            v.setFilterInput(f, dsp::FilterInput::both);
+            v.setFilterDrive(f, 4.0f);
+        }
+    }
 }
 
 } // namespace
@@ -201,6 +301,31 @@ TEST_CASE("Voice: CPU", "[!benchmark][voice]")
     {
         Bench b{mono, worstCentred};
         BENCHMARK("voice: worst case centred, mono path x512")
+        {
+            return b.run();
+        };
+    }
+    {
+        BuiltBench b{[](BuiltBench::Built& v) { builtOscillators(v, false); }};
+        BENCHMARK("voice: built, init patch x512")
+        {
+            return b.run();
+        };
+    }
+    {
+        BuiltBench b{[](BuiltBench::Built& v)
+                     {
+                         builtOscillators(v, false);
+                         v.setFilterInput(1, dsp::FilterInput::none);
+                     }};
+        BENCHMARK("voice: built, init patch, filter B at -- x512")
+        {
+            return b.run();
+        };
+    }
+    {
+        BuiltBench b{[](BuiltBench::Built& v) { builtOscillators(v, true); }};
+        BENCHMARK("voice: built, worst case x512")
         {
             return b.run();
         };

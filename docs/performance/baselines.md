@@ -6,6 +6,24 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 voice, as built
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice]"`, 100 samples per benchmark, one run, with the stage-1 rows in the same session.
+- **What changed** ([voice-architecture.md](../dsp/voice-architecture.md#as-built)): new `dsp::Voice` (voice.hpp), the decided structure: per-filter buffers on the voice's 32-sample grid, fixed scratch, each running filter fed through the Filter Control. The `[voice]` benchmarks add three rows on it; the prototype's rows stay for the alternatives.
+
+| Benchmark (ns / sample, per voice) | this commit | stage 1 (prototype) |
+|---|---:|---:|
+| voice: built, init patch | 357.76 (16 voices 27.5%) | 359.98 (per-filter, grid, this session) |
+| voice: built, init patch, filter B at `--` | 229.20 | 234.42 |
+| voice: built, worst case | 688.03 (16 voices 52.8%) | 696.88 (per-filter, grid, this session) |
+
+### Observations
+
+- **The built voice costs what the prototype's per-filter grid engine did**, within noise (−0.6% to −2.2%). The decision was made on structure, not speed, and the build kept the speed.
+- The prototype's rows in this session are within 3% of stage 1's (above).
+
+---
+
 ## 2026-11-21: M1.4 voice, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice]"`, 100 samples per benchmark, two runs; the second shown, the first within 3% on every row.

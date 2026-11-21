@@ -32,6 +32,7 @@
 #include <anoesis/dsp/filters/filter_control.hpp>
 #include <anoesis/dsp/filters/ladder_filter.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
+#include <anoesis/dsp/voice/voice.hpp>
 
 #include <anoesis/test/buffer.hpp>
 #include <anoesis/test/measure.hpp>
@@ -754,6 +755,166 @@ void printMemory()
               << sizeof(dsp::PitchDrift) << " B.\n";
 }
 
+// --- As built: the library's Voice against the prototype's decided configuration -----
+
+using BuiltVoice = dsp::Voice<dsp::minBlepTaps>;
+
+/// A patch both classes can take: init or worst oscillators and envelopes
+/// (as setInitPatch() and setWorstPatch() set them), and each filter's input.
+struct BuiltSpec
+{
+    std::string_view name;
+    bool worst = true;
+    float width = 1.0f;
+    Input a = Input::both;
+    Input b = Input::both;
+};
+
+template <typename V>
+void oscillatorsFor(V& v, const BuiltSpec& s)
+{
+    for (std::size_t slot = 0; slot < 4; ++slot)
+    {
+        auto& o = v.slot(slot);
+        o.setWaveform(dsp::Waveform::saw);
+        if (s.worst)
+        {
+            o.setVoices(8);
+            o.setDetune(0.548f);
+            o.setStereo(s.width);
+            o.setRetrigger(false);
+            o.setTuning({.octaves = 0, .semitones = slot < 2 ? 0 : 7, .fine = 0.0f});
+        }
+        else
+        {
+            o.setVoices(slot == 0 ? 1 : 0);
+        }
+    }
+    for (std::size_t p = 0; p < partCount; ++p)
+    {
+        auto& e = v.envelope(p);
+        e.setAttack(s.worst ? 0.005f : 0.0f);
+        e.setDecay(s.worst ? 0.3f : 0.0f);
+        e.setSustain(s.worst ? 0.7f : 1.0f);
+        e.setRelease(s.worst ? 0.2f : 0.0f);
+    }
+    v.drift().setDepthCents(dsp::PitchDrift::defaultDepthCents);
+}
+
+dsp::FilterInput builtInput(Input i)
+{
+    switch (i)
+    {
+    case Input::none:
+        return dsp::FilterInput::none;
+    case Input::both:
+        return dsp::FilterInput::both;
+    case Input::own:
+        break;
+    }
+    return dsp::FilterInput::own;
+}
+
+float driveFor(const BuiltSpec& s)
+{
+    return s.worst ? 4.0f : 1.0f;
+}
+
+Render renderBuilt(const BuiltSpec& spec, std::size_t length, std::size_t noteOff, std::size_t hostBlock)
+{
+    BuiltVoice v{d6::minBlepTable64()};
+    oscillatorsFor(v, spec);
+    v.setFilterInput(0, builtInput(spec.a));
+    v.setFilterInput(1, builtInput(spec.b));
+    v.setFilterDrive(0, driveFor(spec));
+    v.setFilterDrive(1, driveFor(spec));
+    const Knobs knobs;
+    KnobRamps rampsA{knobs, rate};
+    KnobRamps rampsB{knobs, rate};
+    const auto feed = [&]
+    {
+        return dsp::VoiceFilterKnobs{
+            .cutoff = {&rampsA.cutoff, &rampsB.cutoff},
+            .resonance = {&rampsA.resonance, &rampsB.resonance},
+            .controlCutoff = &rampsA.controlCutoff,
+            .controlResonance = &rampsA.controlResonance,
+            .keytrack = 0.0f,
+        };
+    };
+    Render r;
+    r.out = Buffer{2, length};
+    const auto block = r.out.block();
+    {
+        const AllocationCounter counter;
+        v.prepare({.sampleRate = rate, .maxBlockSize = hostBlock, .numChannels = 2});
+        v.noteOn(45.0f, feed());
+        for (std::size_t start = 0; start < length; start += hostBlock)
+        {
+            const auto end = std::min(length, start + hostBlock);
+            for (std::size_t from = start; from < end;)
+            {
+                const auto to = (from < noteOff && noteOff < end) ? noteOff : end;
+                if (from == noteOff)
+                {
+                    v.noteOff();
+                }
+                v.process(block.subBlock(from, to - from), feed());
+                rampsA.advance(to - from);
+                rampsB.advance(to - from);
+                from = to;
+            }
+        }
+        r.allocations = counter.count();
+    }
+    return r;
+}
+
+void printAsBuilt()
+{
+    const std::array specs{
+        BuiltSpec{.name = "init", .worst = false, .width = 1.0f, .a = Input::own, .b = Input::own},
+        BuiltSpec{.name = "worst (AB into both)"},
+        BuiltSpec{.name = "worst, centred", .worst = true, .width = 0.0f},
+        BuiltSpec{.name = "worst, A: AB, B: --", .worst = true, .width = 1.0f, .a = Input::both, .b = Input::none},
+        BuiltSpec{.name = "worst, A: A, B: B", .worst = true, .width = 1.0f, .a = Input::own, .b = Input::own},
+        BuiltSpec{.name = "worst, A: A, B: AB", .worst = true, .width = 1.0f, .a = Input::own, .b = Input::both},
+    };
+    const auto length = samples(0.5);
+    const auto noteOff = samples(0.3) + 7;
+    std::cout << "\n## As built: dsp::Voice against the prototype's decided configuration\n\n"
+              << "Drift on (1.5 cents). The prototype: I2, unselected silent, Bypass obeying the select, a plain sum; "
+                 "per-filter buffers, the grid schedule, unheard parts skipped, block 4096. The library voice at "
+                 "host blocks of 1, 37 and 4096, its allocations counted from prepare() on.\n\n"
+              << "| Patch | Identical to the bit | Allocations |\n|---|---:|---:|\n";
+    for (const auto& spec : specs)
+    {
+        const auto reference = renderVoice(
+            developerReadings, {.layout = Layout::perFilter, .schedule = Schedule::grid32, .skipUnheard = true},
+            [&spec](Voice& v)
+            {
+                oscillatorsFor(v, spec);
+                Patch patch;
+                patch.filters[0].input = spec.a;
+                patch.filters[1].input = spec.b;
+                patch.filters[0].drive = driveFor(spec);
+                patch.filters[1].drive = driveFor(spec);
+                v.setPatch(patch);
+            },
+            length, noteOff, 4096);
+        std::size_t same = 0;
+        std::size_t allocations = 0;
+        for (const std::size_t hostBlock : {std::size_t{1}, std::size_t{37}, std::size_t{4096}})
+        {
+            const auto r = renderBuilt(spec, length, noteOff, hostBlock);
+            same += sameBits(r.out, reference.out) ? 1 : 0;
+            allocations += r.allocations;
+        }
+        std::cout << "| " << spec.name << " | " << same << " of 3 | " << allocations << " |\n";
+        CHECK(same == 3);
+        CHECK(allocations == 0);
+    }
+}
+
 } // namespace
 
 TEST_CASE("Voice report: the candidate structures on the real DSP classes", "[.][voice-report]")
@@ -764,4 +925,5 @@ TEST_CASE("Voice report: the candidate structures on the real DSP classes", "[.]
     printKnee();
     printEngines();
     printMemory();
+    printAsBuilt();
 }
