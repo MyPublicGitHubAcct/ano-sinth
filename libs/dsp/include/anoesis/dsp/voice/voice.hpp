@@ -50,6 +50,10 @@
 /// - Input Select and Bypass changes apply at the voice's next grid point,
 ///   so a filter is always on the voice's grid; a filter switched on from
 ///   "--", or out of Bypass, starts from rest there.
+/// - For an allocator (M1.4 task 2, docs/dsp/voice-allocation.md): a
+///   note-on on a sounding voice (a steal, a retrigger in place) keeps the
+///   filters and the grid; isActive() counts only what can be heard; stop()
+///   silences a finished voice so its next note starts from silence.
 ///
 /// Rendering runs in chunks that stop at the grid (at most 32 samples): the
 /// four slots added into their part's buffer (in drift's runs of constant
@@ -237,11 +241,23 @@ public:
     }
 
     /// A note-on before the next process() call, with the knobs positioned at
-    /// its sample: the slots, the drift and both envelopes start; pending
-    /// routing applies; each filter is fed for this sample and reset(), so
-    /// the voice's grid starts here.
+    /// its sample. The slots, the drift and both envelopes start (or, on a
+    /// sounding voice, retrigger: the slots as Retrig says, the envelopes
+    /// attacking from their level).
+    ///
+    /// - From silence (isActive() false): pending routing applies, and each
+    ///   filter is fed for this sample and reset(), so the voice's grid
+    ///   starts here.
+    /// - On a sounding voice (a steal, or a retrigger in place): the filters
+    ///   keep their state and the voice keeps its grid, counted from the
+    ///   note-on from silence; the new note's keytrack reaches the filters at
+    ///   the next grid point, and pending routing applies there, as during
+    ///   any note (M1.4 task 2: a reset there clicks as hard as a cut).
+    ///
+    /// A voice that has finished should be stop()ped before its next note.
     void noteOn(float note, const VoiceFilterKnobs& knobs) noexcept
     {
+        const bool sounding = isActive();
         voiceNote = note;
         for (auto& s : slots)
         {
@@ -251,6 +267,10 @@ public:
         for (auto& e : envelopes)
         {
             e.gateOn();
+        }
+        if (sounding)
+        {
+            return;
         }
         applyPending();
         feedFilters(knobs, 0);
@@ -269,10 +289,44 @@ public:
         }
     }
 
-    /// True until both amp envelopes have released to 0.
+    /// Silences the voice at once: the slots and the drift stop and the
+    /// envelopes go idle (the next note-on, from silence, resets the filters
+    /// and the grid). Unlike reset(), the
+    /// random sequences carry on, so the next note from silence draws new
+    /// free-running phases and a new drift state. Call it when the voice
+    /// has finished (isActive() false) and before it takes another note: a
+    /// finished voice that isn't processed still counts its slots as
+    /// sounding, so its next note would jump from where they stopped.
+    void stop() noexcept
+    {
+        for (auto& s : slots)
+        {
+            s.stop();
+        }
+        pitchDrift.stop();
+        for (auto& e : envelopes)
+        {
+            e.reset();
+        }
+    }
+
+    /// True while anything can still be heard: a filter with an input
+    /// (not "--") that has oscillators in it (its own part's, or the other
+    /// part's on AB), whose part's amp envelope hasn't released to 0. An
+    /// envelope on a part nothing hears, or with no oscillators, doesn't
+    /// count; nor does a crossing part's envelope once the envelope after
+    /// its filter has closed. False before the first note-on.
     [[nodiscard]] bool isActive() const noexcept
     {
-        return envelopes[0].isActive() || envelopes[1].isActive();
+        for (std::size_t f = 0; f < partCount; ++f)
+        {
+            const bool fed = partSounds(f) || (routes[f].both && partSounds(1 - f));
+            if (routes[f].active && fed && envelopes[f].isActive())
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Adds the voice into channels 0 and 1 of `out` (two channels needed),
@@ -304,6 +358,20 @@ private:
         bool active = false; ///< the filter has an input (not "--")
         bool both = false;   ///< AB
     };
+
+    /// Whether part p has an oscillator voice on, or one still fading out.
+    [[nodiscard]] bool partSounds(std::size_t p) const noexcept
+    {
+        for (std::size_t s = 0; s < slotsPerPart; ++s)
+        {
+            const auto& slot = slots[(p * slotsPerPart) + s];
+            if (slot.voices() > 0 || slot.soundingVoices() > 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     void updateRoutes() noexcept
     {

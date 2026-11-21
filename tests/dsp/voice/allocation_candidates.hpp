@@ -114,8 +114,8 @@ enum class Freeing : std::uint8_t
 
 enum class Busy : std::uint8_t
 {
-    anyEnvelope,      ///< dsp::Voice::isActive(): either amp envelope
-    audibleEnvelopes, ///< only the envelopes of parts that can be heard
+    anyEnvelope,      ///< either amp envelope (stage 1's dsp::Voice::isActive())
+    audibleEnvelopes, ///< only the envelopes that can be heard (dsp::Voice::isActive() as decided)
 };
 
 enum class PolyphonyDrop : std::uint8_t
@@ -190,17 +190,17 @@ struct Context
 
 /// Whether part p's amp envelope can affect the output, from the filter
 /// inputs (voice::Input) and each part's oscillator voice count: its own
-/// filter runs with something sounding in its input, or its oscillators
-/// cross into the other filter (its envelope acts before that filter).
+/// filter runs with oscillators in its input (its own part's, or the other
+/// part's on AB). A part crossing into the other filter is heard only
+/// through that filter's part's envelope, so its own envelope doesn't count
+/// on its own (the rule dsp::Voice::isActive() follows, decided 2026-11-21;
+/// stage 1 counted it).
 [[nodiscard]] constexpr bool envelopeAudible(std::size_t p, const std::array<voice::Input, partCount>& inputs,
                                              const std::array<std::size_t, partCount>& oscillatorVoices) noexcept
 {
     const std::size_t other = 1 - p;
-    const bool ownFilterFed =
-        inputs[p] != voice::Input::none &&
-        (oscillatorVoices[p] > 0 || (inputs[p] == voice::Input::both && oscillatorVoices[other] > 0));
-    const bool crosses = inputs[other] == voice::Input::both && oscillatorVoices[p] > 0;
-    return ownFilterFed || crosses;
+    return inputs[p] != voice::Input::none &&
+           (oscillatorVoices[p] > 0 || (inputs[p] == voice::Input::both && oscillatorVoices[other] > 0));
 }
 
 /// dsp::Voice in the allocator's terms.
@@ -278,6 +278,10 @@ public:
     {
         return v.isActive();
     }
+    [[nodiscard]] bool anyEnvelopeActive() noexcept
+    {
+        return v.envelope(0).isActive() || v.envelope(1).isActive();
+    }
     void start(float note, std::size_t at) noexcept
     {
         v.noteOn(note, positioned(at));
@@ -286,18 +290,11 @@ public:
     {
         v.noteOff();
     }
-    /// Silences the voice without restarting its random sequences: what a
-    /// finished voice needs before its next note (dsp::Voice has no call for
-    /// it yet).
+    /// dsp::Voice::stop(): silences the voice without restarting its random
+    /// sequences.
     void stop() noexcept
     {
-        for (std::size_t s = 0; s < Voice::slotCount; ++s)
-        {
-            v.slot(s).stop();
-        }
-        v.drift().stop();
-        v.envelope(0).reset();
-        v.envelope(1).reset();
+        v.stop();
     }
     void render(const dsp::AudioBlock& out, std::size_t at) noexcept
     {
@@ -408,6 +405,10 @@ public:
     {
         return v.isActive();
     }
+    [[nodiscard]] bool anyEnvelopeActive() const noexcept
+    {
+        return v.isActive();
+    }
     void start(float note, std::size_t at) noexcept
     {
         v.noteOn(note, feed(), at);
@@ -487,6 +488,10 @@ public:
     [[nodiscard]] bool isActive() const noexcept
     {
         return envelopes[0].isActive() || envelopes[1].isActive();
+    }
+    [[nodiscard]] bool anyEnvelopeActive() const noexcept
+    {
+        return isActive();
     }
     void start(float /*note*/, std::size_t /*at*/) noexcept
     {
@@ -729,7 +734,7 @@ private:
     {
         if (policy.busy == Busy::anyEnvelope)
         {
-            return voices[i].isActive();
+            return voices[i].anyEnvelopeActive();
         }
         for (std::size_t p = 0; p < partCount; ++p)
         {

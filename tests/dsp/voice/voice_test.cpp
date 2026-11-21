@@ -27,13 +27,17 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <limits>
+#include <memory>
 #include <span>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -282,15 +286,29 @@ Run renderVoice(const std::function<void(Voice&)>& configure, std::size_t length
     return r;
 }
 
+/// A note-on on the sounding voice: the key, at a sample.
+struct Retrigger
+{
+    std::size_t at = 0;
+    float note = 45.0f;
+};
+
 /// The prototype in the decided configuration (I2, unselected silent, Bypass
 /// obeying the select, AB a plain sum; per-filter buffers, the grid
-/// schedule, unheard parts skipped), the same host loop with no actions.
+/// schedule, unheard parts skipped), the same host loop with no actions but
+/// `retriggers`; `keepFilters` keeps the filters and the grid at a note-on on
+/// a sounding voice (M1.4 task 2's decision).
 Buffer renderPrototype(const std::function<void(Prototype&)>& configure, std::size_t length, std::size_t noteOff,
-                       std::size_t hostBlock, const Knobs& knobs = defaultKnobs())
+                       std::size_t hostBlock, const Knobs& knobs = defaultKnobs(),
+                       const std::vector<Retrigger>& retriggers = {}, bool keepFilters = false)
 {
-    Prototype v{d6::minBlepTable64(),
-                decidedReadings(),
-                {.layout = voice::Layout::perFilter, .schedule = voice::Schedule::grid32, .skipUnheard = true}};
+    const voice::Engine engine{
+        .layout = voice::Layout::perFilter,
+        .schedule = voice::Schedule::grid32,
+        .skipUnheard = true,
+        .keepFiltersOnRetrigger = keepFilters,
+    };
+    Prototype v{d6::minBlepTable64(), decidedReadings(), engine};
     configure(v);
     v.prepare({.sampleRate = rate, .maxBlockSize = hostBlock, .numChannels = 1});
     KnobRamps a{knobs, rate};
@@ -305,6 +323,13 @@ Buffer renderPrototype(const std::function<void(Prototype&)>& configure, std::si
         for (std::size_t from = start; from < end;)
         {
             auto to = (from < noteOff && noteOff < end) ? noteOff : end;
+            for (const auto& r : retriggers)
+            {
+                if (from < r.at && r.at < to)
+                {
+                    to = r.at;
+                }
+            }
             for (auto at = from + 1; at < to; ++at)
             {
                 if (a.eventAt(at))
@@ -321,6 +346,13 @@ Buffer renderPrototype(const std::function<void(Prototype&)>& configure, std::si
             if (from == noteOff)
             {
                 v.noteOff();
+            }
+            for (const auto& r : retriggers)
+            {
+                if (r.at == from)
+                {
+                    v.noteOn(r.note, feed, from);
+                }
             }
             v.render(block.subBlock(from, to - from), feed, from);
             a.advance(to - from);
@@ -773,6 +805,277 @@ TEST_CASE("Voice: a NaN from the knobs leaves the filter where it was", "[voice]
     const auto nan = play(true);
     CHECK(sameBits(nan, steady));
     CHECK_FALSE(allZero(nan.channel(0)));
+}
+
+TEST_CASE("Voice: a note-on on a sounding voice keeps the filters and the grid", "[voice]")
+{
+    // M1.4 task 2's decision: a steal or retrigger in place keeps the
+    // filters' state and the voice's grid (counted from the note-on from
+    // silence); the new note's keytrack reaches the filters at the next grid
+    // point. The prototype with keepFiltersOnRetrigger computes exactly that.
+    // A resonant patch (Cutoff 2, Resonance 6: k 3.6 at 585 Hz), retriggered
+    // at 2005, between the grid points 1984 and 2016.
+    const auto length = samples(0.12);
+    const Knobs knobs{.cutoff = constant(2.0f), .resonance = constant(6.0f)};
+    const KnobRamps ramps{knobs, rate};
+    const auto retrigger = [&ramps](float note)
+    {
+        return [&ramps, note](Voice& v)
+        {
+            v.noteOn(note, knobsOf(ramps, ramps));
+        };
+    };
+    const auto configure = [](auto& v)
+    {
+        worstOscillators(v);
+        route(v, {.a = FilterInput::both, .b = FilterInput::own, .drive = 2.0f});
+    };
+
+    SECTION("Bit for bit the prototype that keeps them, not the one that resets them")
+    {
+        const auto lib = renderVoice(configure, length, length, 37, {{.at = 2005, .act = retrigger(52.0f)}}, knobs);
+        const auto kept = renderPrototype(configure, length, length, 37, knobs, {{.at = 2005, .note = 52.0f}}, true);
+        const auto reset = renderPrototype(configure, length, length, 37, knobs, {{.at = 2005, .note = 52.0f}}, false);
+        CHECK(sameBits(lib.out, kept));
+        CHECK_FALSE(sameBits(lib.out, reset));
+        // Up to the note-on, all three are the same voice.
+        CHECK(sameBits(std::span{lib.out.channel(0)}.first(2005), std::span{reset.channel(0)}.first(2005)));
+        CHECK_FALSE(allZero(lib.out.channel(0)));
+    }
+    SECTION("Routing changes made at such a note-on still wait for the next grid point")
+    {
+        const auto setNone = [](Voice& v)
+        {
+            v.setFilterInput(1, FilterInput::none);
+        };
+        const auto setNoneThenRetrigger = [&](Voice& v)
+        {
+            setNone(v);
+            retrigger(52.0f)(v);
+        };
+        const auto atNoteOn =
+            renderVoice(configure, length, length, 512, {{.at = 2005, .act = setNoneThenRetrigger}}, knobs);
+        const auto later = renderVoice(configure, length, length, 512,
+                                       {{.at = 2005, .act = retrigger(52.0f)}, {.at = 2010, .act = setNone}}, knobs);
+        CHECK(sameBits(atNoteOn.out, later.out));
+    }
+}
+
+TEST_CASE("Voice: stop() silences a finished voice, so its next note starts from silence", "[voice]")
+{
+    // A voice that has finished isn't processed by its allocator, so its
+    // slots still count as sounding and its drift as active: without stop()
+    // its next note would jump from where the oscillators froze.
+    const auto configure = [](Voice& v)
+    {
+        saws(v, {0});
+        v.envelope(0).setRelease(0.02f);
+    };
+    const Knobs knobs;
+    const KnobRamps ramps{knobs, rate};
+    const auto k = knobsOf(ramps, ramps);
+    const auto prepared = [&](std::uint64_t seed)
+    {
+        auto v = std::make_unique<Voice>(d6::minBlepTable64(), seed);
+        configure(*v);
+        v->prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 2});
+        return v;
+    };
+    const auto render = [&k](Voice& v, std::size_t n)
+    {
+        Buffer out{2, n};
+        for (std::size_t start = 0; start < n; start += 512)
+        {
+            v.process(out.block().subBlock(start, std::min<std::size_t>(512, n - start)), k);
+        }
+        return out;
+    };
+    // A note played to its end: 0.1 s held, then the 20 ms release.
+    const auto finished = [&](Voice& v)
+    {
+        v.noteOn(45.0f, k);
+        (void)render(v, samples(0.1));
+        v.noteOff();
+        (void)render(v, samples(0.05));
+        REQUIRE_FALSE(v.isActive());
+    };
+
+    SECTION("Stopped, the next note is a fresh voice's, to the bit")
+    {
+        auto used = prepared(7);
+        finished(*used);
+        used->stop();
+        used->noteOn(52.0f, k);
+        const auto again = render(*used, 4096);
+        auto fresh = prepared(7);
+        fresh->noteOn(52.0f, k);
+        CHECK(sameBits(again, render(*fresh, 4096)));
+
+        auto unstopped = prepared(7);
+        finished(*unstopped);
+        unstopped->noteOn(52.0f, k);
+        auto fresh2 = prepared(7);
+        fresh2->noteOn(52.0f, k);
+        CHECK_FALSE(sameBits(render(*unstopped, 4096), render(*fresh2, 4096)));
+    }
+    SECTION("Stopped, the drift draws a fresh state")
+    {
+        // Two voices alike, drift on, each with a finished note; one stopped
+        // whole, the other with everything but its drift stopped by hand.
+        auto whole = prepared(7);
+        auto partial = prepared(7);
+        for (auto* v : {whole.get(), partial.get()})
+        {
+            v->drift().setDepthCents(dsp::PitchDrift::defaultDepthCents);
+            finished(*v);
+        }
+        whole->stop();
+        for (std::size_t s = 0; s < Voice::slotCount; ++s)
+        {
+            partial->slot(s).stop();
+        }
+        partial->envelope(0).reset();
+        partial->envelope(1).reset();
+        whole->noteOn(52.0f, k);
+        partial->noteOn(52.0f, k);
+        CHECK_FALSE(sameBits(render(*whole, 4096), render(*partial, 4096)));
+    }
+    SECTION("A sounding voice stopped is silent at once")
+    {
+        auto v = prepared(7);
+        v->noteOn(45.0f, k);
+        (void)render(*v, 1000);
+        v->stop();
+        CHECK_FALSE(v->isActive());
+        const auto after = render(*v, 512);
+        CHECK(allZero(after.channel(0)));
+        CHECK(allZero(after.channel(1)));
+    }
+    SECTION("Unlike reset(), the random sequences carry on")
+    {
+        // Free-running: each note from silence draws new start phases.
+        auto v = prepared(7);
+        v->slot(0).setRetrigger(false);
+        v->noteOn(45.0f, k);
+        const auto first = render(*v, 2048);
+        v->stop();
+        v->noteOn(45.0f, k);
+        const auto second = render(*v, 2048);
+        CHECK_FALSE(sameBits(first, second));
+        (*v).reset();
+        v->noteOn(45.0f, k);
+        CHECK(sameBits(render(*v, 2048), first));
+    }
+}
+
+TEST_CASE("Voice: isActive() counts only the envelopes that can be heard", "[voice]")
+{
+    // A filter's output reaches the voice's output through its part's
+    // envelope, and only while its input has oscillators (its own part's, or
+    // the other part's on AB). Envelope A releases in 20 ms, envelope B in
+    // 1 s; the key is held 0.1 s, and isActive() is read 50 ms after the
+    // note-off, when only envelope B still runs.
+    struct Case
+    {
+        std::string_view name;
+        std::array<int, 4> voices; ///< each slot's voice count
+        FilterInput a;
+        FilterInput b;
+        bool longA; ///< swap the releases: A 1 s, B 20 ms
+        bool active;
+    };
+    const std::array cases{
+        Case{
+            .name = "B has no oscillators, filter B on B",
+            .voices = {1, 0, 0, 0},
+            .a = FilterInput::own,
+            .b = FilterInput::own,
+            .longA = false,
+            .active = false,
+        },
+        Case{
+            .name = "B1 on, filter B on '--'",
+            .voices = {1, 0, 1, 0},
+            .a = FilterInput::own,
+            .b = FilterInput::none,
+            .longA = false,
+            .active = false,
+        },
+        Case{
+            .name = "B1 on, filter B on B",
+            .voices = {1, 0, 1, 0},
+            .a = FilterInput::own,
+            .b = FilterInput::own,
+            .longA = false,
+            .active = true,
+        },
+        Case{
+            .name = "B1 crossing into filter A (AB), A's envelope closed",
+            .voices = {0, 0, 1, 0},
+            .a = FilterInput::both,
+            .b = FilterInput::none,
+            .longA = false,
+            .active = false,
+        },
+        Case{
+            .name = "B1 crossing into filter A (AB), B's envelope closed",
+            .voices = {0, 0, 1, 0},
+            .a = FilterInput::both,
+            .b = FilterInput::none,
+            .longA = true,
+            .active = true,
+        },
+    };
+    const Knobs knobs;
+    const KnobRamps ramps{knobs, rate};
+    const auto k = knobsOf(ramps, ramps);
+    for (const auto& c : cases)
+    {
+        CAPTURE(c.name);
+        Voice v{d6::minBlepTable64()};
+        saws(v, {});
+        for (std::size_t s = 0; s < 4; ++s)
+        {
+            v.slot(s).setVoices(c.voices[s]);
+        }
+        v.envelope(0).setRelease(c.longA ? 1.0f : 0.02f);
+        v.envelope(1).setRelease(c.longA ? 0.02f : 1.0f);
+        v.setFilterInput(0, c.a);
+        v.setFilterInput(1, c.b);
+        v.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 2});
+        v.noteOn(45.0f, k);
+        Buffer out{2, 512};
+        for (std::size_t start = 0; start < samples(0.15); start += 512)
+        {
+            if (start == samples(0.1) / 512 * 512)
+            {
+                v.noteOff();
+            }
+            v.process(out.block(), k);
+        }
+        CHECK(v.isActive() == c.active);
+        CHECK(v.envelope(c.longA ? 0 : 1).isActive()); // the long envelope still runs
+    }
+
+    // The patch decides: a held note whose part loses its last oscillator
+    // stays active while that oscillator fades out (the slot's 10 ms gain
+    // ramp), then isn't.
+    Voice v{d6::minBlepTable64()};
+    saws(v, {0});
+    v.setFilterInput(1, FilterInput::none);
+    v.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 2});
+    v.noteOn(45.0f, k);
+    Buffer out{2, 256};
+    v.process(out.block(), k);
+    v.slot(0).setVoices(0);
+    v.process(out.block().subBlock(0, 64), k);
+    CHECK(v.isActive()); // fading
+    for (int i = 0; i < 4; ++i)
+    {
+        v.process(out.block(), k);
+    }
+    CHECK_FALSE(v.isActive()); // faded out, key still held
+    CHECK(v.envelope(0).isGateOn());
 }
 
 TEST_CASE("Voice: the lifecycle", "[voice]")

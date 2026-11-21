@@ -6,7 +6,8 @@ A polyphonic synth has a fixed number of voices. Each note-on needs one, and whe
 - what is known about Sylenth1's allocation. The manual gives the Polyphony control and the Voices readout. The developer, in 2016: Polyphony 1 "will simply make each new key steal the single voice", higher settings give "overlapping release times, as it should", and a key played again doesn't reuse its own voice. A changelog fix concerns Polyphony 0;
 - the candidate allocators prototyped here, driving `dsp::Voice`;
 - what they measured: the click at a steal for each way of ending the stolen note, a key played again, freeing rules, busy voices over time, the readout against the manual's screenshot, the policies under a 32-note strum and a held bass under a melody, Polyphony changes, block sizes and allocation, and CPU;
-- the recommendations for the project owner, with the alternatives.
+- the recommendations for the project owner, with the alternatives;
+- the project owner's decision on the three changes to the voice (all approved), and `dsp::Voice` as changed, with the tests that pin it. The allocator's own recommendations (1a–5, 7) await a decision.
 
 Read [voice-architecture.md](voice-architecture.md) (the voice that is allocated), [envelopes.md](envelopes.md) (when an envelope ends, and a retrigger from the current level), and [oscillator-phase.md](oscillator-phase.md) (what Retrig does to a sounding oscillator) first.
 
@@ -316,6 +317,8 @@ A sequence with steals, releases and a Polyphony change: the resonant pad free-r
 
 ## Recommendations
 
+*Stage 1's recommendations, as written. The project owner approved the three changes to the voice the same day (6, `Voice::stop()` from 7, and 3c, refined in the build so a crossing part's envelope counts only through the filter's part's): [The decision](#the-decision-the-voices-part), [As built](#as-built-the-voices-part). The rest await a decision.*
+
 | # | Question | Recommendation | Why | Alternatives |
 |---|---|---|---|---|
 | 1a | **Which voice a steal takes** | **The oldest released note (key up), else the oldest held note.** Ties go to note-on order. | It keeps held notes as long as anything is releasing: the bass under the melody survives (0 held notes stolen, against 1 for oldest). Unlike quietest, it never takes a note in its attack (the strum). It needs no envelope reads. Sylenth1's order is unknown (P1). | **Oldest:** simplest; Sylenth1 may do it; it steals held notes. **Quietest:** takes notes in a slow attack. **The quietest released note, else the oldest:** a refinement, if P1 finds Sylenth1 does it. |
@@ -347,7 +350,56 @@ A sequence with steals, releases and a Polyphony change: the resonant pad free-r
   - it needs a `stop()` (7);
   - `isActive()` should count only audible envelopes (3c).
 
-  These are the stage-2 changes to the voice, for the owner to approve.
+  These are the stage-2 changes to the voice, for the owner to approve. *Approved and built on 2026-11-21, [below](#as-built-the-voices-part).*
+
+## The decision: the voice's part
+
+Chosen by the project owner on 2026-11-21: the three changes to `dsp::Voice` that the recommendations need (Decisions log). The allocator's own recommendations (1a, 1b's choice of a retrigger, 2, 3a–3b, 4, 5 and 7's pool) are not yet decided.
+
+- **A note-on on a sounding voice keeps the filters' state and the voice's grid** (recommendation 6). The grid counts from the note-on from silence. The new note's keytrack reaches the filters at the next grid point. Routing changes pending at that note-on apply there too, as during any note.
+- **`Voice::stop()`** silences a finished voice (its slots and drift stop, its envelopes go idle) without restarting its random sequences, so its next note starts from silence (recommendation 7).
+- **`isActive()` counts only what can be heard** (recommendation 3c).
+
+## As built: the voice's part
+
+[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp):
+
+- **`noteOn(note, knobs)`** checks `isActive()` first:
+  - From silence it does what it did: pending routing applies, and each filter is fed for this sample and reset, so the grid starts there.
+  - On a sounding voice it starts the slots (a band-limited jump with Retrig on, free-running with it off), the drift (which continues) and the envelopes (an attack from their level), and stops there. The filters ring on, the grid runs on, and the next grid point feeds the new note's keytrack and applies any pending routing.
+- **`stop()`** calls `stop()` on the four slots and the drift and `reset()` on both envelopes. It doesn't reset the filters or the grid: the next note-on, from silence, does that, and nothing between them can be heard.
+- **`isActive()`** is true while some filter has an input (not `--`), has oscillators in that input (its own part's, or the other part's on AB, counting a slot's voices fading out), and its part's amp envelope hasn't released to 0.
+  - It is a refinement of stage 1's rule. A part crossing into the other filter is heard only through that filter's part's envelope, which multiplies after the filter. So the crossing part's own envelope never keeps a voice busy on its own: once the envelope after the filter has closed, nothing is heard whatever the one before it does. Stage 1's `envelopeAudible` counted it; the prototype now follows the voice.
+  - It follows the patch: a held note whose part loses its last oscillator (Voices to 0), or whose filter goes to `--`, stops counting once the oscillator has faded out. An allocator then frees the voice.
+  - Before the first note-on it is false, as before.
+
+### Tests
+
+Three new test cases in [voice_test.cpp](../../tests/dsp/voice/voice_test.cpp):
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| A note-on on a sounding voice keeps the filters and the grid | A resonant patch (k 3.6 at 585 Hz, the worst oscillators, A on AB, drive ×2), key 52 at 2005 (off the grid) on a sounding key 45, at host blocks of 37: equal to the prototype voice with `keepFiltersOnRetrigger`, and unequal to the one that resets; equal up to the note-on. A routing change made at that note-on is the same as one made 5 samples later, before the next grid point | bit for bit: the same classes and arithmetic |
+| `stop()` silences a finished voice | A note played to its end, then `stop()`, then key 52: equal to key 52 on a fresh voice (Retrig on, drift off), unequal without `stop()`. With drift on, `stop()` draws a fresh drift state (unequal to a voice stopped by hand except for its drift). A sounding voice stopped is silent at once and inactive. Free-running, the next note after `stop()` draws new phases, and after `reset()` repeats the first | bit for bit; exact zeros |
+| `isActive()` counts only what can be heard | 50 ms after the note-off, with envelope A at R 20 ms and B at R 1 s (or swapped): part B without oscillators on filter B, or B1 on but filter B on `--`, inactive; B1 on filter B active; B1 crossing into filter A with envelope A closed inactive, with envelope B closed active. A held note whose only oscillator is set to Voices 0 is active while it fades and inactive after | exact (booleans) |
+
+Red first, against an empty `stop()`: 10 assertions failed across the three. Then 12 deliberate breaks, each caught (4 after rewriting to compile under `-Werror`):
+
+- **`noteOn`:** keeping nothing; resetting the grid on a sounding voice; applying pending routing there; treating every note-on as sounding.
+- **`stop()`:** leaving the slots, the drift, or the envelopes running.
+- **`isActive()`:** dropping the input check, the route check, or the crossing input; ignoring fading voices; counting either envelope.
+
+### Results, as built
+
+The `[voice-allocation-report]` now drives the voice as changed. Every stage-1 table reproduces to the printed digit, with one exception:
+
+- **The end of a steal:** the kept row is now `dsp::Voice` itself, equal to the prototype that keeps its filters on all four patches. The reset row is the prototype with stage 1's `noteOn`.
+- **The exception, question 2's own-voice column**, which retriggers through `dsp::Voice`. On the init patch (Retrig on, A 0) it clicks louder with the filters kept: −23.2 / −2.3 / −22.7 dB at the opposite, quadrature and in-phase timings, against −24.2 / −11.2 / −28.3 with the reset (Retrig off: −8.9 against −8.2).
+  - The attack of 0 jumps the envelope from the release's level (about 0.35) to 1 at once. With the filters kept, that jump lifts the waveform the filter carries over to full level; with the reset, the filter's output started from 0.
+  - Stage 1's steal table shows the same, smaller: kept is 1.9 dB worse on the init patch held and 2.9 dB worse on the ringing patch releasing, against 29–30 dB better on the resonant pad and 7.7 dB on the ringing patch held.
+  - So keeping the filters removes the click wherever a filter rings, and lets through the one an instant attack makes on a carried-over signal. The manual calls an attack of 0 a click on purpose. That column is the own-voice alternative (2), which isn't the recommendation.
+
+**CPU** (the same session, `relwithdebinfo`): `dsp::Voice` alone 359.52 / 235.37 / 685.31 ns per sample (init, filter B at `--`, worst case); 16 voices through the allocator 5,808.52 (init) and 11,245.88 (worst case); a steal per block 6,252.36 (cut) and 6,215.78 (retrigger). All are within 1% of stage 1's: `isActive()`'s extra checks are 4 slot reads per filter, every 32 samples per voice.
 
 ## References
 

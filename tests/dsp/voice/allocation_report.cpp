@@ -360,7 +360,7 @@ struct EndCase
     StealEnd end;
     float fadeSeconds;
     bool baseline;  ///< Polyphony 2: no steal
-    bool prototype; ///< the prototype voice, filters kept at a retrigger
+    bool prototype; ///< the prototype voice, filters reset at a retrigger (stage 1's dsp::Voice::noteOn)
     double latencyMs;
 };
 
@@ -380,7 +380,7 @@ Run stealRun(const PatchSpec& patch, const EndCase& c, bool releasing, std::size
     events = sorted(events);
     if (c.prototype)
     {
-        s.engine.keepFiltersOnRetrigger = true;
+        s.engine.keepFiltersOnRetrigger = false;
         return run<PrototypeAdapter, 4>(s, events);
     }
     return run<BuiltVoice, 4>(s, events);
@@ -455,19 +455,19 @@ void printSteals()
             .latencyMs = 0.0,
         },
         EndCase{
-            .name = "retrigger in place, filters reset (dsp::Voice)",
-            .end = StealEnd::retrigger,
-            .fadeSeconds = 0.0f,
-            .baseline = false,
-            .prototype = false,
-            .latencyMs = 0.0,
-        },
-        EndCase{
-            .name = "retrigger in place, filters and grid kept (prototype)",
+            .name = "retrigger in place, filters reset (stage 1's noteOn, prototype)",
             .end = StealEnd::retrigger,
             .fadeSeconds = 0.0f,
             .baseline = false,
             .prototype = true,
+            .latencyMs = 0.0,
+        },
+        EndCase{
+            .name = "retrigger in place, filters and grid kept (dsp::Voice as decided)",
+            .end = StealEnd::retrigger,
+            .fadeSeconds = 0.0f,
+            .baseline = false,
+            .prototype = false,
             .latencyMs = 0.0,
         },
     };
@@ -517,17 +517,20 @@ void printSteals()
         std::cout << '\n';
     }
 
-    // The prototype with its filters reset is dsp::Voice to the bit here too.
+    // dsp::Voice as decided is the prototype voice that keeps its filters
+    // (stage 1's kept row), to the bit.
     std::size_t same = 0;
     for (const auto& p : patches)
     {
         Setup s{.patch = p, .polyphony = 1, .length = at + samples(0.2)};
         s.policy.end = StealEnd::retrigger;
         const auto events = sorted({on(0, oldNote), on(at, newNote)});
-        same += sameBits(run<BuiltVoice, 4>(s, events).out, run<PrototypeAdapter, 4>(s, events).out) ? 1 : 0;
+        const auto built = run<BuiltVoice, 4>(s, events);
+        s.engine.keepFiltersOnRetrigger = true;
+        same += sameBits(built.out, run<PrototypeAdapter, 4>(s, events).out) ? 1 : 0;
     }
-    std::cout << "\nThe prototype voice with its filters reset at a retrigger against dsp::Voice, each patch held: "
-                 "identical to the bit in "
+    std::cout << "\ndsp::Voice (a note-on on a sounding voice keeps the filters and grid, as decided) against the "
+                 "prototype voice that keeps them, each patch held: identical to the bit in "
               << same << " of " << patches.size() << ".\n";
     CHECK(same == patches.size());
 }
@@ -714,7 +717,9 @@ void printFreeing()
     {
         std::cout << "\nAn amp envelope on a part nothing hears: A1 a sine, envelope A R 100 ms, envelope B R 5 s; "
                      "key held 0.5 s. When the voice is freed after the note-off:\n\n"
-                  << "| Part B | either envelope keeps it busy (dsp::Voice::isActive) | only audible envelopes "
+                  << "| Part B | either envelope keeps it busy (stage 1's isActive) | only audible envelopes "
+                     "(dsp::Voice::isActive "
+                     "as decided) "
                      "|\n|---|---:|---:|\n";
         struct Case
         {
@@ -1198,8 +1203,8 @@ void printRealTime()
                 worst = std::max(
                     worst, static_cast<double>(std::abs(r.out.channel(0)[second + i] - reference.out.channel(0)[i])));
             }
-            std::cout << "| " << (stop ? "stopped (slots, drift, envelopes)" : "left as it stood (dsp::Voice today)")
-                      << " | " << (worst > 0.0 ? fixed(worst, 4) : std::string{"0 (identical)"}) << " |\n";
+            std::cout << "| " << (stop ? "stopped (dsp::Voice::stop())" : "left as it stood") << " | "
+                      << (worst > 0.0 ? fixed(worst, 4) : std::string{"0 (identical)"}) << " |\n";
             if (stop)
             {
                 CHECK(worst <= 0.0);

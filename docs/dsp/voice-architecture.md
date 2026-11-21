@@ -292,7 +292,7 @@ Chosen by the project owner on 2026-11-21: every recommendation above (Decisions
 - **What it holds:** 4 `OscillatorSlot`s (`slot(0..3)`: A1, A2, B1, B2), 2 `LadderFilter`s, 2 `Adsr`s (`envelope(0..1)`), and a `PitchDrift`.
 - **Seeds:** the constructor's seed sets every random sequence: slot s gets seed ⊕ 0x9E37…·(s + 1), and the drift seed ⊕ 0x3C6E…. Give each voice its own seed.
 - **The filters' controls are the voice's:** `setFilterInput`, `setFilterBypassed`, `setFilterResponse`, `setFilterDrive`, `setWarm`, and `setFilterInputLevel`. A level outside [10⁻³, 10³], or NaN, counts as 1. `filter(part)` is read-only, for measurement.
-- **Lifecycle:** `prepare()`, `reset()` (as freshly prepared), `noteOn(note, knobs)`, `noteOff()`, `isActive()` (until both amp envelopes reach 0), and `process(out, knobs)`, which adds into channels 0 and 1.
+- **Lifecycle:** `prepare()`, `reset()` (as freshly prepared), `noteOn(note, knobs)`, `noteOff()`, `stop()`, `isActive()`, and `process(out, knobs)`, which adds into channels 0 and 1. Changed in M1.4 task 2 ([voice-allocation.md](voice-allocation.md#as-built-the-voices-part)): a note-on on a sounding voice keeps the filters and the grid; `stop()` silences a finished voice without restarting its random sequences; `isActive()` is true only while a filter with oscillators in its input has its part's envelope running (it was: until both amp envelopes reach 0).
 - **Size:** about 25 KB at 64 taps, with the scratch inside (10 buffers of 32 samples). Nothing allocates, `prepare()` included.
 
 How `process()` runs:
@@ -320,7 +320,7 @@ What it leaves to later tasks:
 - the note's glide, bend, and master tune (task 3);
 - Mix and the output bus (task 4);
 - skipping filters on silence, and the mono path (task 5);
-- voice allocation, and what a retrigger of a sounding voice does (task 2).
+- voice allocation (task 2). What a retrigger of a sounding voice does, `stop()`, and `isActive()` are decided and built ([voice-allocation.md](voice-allocation.md#as-built-the-voices-part)).
 
 This completes M1.4's last bullet, the feed through the Filter Control, except for its modulation terms.
 

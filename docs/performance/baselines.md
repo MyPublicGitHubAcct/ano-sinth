@@ -6,6 +6,25 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 voice: a note-on on a sounding voice, stop(), isActive()
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-allocation]"` then `tools/bench.sh "[voice]"`, 100 samples per benchmark, one run.
+- **What changed** ([voice-allocation.md](../dsp/voice-allocation.md#as-built-the-voices-part)): `dsp::Voice::noteOn` keeps the filters and grid on a sounding voice; new `stop()`; `isActive()` counts only what can be heard (4 slot reads per filter). The allocator calls `isActive()` at every event and every 32 samples per voice.
+
+| Benchmark (ns / sample) | this commit | stage 1 (below) |
+|---|---:|---:|
+| voice: built, init patch / filter B at `--` / worst case (one voice) | 359.52 / 235.37 / 685.31 | 360.90 / 240.29 / 700.12 |
+| allocation: 16 voices held, init patch / worst case | 5,808.52 / 11,245.88 | 5,775.35 / 11,216.15 |
+| allocation: 64 note events per block on silent voices / no events | 21.29 / 2.06 | 21.57 / 1.95 |
+| allocation: a steal per block, init: cut / retrigger | 6,252.36 / 6,215.78 | 6,185.41 / 6,202.34 |
+| allocation: a steal per block, init: 5 ms fade on a spare / then the note | 6,346.05 / 6,188.32 | 6,365.02 / 6,168.16 |
+
+### Observations
+
+- **No measurable change**: every row is within 1.1% of stage 1's (the single voice −0.4% to −2.1%, the allocator +0.3% to +1.1%), which is the run-to-run noise here.
+
+---
+
 ## 2026-11-21: M1.4 voice allocation, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-allocation]"`, 100 samples per benchmark, one run, followed by `tools/bench.sh "[voice]"` for the built voice's rows.
