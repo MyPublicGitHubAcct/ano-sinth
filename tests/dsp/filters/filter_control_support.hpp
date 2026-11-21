@@ -200,6 +200,32 @@ private:
     std::size_t position = 0;
 };
 
+/// The decision's cutoff feed (Feed::voiceRamp): setCutoff() at the law's
+/// anchor, the whole cutoff in octaves into the modulation input.
+inline void feedCutoff(dsp::LadderFilter& f, float octaves, const dsp::FilterControlLaw& law = dsp::filterControlLaw)
+{
+    f.setCutoff(law.anchorHz);
+    f.setCutoffModulation(octaves);
+}
+
+/// The decision's k feed (ResonanceFeed::modulation): setResonance(0), the
+/// whole k into the resonance modulation input.
+inline void feedResonance(dsp::LadderFilter& f, float k)
+{
+    f.setResonance(0.0f);
+    f.setResonanceModulation(k);
+}
+
+/// The decided feed whole, as a voice calls it at its note-on and at each of
+/// its grid points (the M1.4 prototype voice, tests/dsp/voice/, uses this).
+inline void feedFilter(dsp::LadderFilter& f, const dsp::FilterCutoffTerms& cutoff,
+                       const dsp::FilterResonanceTerms& resonance,
+                       const dsp::FilterControlLaw& law = dsp::filterControlLaw)
+{
+    feedCutoff(f, dsp::filterCutoffOctaves(cutoff, law), law);
+    feedResonance(f, dsp::filterResonanceK(resonance, law));
+}
+
 namespace detail
 {
 
@@ -262,8 +288,7 @@ inline void feed(const Setup& s, const KnobRamps& ramps, const Voice& v, VoiceSt
     switch (s.feed)
     {
     case Feed::voiceRamp:
-        f.setCutoff(s.law.anchorHz);
-        f.setCutoffModulation(dsp::filterCutoffOctaves(cutoffTerms(s, ramps, v, at, true), s.law));
+        feedCutoff(f, dsp::filterCutoffOctaves(cutoffTerms(s, ramps, v, at, true), s.law), s.law);
         break;
     case Feed::filterRamp:
     {
@@ -285,8 +310,7 @@ inline void feed(const Setup& s, const KnobRamps& ramps, const Voice& v, VoiceSt
     switch (s.resonanceFeed)
     {
     case ResonanceFeed::modulation:
-        f.setResonance(0.0f);
-        f.setResonanceModulation(k);
+        feedResonance(f, k);
         break;
     case ResonanceFeed::perGridPoint:
     case ResonanceFeed::filterRamp:

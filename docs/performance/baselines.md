@@ -6,6 +6,32 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 voice, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice]"`, 100 samples per benchmark, two runs; the second shown, the first within 3% on every row.
+- **What is measured** ([voice-architecture.md](../dsp/voice-architecture.md#cpu)): the stage-1 `PrototypeVoice` (tests/dsp/voice/voice_candidates.hpp), one voice with its note held at the sustain, 512 samples per run at 48 kHz, both filters fed through the Filter Control at the voice's grid points. *Init*: A1 one saw, both filters LP24 on their own parts (4,677 Hz, k 0, drive ×1), Warm on. *Worst*: 4 oscillators × 8 unison saws (detuned, Stereo 10), both filters on AB, drive ×4, Warm on. The per-sample figures are **per voice**, so the share-of-a-core column below is for one voice; ×16 for full polyphony.
+
+| Benchmark (ns / sample, per voice) | this commit |
+|---|---:|
+| voice: init patch, per-part, grid, stereo (filter B running on part B's silence) | 360.64 (1.73% of a core; 16 voices 27.7%) |
+| voice: init patch, filter B at `--` (not run) | 235.08 |
+| voice: init patch, mono path | 185.75 |
+| voice: init patch, per-filter, grid / per-part, block | 357.51 / 361.27 |
+| voice: worst case, per-part, grid / per-filter, grid | 691.22 / 688.54 (16 voices 53%) |
+| voice: worst case, per-part, block / per-filter, block | 681.59 / 681.15 |
+| voice: worst case centred (Stereo 0), stereo path / mono path | 702.51 / 410.48 |
+| voice: init patch at 96 kHz (1024 samples per 512 out, no decimator) | 666.82 |
+
+### Observations
+
+- **The filters are the voice**: four filter channels at 95–125 ns each against about 3 ns per saw. Layouts and schedules are within noise of each other (−1.5% to +0.3%).
+- **A filter on silence still costs more than half a sounding one**: 126 ns per sample for its two channels (filter A, sounding, about 225), 35% of the init voice. Task 5's skipping must cover filters whose input has nothing sounding.
+- **The mono path** (exact while every voice is centred) saves 49% at the init patch and 42% on the worst case centred.
+- **The voice at 2×** costs 1.85× per output sample before any decimator.
+- No library code changed in this commit (the test stand-in's feed was factored into `feedFilter`, no behaviour change), so the `[filter]` and `[filter-control]` rows below stand.
+
+---
+
 ## 2026-11-21: M1.3 Filter Control
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[filter-control]"` and `"[filter]"`, 100 samples per benchmark. The previous column is commit 9dec978 in the same session: for `[filter]`, built in a separate worktree and alternating with this commit, two runs each (means); for `[filter-control]`, one run of each.
