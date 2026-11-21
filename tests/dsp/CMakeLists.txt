@@ -5,6 +5,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/drift_benchmark.cpp
     benchmarks/envelope_benchmark.cpp
     benchmarks/filter_benchmark.cpp
+    benchmarks/filter_control_benchmark.cpp
     benchmarks/filter_stability_benchmark.cpp
     benchmarks/keytrack_benchmark.cpp
     benchmarks/lfo_benchmark.cpp
@@ -23,6 +24,7 @@ add_executable(anoesis_dsp_tests
     control/stereo_gain_test.cpp
     control/tempo_sync_report.cpp
     control/tempo_sync_test.cpp
+    filters/filter_control_report.cpp
     filters/filter_report.cpp
     filters/filter_stability_report.cpp
     filters/keytrack_report.cpp

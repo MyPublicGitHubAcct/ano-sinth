@@ -287,7 +287,7 @@ Keytracking costs nothing that matters: at most 0.23 ns per sample per voice to 
 
 ### Leaving room for task 6
 
-The Filter Control's combining law (F12) is open, and this round doesn't settle it. Keytrack produces one number per voice: an offset in octaves, already scaled by its amount. Task 6 decides how it combines with Filter A's or B's cutoff and the Filter Control's cutoff. For example, all three may add in knob units before one exponential law, or in octaves after it. Either way keytrack stays an input to that sum: in octaves if the law adds octaves, or converted by the cutoff law's octaves per knob unit if it adds in knob units.
+The Filter Control's combining law (F12) is open, and this round doesn't settle it. Keytrack produces one number per voice: an offset in octaves, already scaled by its amount. Task 6 decides how it combines with Filter A's or B's cutoff and the Filter Control's cutoff. For example, all three may add in knob units before one exponential law, or in octaves after it. Either way keytrack stays an input to that sum: in octaves if the law adds octaves, or converted by the cutoff law's octaves per knob unit if it adds in knob units. Stage 1 of task 6 ([filter-control.md](filter-control.md), 2026-11-21) recommends knob units at 1 octave per unit, where the two are the same number, so `keytrackOctaves` would need no change.
 
 ## How it is applied here
 
