@@ -43,6 +43,7 @@ Other details:
 - **Setting an unchanged target is a no-op.** Hosts often resend every parameter every block, and restarting the ramp each time would make it crawl.
 - **Retargeting mid-ramp** starts a new full ramp from the current value, so the output stays continuous.
 - `skip(n)` advances a whole block at once for code that reads a parameter once per block, and `fill(span)` writes a per-sample buffer of values.
+- **`valueAfter(n)` (linear only) reads the ramp n samples ahead without advancing it**: exactly the value `next()` would return n calls from now, since it evaluates the same `start + step·k` at the step it would be on. So one ramp can be shared by many readers at different offsets. The Filter Control's knob ramps are global, and each voice reads them at the ends of its own 32-sample grid segments, which are not aligned across voices ([filter-control.md](filter-control.md#the-knob-ramps-one-global-ramp-read-at-each-voices-grid)). Reading n ahead and then skipping m gives the same values as reading m + n ahead, so where a host block is split changes nothing. The exponential shape has no such read: it would need a `pow` per read.
 - The ramp time is stored in seconds and converted again by every `prepare()`, so a sample-rate change keeps the time in milliseconds the same.
 - The ramp length is capped at 2²⁴ samples, the largest count a float holds exactly.
 
@@ -63,6 +64,7 @@ Other details:
 - a retarget mid-ramp stays continuous; an unchanged target doesn't restart the ramp;
 - zero ramp time, `setCurrentAndTarget()`, and `reset()` all jump immediately;
 - `skip()` matches stepping one sample at a time, and `fill()` is bit-identical to it;
+- `valueAfter(n)` is bit for bit the value `next()` returns n calls later, in every state (settled, at a ramp's start, partway after `skip()` or `next()`, retargeted mid-ramp, one sample from the end, landed, with no ramp time), doesn't move the smoother, gives the target for any n past the ramp's end, and is unchanged by where a `skip()` splits the read;
 - the exponential shape matches 1 − 10^(−4k/N) at every sample, reaches 63.2% after one time constant (N/9.21 samples), and its final snap is 1e-4 of the step;
 - both shapes are monotonic and never overshoot, upward (20 Hz → 20 kHz) and downward.
 

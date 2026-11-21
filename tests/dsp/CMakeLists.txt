@@ -25,6 +25,7 @@ add_executable(anoesis_dsp_tests
     control/tempo_sync_report.cpp
     control/tempo_sync_test.cpp
     filters/filter_control_report.cpp
+    filters/filter_control_test.cpp
     filters/filter_report.cpp
     filters/filter_stability_report.cpp
     filters/keytrack_report.cpp

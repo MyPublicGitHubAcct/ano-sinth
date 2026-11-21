@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 using anoesis::dsp::ExponentialSmoother;
@@ -260,4 +261,66 @@ TEST_CASE("Both smoothers move monotonically and never overshoot", "[dsp][smooth
     checkMonotonic(makeSmoother<LinearSmoother>(spec48k, 0.03f, 0.0f), 1.0f, -1.0f);
     checkMonotonic(makeSmoother<ExponentialSmoother>(spec48k, 0.03f, 0.0f), 20.0f, 20000.0f);
     checkMonotonic(makeSmoother<ExponentialSmoother>(spec48k, 0.03f, 0.0f), 1.0f, -1.0f);
+}
+
+TEST_CASE("LinearSmoother: valueAfter() reads the ramp ahead, bit for bit, without advancing it", "[dsp][smoothing]")
+{
+    // A ramp shared by many readers (each voice reads the global knob ramps
+    // at its own grid points, docs/dsp/filter-control.md): valueAfter(n) is
+    // what next() returns n calls from now, so it must be exactly that, in
+    // every state, and must not move the smoother.
+    const auto checkAgainstNext = [](const LinearSmoother& smoother)
+    {
+        const auto before = smoother.currentValue();
+        const bool smoothing = smoother.isSmoothing();
+        auto stepped = smoother;
+        CHECK_THAT(smoother.valueAfter(0), WithinULP(before, 0));
+        for (std::size_t n = 1; n <= smoother.rampLengthSamples() + 40; ++n)
+        {
+            const float expected = stepped.next();
+            CAPTURE(n);
+            REQUIRE_THAT(smoother.valueAfter(n), WithinULP(expected, 0));
+        }
+        CHECK_THAT(smoother.valueAfter(std::numeric_limits<std::size_t>::max()), WithinULP(smoother.targetValue(), 0));
+        // Not advanced.
+        CHECK_THAT(smoother.currentValue(), WithinULP(before, 0));
+        CHECK(smoother.isSmoothing() == smoothing);
+    };
+
+    auto smoother = makeSmoother<LinearSmoother>(spec48k, 0.01f, 3.0f);
+    checkAgainstNext(smoother); // settled
+    smoother.setTarget(6.0f);
+    checkAgainstNext(smoother); // at the start of a ramp
+    smoother.skip(123);
+    checkAgainstNext(smoother); // partway, after skip()
+    (void)smoother.next();
+    checkAgainstNext(smoother); // after next()
+    smoother.setTarget(-2.5f);
+    checkAgainstNext(smoother); // retargeted mid-ramp
+    smoother.skip(479);
+    checkAgainstNext(smoother); // one sample from the end
+    smoother.skip(1);
+    checkAgainstNext(smoother); // landed
+
+    // A reader positioned later reads the same ramp: valueAfter(m + n) before
+    // skip(m) is valueAfter(n) after it, so where a block is split doesn't
+    // change any reader's value.
+    auto ramp = makeSmoother<LinearSmoother>(spec48k, 0.01f, 0.0f);
+    ramp.setTarget(10.0f);
+    for (const std::size_t m : {std::size_t{1}, std::size_t{32}, std::size_t{37}, std::size_t{479}, std::size_t{480}})
+    {
+        auto later = ramp;
+        later.skip(m);
+        for (std::size_t n = 0; n < 600; ++n)
+        {
+            CAPTURE(m, n);
+            REQUIRE_THAT(later.valueAfter(n), WithinULP(ramp.valueAfter(m + n), 0));
+        }
+    }
+
+    // With no ramp time, every read is the target.
+    auto instant = makeSmoother<LinearSmoother>(spec48k, 0.0f, 1.0f);
+    instant.setTarget(4.0f);
+    CHECK_THAT(instant.valueAfter(0), WithinULP(4.0f, 0));
+    CHECK_THAT(instant.valueAfter(7), WithinULP(4.0f, 0));
 }

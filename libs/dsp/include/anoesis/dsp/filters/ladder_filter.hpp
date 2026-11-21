@@ -45,7 +45,10 @@
 ///   modulation in octaves; both become g at a grid point every 32 samples
 ///   (counted from reset()), and g is interpolated linearly in between, so
 ///   tan runs once per 32 samples. A control or modulation change applies
-///   from the next grid point. Resonance and drive ramp linearly over 10 ms.
+///   from the next grid point. Resonance and drive ramp linearly over 10 ms;
+///   k also has a modulation input, read at the grid and interpolated like g
+///   (the Filter Control's voice feeds the whole k through it,
+///   docs/dsp/filter-control.md).
 /// - Drive is a gain on the input, with no make-up. The passband of the
 ///   lowpasses falls as 1/(1 + k), as an analog ladder's does.
 /// - Bypass returns the input untouched at no cost; leaving bypass starts
@@ -133,6 +136,8 @@ public:
         gridPosition = 0;
         segmentEndGain = gainAt(cutoffLog2.currentValue());
         segmentStartGain = segmentEndGain;
+        segmentEndResonance = resonanceModulation;
+        segmentStartResonance = segmentEndResonance;
     }
 
     /// The cutoff in Hz, ramped in log2 over 10 ms from the next grid point.
@@ -154,6 +159,14 @@ public:
     void setResonance(float k) noexcept
     {
         resonance.setTarget(std::min(64.0f, std::max(0.0f, k)));
+    }
+
+    /// A modulation of k added to setResonance()'s, unsmoothed, from the next
+    /// grid point, where k runs linearly over the 32 samples to it (as g
+    /// does). Clamped to [0, 64], NaN to 0; the sum is capped at 64.
+    void setResonanceModulation(float k) noexcept
+    {
+        resonanceModulation = std::isnan(k) ? 0.0f : std::clamp(k, 0.0f, 64.0f);
     }
 
     /// A linear gain on the input, >= 0, no make-up.
@@ -263,6 +276,8 @@ private:
         segmentStartGain = segmentEndGain;
         cutoffLog2.skip(gridSamples);
         segmentEndGain = gainAt(cutoffLog2.currentValue());
+        segmentStartResonance = segmentEndResonance;
+        segmentEndResonance = resonanceModulation;
     }
 
     [[nodiscard]] FilterTapMix blendedTaps(float b) const noexcept
@@ -283,10 +298,13 @@ private:
         std::array<float, gridSamples> gain{};
         std::array<float, gridSamples> fade{};
         const float gainStep = (segmentEndGain - segmentStartGain) * (1.0f / static_cast<float>(gridSamples));
+        const float resonanceStep =
+            (segmentEndResonance - segmentStartResonance) * (1.0f / static_cast<float>(gridSamples));
         for (std::size_t i = 0; i < length; ++i)
         {
             g[i] = segmentStartGain + (gainStep * static_cast<float>(gridPosition + i));
-            k[i] = resonance.next();
+            k[i] = std::min(64.0f, resonance.next() + (segmentStartResonance +
+                                                       (resonanceStep * static_cast<float>(gridPosition + i))));
             gain[i] = drive.next();
             fade[i] = tapFade.next();
         }
@@ -326,6 +344,9 @@ private:
     std::size_t gridPosition = 0;
     float segmentStartGain = 0.0f;
     float segmentEndGain = 0.0f;
+    float resonanceModulation = 0.0f;
+    float segmentStartResonance = 0.0f;
+    float segmentEndResonance = 0.0f;
 };
 
 } // namespace anoesis::dsp

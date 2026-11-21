@@ -1,6 +1,8 @@
-// The Filter Control report (docs/dsp/filter-control.md, M1.3 task 6, stage
-// 1): measures candidate combining laws for Sylenth1's shared Filter Control
-// (filter_control_candidates.hpp) on the real LadderFilter:
+// The Filter Control report (docs/dsp/filter-control.md, M1.3 task 6):
+// measures the built combining law (filter_control.hpp, the project owner's
+// choice of model (a2)) against stage 1's other candidates
+// (filter_control_candidates.hpp) on the real LadderFilter, the chosen model
+// fed as the voice will feed it (filter_control_support.hpp):
 //
 // - what each model predicts for the settings that tutorials and users
 //   report (the old LCD's Hz readings, the defaults, "fully open");
@@ -16,7 +18,9 @@
 //   Resonance at 0 and 10 does to a filter at 0, 5, and 10;
 // - how the voice feeds the sum (the filter's own 10 ms ramp, a ramp in the
 //   voice, both, neither): a knob step, a 7-bit MIDI CC sweep, a clamp
-//   transient, and block sizes.
+//   transient, and block sizes;
+// - feeding k: setResonance() at each grid point against the knob's own ramp
+//   and the filter's resonance modulation input (a step, a CC sweep, an LFO).
 //
 // Hidden from the default run; run it in an optimised build (about 30 s):
 //
@@ -26,6 +30,7 @@
 // CPU: the "[filter-control]" benchmarks (tools/bench.sh "[filter-control]").
 
 #include "filter_control_candidates.hpp"
+#include "filter_control_support.hpp"
 #include "ladder_reference.hpp"
 
 #include <anoesis/dsp/control/smoother.hpp>
@@ -54,6 +59,7 @@
 #include <span>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace anoesis::test;
@@ -201,51 +207,6 @@ std::vector<float> render(dsp::LadderFilter& f, std::vector<float> x)
     return {buffer.channel(0).begin(), buffer.channel(0).end()};
 }
 
-// --- The effective cutoff: the -12 dB point ----------------------------------------------
-
-/// |H(f)| of an impulse response h scaled by 1/amplitude, in double.
-double magnitudeAt(std::span<const float> h, double amplitude, double hz, double rate)
-{
-    const std::complex<double> step = std::polar(1.0, -2.0 * pi * hz / rate);
-    std::complex<double> phasor{1.0, 0.0};
-    std::complex<double> sum{0.0, 0.0};
-    for (std::size_t n = 0; n < h.size(); ++n)
-    {
-        sum += static_cast<double>(h[n]) * phasor;
-        phasor *= step;
-        if (n % 4096 == 4095)
-        {
-            phasor /= std::abs(phasor); // keep the rotation on the unit circle
-        }
-    }
-    return std::abs(sum) / amplitude;
-}
-
-/// The frequency where LP24 at k 0 falls to 1/4 (-12.04 dB): exactly the
-/// cutoff for the prewarped ladder (filters.md). Small signal (-80 dBFS), so
-/// the saturators are linear; bisection in log2 f on the impulse response's
-/// DTFT, which is monotone for LP24.
-double minus12DbPoint(double hz, double rate)
-{
-    constexpr double amplitude = 1e-4;
-    const double expected = dspCutoffHz(std::log2(hz), rate);
-    // The 4-pole impulse response falls as t^3 e^(-wc t): 40 time constants
-    // leave e^-40 x 40^3 ~ 3e-13 of its peak.
-    const auto n = std::max<std::size_t>(8192, static_cast<std::size_t>(40.0 / (2.0 * pi * expected) * rate) + 4096);
-    auto f = settledFilter(rate, expected, 0.0f);
-    std::vector<float> x(n, 0.0f);
-    x[0] = static_cast<float>(amplitude);
-    const auto h = render(f, x);
-    double lo = std::log2(0.25);
-    double hi = std::log2(0.4999 * rate);
-    for (int i = 0; i < 60; ++i)
-    {
-        const double mid = 0.5 * (lo + hi);
-        (magnitudeAt(h, amplitude, std::exp2(mid), rate) > 0.25 ? lo : hi) = mid;
-    }
-    return std::exp2(0.5 * (lo + hi));
-}
-
 // --- 1. What each model predicts for the reported settings ----------------------------
 
 void reportEvidence()
@@ -360,7 +321,14 @@ void reportGrid()
                 {
                     const double rate = r == 0 ? 44100.0 : 96000.0;
                     const double expected = effectiveHz(m, Clamp::perControl, in, rate);
-                    measured[r] = minus12DbPoint(expected, rate);
+                    // The chosen model fed as the voice feeds it (the anchor in
+                    // setCutoff, the law's octaves as modulation); the others
+                    // through setCutoff in Hz.
+                    measured[r] =
+                        m == CutoffModel::knobSumOctave
+                            ? minus12DbPoint(fedFilter(builtOctavesAboveAnchor(a, 0.0f, c, 0.0f, 0.0f, 9.0f), rate),
+                                             expected, rate)
+                            : minus12DbPoint(settledFilter(rate, expected, 0.0f), expected, rate);
                     const double cents = centsBetween(measured[r], expected);
                     worst = std::max(worst, std::fabs(cents));
                     CHECK(std::fabs(cents) <= toleranceCents);
@@ -873,15 +841,7 @@ void reportResonance()
     }
 }
 
-// --- 7. Feeding: the 10 ms ramp, a voice ramp, both, neither ---------------------------
-
-enum class Feed : std::uint8_t
-{
-    filterRamp, ///< W1: the knob sum into setCutoff (the filter's own 10 ms log2 ramp); modulation separately
-    voiceRamp,  ///< W2: the voice ramps the knobs 10 ms at the grid, the whole sum into setCutoffModulation
-    bothRamps,  ///< W3: the voice ramps, then setCutoff at each grid point, which ramps again
-    noRamp,     ///< W4: the knob sum into setCutoffModulation unsmoothed
-};
+// --- 7. Feeding the cutoff: the 10 ms ramp, a voice ramp, both, neither -------------------
 
 std::string_view feedName(Feed f)
 {
@@ -890,9 +850,9 @@ std::string_view feedName(Feed f)
     case Feed::filterRamp:
         return "W1: setCutoff(knob sum), the filter's ramp";
     case Feed::voiceRamp:
-        return "W2: the voice's ramp, all into the modulation input";
+        return "W2 (built): the knobs' global ramps in the voice's sum, all into the modulation input";
     case Feed::bothRamps:
-        return "W3: the voice's ramp into setCutoff (ramped twice)";
+        return "W3: the voice's sum into setCutoff (ramped twice)";
     case Feed::noRamp:
         return "W4: no ramp, into the modulation input";
     }
@@ -900,130 +860,6 @@ std::string_view feedName(Feed f)
 }
 
 constexpr std::array<Feed, 4> feeds{Feed::filterRamp, Feed::voiceRamp, Feed::bothRamps, Feed::noRamp};
-
-/// One voice's filter under (a2), with the knobs given per sample by `knobA`
-/// and `knobC` (host events: read at every block start and grid point, so an
-/// event inside a segment takes effect at the next grid point), a
-/// constant modulation `mod` on Cutoff A, each control clamped, fed as `feed`
-/// says. Returns the output and log2 of the cutoff at each grid point.
-struct FeedRun
-{
-    std::vector<float> y;
-    std::vector<double> log2Cutoff;
-};
-
-FeedRun runFeed(Feed feed, double rate, float k, std::span<const float> x,
-                const std::function<float(std::size_t)>& knobA, const std::function<float(std::size_t)>& knobC,
-                float mod, std::size_t hostBlock)
-{
-    dsp::LadderFilter f;
-    f.setResonance(k);
-    dsp::LinearSmoother smoothA;
-    dsp::LinearSmoother smoothC;
-    for (auto* s : {&smoothA, &smoothC})
-    {
-        s->prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = 4096, .numChannels = 1});
-        s->setRampTime(dsp::LadderFilter::rampSeconds);
-    }
-    smoothA.setCurrentAndTarget(knobA(0));
-    smoothC.setCurrentAndTarget(knobC(0));
-    const auto sumOf = [&](float a, float c)
-    {
-        return cutoffOctaves(CutoffModel::knobSumOctave, Clamp::perControl,
-                             {.filter = a, .control = c, .filterMod = mod});
-    };
-    const float base = lcdLaw.log2HzAtZero;
-    // W1: the knobs (the control part) ramp in the filter; the modulation is
-    // what the clamp leaves of it against the knobs' target.
-    const auto feedFilterRamp = [&](float a, float c)
-    {
-        const float control = lcdLaw.octaves(a + c);
-        f.setCutoff(std::exp2(control));
-        f.setCutoffModulation(sumOf(a, c) - control);
-    };
-    float a = knobA(0);
-    float c = knobC(0);
-    switch (feed)
-    {
-    case Feed::filterRamp:
-        feedFilterRamp(a, c);
-        break;
-    case Feed::bothRamps:
-        f.setCutoff(std::exp2(sumOf(a, c)));
-        break;
-    case Feed::voiceRamp:
-    case Feed::noRamp:
-        f.setCutoff(std::exp2(base));
-        f.setCutoffModulation(sumOf(a, c) - base);
-        break;
-    }
-    f.prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = 4096, .numChannels = 1});
-    Buffer buffer{1, x.size()};
-    std::ranges::copy(x, buffer.channel(0).begin());
-    FeedRun out;
-    for (std::size_t block = 0; block < x.size(); block += hostBlock)
-    {
-        const auto blockEnd = std::min(x.size(), block + hostBlock);
-        for (std::size_t start = block; start < blockEnd;)
-        {
-            const auto end = std::min(blockEnd, ((start / grid) + 1) * grid);
-            // Host events at this sample: the knob values from here on.
-            const float newA = knobA(start);
-            const float newC = knobC(start);
-            if (newA > a || newA < a || newC > c || newC < c)
-            {
-                a = newA;
-                c = newC;
-                smoothA.setTarget(a);
-                smoothC.setTarget(c);
-                if (feed == Feed::filterRamp)
-                {
-                    feedFilterRamp(a, c);
-                }
-            }
-            if (start % grid == 0)
-            {
-                // At a grid point: the voice's values for the end of the coming segment.
-                smoothA.skip(grid);
-                smoothC.skip(grid);
-                switch (feed)
-                {
-                case Feed::filterRamp:
-                    break;
-                case Feed::voiceRamp:
-                    f.setCutoffModulation(sumOf(smoothA.currentValue(), smoothC.currentValue()) - base);
-                    break;
-                case Feed::bothRamps:
-                    f.setCutoff(std::exp2(sumOf(smoothA.currentValue(), smoothC.currentValue())));
-                    break;
-                case Feed::noRamp:
-                    f.setCutoffModulation(sumOf(a, c) - base);
-                    break;
-                }
-            }
-            f.process(buffer.block().subBlock(start, end - start));
-            if (end % grid == 0)
-            {
-                out.log2Cutoff.push_back(std::log2(static_cast<double>(f.currentCutoff())));
-            }
-            start = end;
-        }
-    }
-    out.y.assign(buffer.channel(0).begin(), buffer.channel(0).end());
-    return out;
-}
-
-double energyAbove1k(std::span<const float> x, std::size_t at, double rate)
-{
-    static const Window window = hannWindow(4096);
-    const auto spectrum = powerSpectrum(x.subspan(at - 2048, 4096), rate, window);
-    double sum = 0.0;
-    for (std::size_t k = 0; k < spectrum.power.size(); ++k)
-    {
-        sum += spectrum.frequencyOf(k) >= 1000.0 ? spectrum.power[k] : 0.0;
-    }
-    return sum;
-}
 
 std::vector<float> saw(double hz, double rate, std::size_t n, double amplitude)
 {
@@ -1038,6 +874,18 @@ std::vector<float> saw(double hz, double rate, std::size_t n, double amplitude)
     return x;
 }
 
+/// Stage 1's resonance for the feeding measurements, k 3.6, as knob units
+/// through the law: Resonance A at 6.
+Knobs feedingKnobs(Signal cutoff, Signal controlCutoff)
+{
+    Knobs knobs;
+    knobs.cutoff = std::move(cutoff);
+    knobs.controlCutoff = std::move(controlCutoff);
+    knobs.resonance = constant(6.0f);
+    knobs.controlResonance = constant(0.0f);
+    return knobs;
+}
+
 void reportFeeding()
 {
     constexpr double rate = 48000.0;
@@ -1050,17 +898,11 @@ void reportFeeding()
     std::fill(step.begin() + at, step.end(), 1.0f);
     const double unitStep = energyAbove1k(step, at + 32, rate);
     const auto sineIn = sine(150.0, rate, n, 0.25);
-    const auto constant = [](float v)
-    {
-        return [v](std::size_t)
-        {
-            return v;
-        };
-    };
-    const auto stepC = [&](std::size_t i)
+    const Signal stepC = [&](std::size_t i)
     {
         return i < at ? 3.0f : 6.0f;
     };
+    const Voice still{};
     std::cout << "\n### Feeding the sum: a Filter Control step (48 kHz, (a2), A 5, Control 3 -> 6: 1,169 -> 9,354 "
                  "Hz)\n\n"
                  "To 90%: the time from the step until log2 of the cutoff has moved 90% of the way. From W1: the "
@@ -1068,10 +910,11 @@ void reportFeeding()
                  "-12 dBFS, energy above 1 kHz in a Hann 4096 centred 32 samples after the step, dB re an instant unit "
                  "step (filters.md's measure; steady: no step).\n\n"
                  "| Feed | To 90% | From W1 | Click |\n|---|---|---|---|\n";
-    const auto reference = runFeed(Feed::filterRamp, rate, 3.6f, sineIn, constant(5.0f), stepC, 0.0f, 512);
+    const auto stepKnobs = feedingKnobs(constant(5.0f), stepC);
+    const auto reference = runOne({.rate = rate, .feed = Feed::filterRamp}, stepKnobs, still, sineIn);
     for (const auto feed : feeds)
     {
-        const auto r = runFeed(feed, rate, 3.6f, sineIn, constant(5.0f), stepC, 0.0f, 512);
+        const auto r = runOne({.rate = rate, .feed = feed}, stepKnobs, still, sineIn);
         const double from = r.log2Cutoff[(at / grid) - 1];
         const double to = r.log2Cutoff.back();
         std::size_t reach = r.log2Cutoff.size();
@@ -1089,7 +932,7 @@ void reportFeeding()
                   << fixed(10.0 * std::log10(energyAbove1k(r.y, at + 32, rate) / unitStep), 1) << " dB |\n";
     }
     {
-        const auto r = runFeed(Feed::voiceRamp, rate, 3.6f, sineIn, constant(5.0f), constant(6.0f), 0.0f, 512);
+        const auto r = runOne({.rate = rate}, feedingKnobs(constant(5.0f), constant(6.0f)), still, sineIn);
         std::cout << "| steady (Control at 6 throughout) | | | "
                   << fixed(10.0 * std::log10(energyAbove1k(r.y, at + 32, rate) / unitStep), 1) << " dB |\n";
     }
@@ -1098,7 +941,7 @@ void reportFeeding()
     // host blocks of 512.
     constexpr std::size_t sweepN = 96000;
     const auto sawIn = saw(110.0, rate, sweepN, 0.5);
-    const auto cc = [&](std::size_t i)
+    const Signal cc = [&](std::size_t i)
     {
         // The value sent at the start of each host block of 512.
         const std::size_t blockStart = (i / 512) * 512;
@@ -1122,7 +965,7 @@ void reportFeeding()
                  "| Feed | Largest step | Roughness | Lag |\n|---|---|---|---|\n";
     for (const auto feed : feeds)
     {
-        const auto r = runFeed(feed, rate, 3.6f, sawIn, constant(3.0f), cc, 0.0f, 512);
+        const auto r = runOne({.rate = rate, .feed = feed}, feedingKnobs(constant(3.0f), cc), still, sawIn);
         const double top = std::log2(0.495 * rate) - 0.01;
         double largest = 0.0;
         double rough = 0.0;
@@ -1150,10 +993,11 @@ void reportFeeding()
     // the Filter Control at 2. Each control clamped: the sum goes 7 -> 12.
     // W1 can only clamp against the knob's target, so while the filter ramps
     // the control part, the modulation part is already the target's.
-    const auto stepA = [&](std::size_t i)
+    const Signal stepA = [&](std::size_t i)
     {
         return i < at ? 2.0f : 9.0f;
     };
+    const Voice modulated{.cutoffModulation = constant(3.0f)};
     std::cout << "\n### Feeding the sum: the clamp across a ramp (48 kHz, (a2), A 2 -> 9 with +3 of modulation on "
                  "Cutoff A, Control 2: the clamped sum 7 -> 12)\n\n"
                  "Exact: the clamp applied to the ramped knob, clamp(A(t) + 3) + 2. W1 clamps against the target, so "
@@ -1162,24 +1006,20 @@ void reportFeeding()
                  "| Feed | From exact | Click |\n|---|---|---|\n";
     const auto exact = [&]
     {
+        // The knob's 10 ms ramp from the step, in closed form, at each segment end.
         std::vector<double> e;
-        dsp::LinearSmoother s;
-        s.prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = 4096, .numChannels = 1});
-        s.setRampTime(dsp::LadderFilter::rampSeconds);
-        s.setCurrentAndTarget(2.0f);
         for (std::size_t g = 0; g < n / grid; ++g)
         {
-            s.setTarget(stepA(g * grid));
-            s.skip(grid);
-            e.push_back(
-                static_cast<double>(cutoffOctaves(CutoffModel::knobSumOctave, Clamp::perControl,
-                                                  {.filter = s.currentValue(), .control = 2.0f, .filterMod = 3.0f})));
+            const auto end = static_cast<double>((g + 1) * grid);
+            const double t = std::clamp((end - static_cast<double>(at)) / 480.0, 0.0, 1.0);
+            const double a = 2.0 + (7.0 * t);
+            e.push_back(std::log2(static_cast<double>(dsp::filterControlLaw.anchorHz)) + std::min(10.0, a + 3.0) + 2.0);
         }
         return e;
     }();
     for (const auto feed : {Feed::filterRamp, Feed::voiceRamp})
     {
-        const auto r = runFeed(feed, rate, 3.6f, sineIn, stepA, constant(2.0f), 3.0f, 512);
+        const auto r = runOne({.rate = rate, .feed = feed}, feedingKnobs(stepA, constant(2.0f)), modulated, sineIn);
         double worst = 0.0;
         for (std::size_t i = 0; i < r.log2Cutoff.size(); ++i)
         {
@@ -1189,22 +1029,23 @@ void reportFeeding()
                   << fixed(10.0 * std::log10(energyAbove1k(r.y, at + 32, rate) / unitStep), 1) << " dB |\n";
     }
 
-    // Block sizes: the step above, the event at sample `at`, blocks of 1, 37, 4096.
-    std::cout << "\n**Block sizes** (the Filter Control step, the event applied at the next grid point: W1 and W2 "
-                 "fed with host blocks of 1 and 37 against 4096):\n\n| Feed | 1 | 37 |\n|---|---|---|\n";
+    // Block sizes: the step above with its event one sample after a grid
+    // point, in host blocks of 1, 37, 4096.
+    std::cout << "\n**Block sizes** (the Filter Control step with its event one sample after a grid point; W1 applies "
+                 "it at the next grid point, W2's global ramp starts at the event's sample; host blocks of 1 and 37 "
+                 "against 4096):\n\n| Feed | 1 | 37 |\n|---|---|---|\n";
     for (const auto feed : {Feed::filterRamp, Feed::voiceRamp})
     {
-        // The event one sample after a grid point: every block size applies it
-        // at the next grid point.
-        const auto event = [&](std::size_t i)
+        const Signal event = [&](std::size_t i)
         {
             return i <= at ? 3.0f : 6.0f;
         };
-        const auto big = runFeed(feed, rate, 3.6f, sineIn, constant(5.0f), event, 0.0f, 4096);
+        const auto knobs = feedingKnobs(constant(5.0f), event);
+        const auto big = runOne({.rate = rate, .feed = feed, .hostBlock = 4096}, knobs, still, sineIn);
         std::cout << "| " << feedName(feed);
         for (const std::size_t block : {std::size_t{1}, std::size_t{37}})
         {
-            const auto small = runFeed(feed, rate, 3.6f, sineIn, constant(5.0f), event, 0.0f, block);
+            const auto small = runOne({.rate = rate, .feed = feed, .hostBlock = block}, knobs, still, sineIn);
             const bool same =
                 std::ranges::equal(small.y, big.y, [](float p, float q)
                                    { return std::bit_cast<std::uint32_t>(p) == std::bit_cast<std::uint32_t>(q); });
@@ -1215,9 +1056,205 @@ void reportFeeding()
     }
 }
 
+// --- 8. Feeding k: the filter's resonance ramp at each grid point, or a modulation input ---
+
+/// The k the filter uses at the end of each of the voice's segments when the
+/// voice calls setResonance() at each grid point: LadderFilter's own
+/// LinearSmoother (10 ms, restarted by each new target, advanced a sample at
+/// a time), replayed on the k the voice fed.
+std::vector<double> rampedK(const VoiceRun& r, double rate)
+{
+    dsp::LinearSmoother s;
+    s.prepare({.sampleRate = static_cast<float>(rate), .maxBlockSize = 4096, .numChannels = 1});
+    s.setRampTime(dsp::LadderFilter::rampSeconds);
+    s.setCurrentAndTarget(r.noteOnK);
+    std::vector<double> out;
+    for (const float k : r.k)
+    {
+        s.setTarget(k);
+        s.skip(grid);
+        out.push_back(static_cast<double>(s.currentValue()));
+    }
+    return out;
+}
+
+void reportResonanceFeeding()
+{
+    constexpr double rate = 48000.0;
+    constexpr std::size_t n = 49152;
+    constexpr std::size_t at = 24576; // a grid point and a host-block boundary
+    const auto sineIn = sine(150.0, rate, n, 0.25);
+    std::vector<float> step(n, 0.0f);
+    std::fill(step.begin() + at, step.end(), 1.0f);
+    const double unitStep = energyAbove1k(step, at + 32, rate);
+    std::cout << "\n### Feeding k: setResonance() at each grid point, or the resonance modulation input (48 kHz)\n\n"
+                 "The voice computes k at each grid point for the segment's end (the knobs' ramps and its own "
+                 "modulation, clamped and added). Fed through setResonance(), each call restarts the filter's 10 ms "
+                 "ramp from where it is (k replayed from the filter's own smoother). Fed through "
+                 "setResonanceModulation() (built), the filter reads it at the next grid point and runs k linearly "
+                 "to it: at the grid points, the voice's k itself. 'The filter's ramp' is setResonance() once at the "
+                 "event, the knob's own 10 ms ramp (no per-voice modulation possible). Compared against the knob's "
+                 "ramp in closed form.\n\n";
+
+    // A step of the Filter Control's Resonance, 1 -> 4 with Resonance A at 2
+    // (k 1.8 -> 3.6), the cutoff at A 5 + Control 3 (1,169 Hz).
+    const Knobs stepKnobs{
+        .cutoff = constant(5.0f),
+        .controlCutoff = constant(3.0f),
+        .resonance = constant(2.0f),
+        .controlResonance = [](std::size_t i) { return i < at ? 1.0f : 4.0f; },
+    };
+    std::cout << "**A step of the Filter Control's Resonance, 1 -> 4** (Resonance A 2: k 1.8 -> 3.6; Cutoff A 5 + "
+                 "Control 3, 1,169 Hz; a 150 Hz sine at -12 dBFS, LP24). To 90%: from the step until k has moved "
+                 "90%. From the knob's ramp: the largest distance in k at any grid point. Click: energy above 1 kHz "
+                 "around the step, dB re an instant unit step.\n\n"
+                 "| Feed | To 90% | From the knob's ramp | Click |\n|---|---|---|---|\n";
+    const Voice still{};
+    const auto idealStepK = [&](std::size_t gridIndex)
+    {
+        const auto end = static_cast<double>((gridIndex + 1) * grid);
+        return 0.6 * (3.0 + (3.0 * std::clamp((end - static_cast<double>(at)) / 480.0, 0.0, 1.0)));
+    };
+    const auto stepRow = [&](const std::string& name, const VoiceRun& r, const std::vector<double>& k)
+    {
+        std::size_t reach = k.size();
+        double from = 0.0;
+        for (std::size_t i = 0; i < k.size(); ++i)
+        {
+            if (i >= at / grid && reach == k.size() && k[i] >= 1.8 + (0.9 * 1.8))
+            {
+                reach = i;
+            }
+            from = std::max(from, std::fabs(k[i] - idealStepK(i)));
+        }
+        const double ms = 1000.0 * static_cast<double>(((reach + 1) * grid) - at) / rate;
+        std::cout << "| " << name << " | " << fixed(ms, 2) << " ms | " << fixed(from, 4) << " | "
+                  << fixed(10.0 * std::log10(energyAbove1k(r.y, at + 32, rate) / unitStep), 1) << " dB |\n";
+    };
+    {
+        const auto r = runOne({.rate = rate, .resonanceFeed = ResonanceFeed::filterRamp}, stepKnobs, still, sineIn);
+        stepRow("the filter's ramp: setResonance() at the event", r, rampedK(r, rate));
+    }
+    {
+        const auto r = runOne({.rate = rate, .resonanceFeed = ResonanceFeed::perGridPoint}, stepKnobs, still, sineIn);
+        stepRow("setResonance() at each grid point", r, rampedK(r, rate));
+    }
+    {
+        const auto r = runOne({.rate = rate, .resonanceFeed = ResonanceFeed::modulation}, stepKnobs, still, sineIn);
+        stepRow("setResonanceModulation() at each grid point (built)", r, std::vector<double>(r.k.begin(), r.k.end()));
+    }
+    {
+        const auto r = runOne({.rate = rate},
+                              {
+                                  .cutoff = constant(5.0f),
+                                  .controlCutoff = constant(3.0f),
+                                  .resonance = constant(2.0f),
+                                  .controlResonance = constant(4.0f),
+                              },
+                              still, sineIn);
+        std::cout << "| steady (Control at 4 throughout) | | | "
+                  << fixed(10.0 * std::log10(energyAbove1k(r.y, at + 32, rate) / unitStep), 1) << " dB |\n";
+    }
+
+    // A 7-bit MIDI CC sweep of the Filter Control's Resonance, 0 -> 10 in 2 s
+    // (k 0 -> 6), events at host blocks of 512.
+    constexpr std::size_t sweepN = 96000;
+    const auto sawIn = saw(110.0, rate, sweepN, 0.5);
+    const Knobs sweepKnobs{
+        .cutoff = constant(5.0f),
+        .controlCutoff = constant(3.0f),
+        .resonance = constant(0.0f),
+        .controlResonance =
+            [](std::size_t i)
+        {
+            const std::size_t blockStart = (i / 512) * 512;
+            const double t = std::min(1.0, static_cast<double>(blockStart) / static_cast<double>(sweepN));
+            return static_cast<float>(std::round(127.0 * t) / 127.0 * 10.0);
+        },
+    };
+    const auto idealK = [&](std::size_t gridIndex)
+    {
+        const double t = std::min(1.0, static_cast<double>((gridIndex + 1) * grid) / static_cast<double>(sweepN));
+        return 0.6 * 10.0 * t;
+    };
+    std::cout << "\n**A 7-bit MIDI CC sweep of the Filter Control's Resonance**, 0 -> 10 in 2 s (k 0 -> 6, 128 steps "
+                 "of 0.047 in k), events at host blocks of 512; Resonance A 0. The k at each grid point: the largest "
+                 "step between grid points (the unquantised knob moves 0.0020 per grid point), roughness (RMS second "
+                 "difference), and the mean lag behind the unquantised knob, in k and in ms (3 k per second).\n\n"
+                 "| Feed | Largest step | Roughness | Lag |\n|---|---|---|---|\n";
+    const auto sweepRow = [&](const std::string& name, const std::vector<double>& k)
+    {
+        double largest = 0.0;
+        double rough = 0.0;
+        double lag = 0.0;
+        std::size_t count = 0;
+        for (std::size_t i = 2; i < k.size(); ++i)
+        {
+            largest = std::max(largest, std::fabs(k[i] - k[i - 1]));
+            const double second = k[i] - (2.0 * k[i - 1]) + k[i - 2];
+            rough += second * second;
+            lag += idealK(i) - k[i];
+            ++count;
+        }
+        const auto c = static_cast<double>(count);
+        std::cout << "| " << name << " | " << fixed(largest, 4) << " | " << fixed(std::sqrt(rough / c), 5) << " | "
+                  << fixed(lag / c, 4) << " (" << fixed(1000.0 * lag / c / 3.0, 1) << " ms) |\n";
+    };
+    {
+        const auto r = runOne({.rate = rate, .resonanceFeed = ResonanceFeed::perGridPoint}, sweepKnobs, still, sawIn);
+        sweepRow("setResonance() at each grid point", rampedK(r, rate));
+        const auto m = runOne({.rate = rate, .resonanceFeed = ResonanceFeed::modulation}, sweepKnobs, still, sawIn);
+        sweepRow("setResonanceModulation() at each grid point (built)", std::vector<double>(m.k.begin(), m.k.end()));
+    }
+
+    // An LFO on Resonance A: +/-2 units around 3 (k 0.6 to 3.0), per voice.
+    std::cout << "\n**An LFO on Resonance A**, +/-2 units around Resonance A 3 (k 1.8 +/- 1.2), a sine at 2, 5, and "
+                 "20 Hz, over 1 s after 0.2 s: the k swing at the LFO's frequency (least squares) against the "
+                 "voice's k, and its lag in ms.\n\n"
+                 "| Feed | 2 Hz: swing / lag | 5 Hz | 20 Hz |\n|---|---|---|---|\n";
+    const auto fit = [&](const std::vector<double>& k, double hz)
+    {
+        // Amplitude and phase of k at hz over grid points 0.2 s to 1.2 s.
+        double sc = 0.0;
+        double ss = 0.0;
+        double count = 0.0;
+        for (std::size_t i = 0; i < k.size(); ++i)
+        {
+            const double t = static_cast<double>((i + 1) * grid) / rate;
+            if (t < 0.2 || t >= 1.2)
+            {
+                continue;
+            }
+            sc += k[i] * std::cos(2.0 * pi * hz * t);
+            ss += k[i] * std::sin(2.0 * pi * hz * t);
+            count += 1.0;
+        }
+        return std::pair{2.0 * std::hypot(sc, ss) / count, std::atan2(sc, ss)};
+    };
+    const std::vector<float> lfoIn = saw(110.0, rate, 60000, 0.5);
+    std::string ramped = "| setResonance() at each grid point";
+    std::string knobRow = "| setResonanceModulation() at each grid point (built): the voice's k";
+    for (const double hz : {2.0, 5.0, 20.0})
+    {
+        const Voice lfo{
+            .resonanceModulation = [hz](std::size_t i)
+            { return static_cast<float>(2.0 * std::sin(2.0 * pi * hz * static_cast<double>(i) / rate)); },
+        };
+        const Knobs knobs{.cutoff = constant(5.0f), .controlCutoff = constant(3.0f), .resonance = constant(3.0f)};
+        const auto r = runOne({.rate = rate, .resonanceFeed = ResonanceFeed::perGridPoint}, knobs, lfo, lfoIn);
+        const auto [a0, p0] = fit(std::vector<double>(r.k.begin(), r.k.end()), hz);
+        const auto [a1, p1] = fit(rampedK(r, rate), hz);
+        const double lag0 = 1000.0 * (-p0) / (2.0 * pi * hz);
+        knobRow += " | " + fixed(a0, 3) + " (" + fixed(a0 / 1.2, 3) + "x) / " +
+                   fixed(std::fabs(lag0) < 0.05 ? 0.0 : lag0, 1) + " ms";
+        ramped += " | " + fixed(a1 / a0, 3) + "x / " + fixed(1000.0 * (p0 - p1) / (2.0 * pi * hz), 1) + " ms";
+    }
+    std::cout << knobRow << " |\n" << ramped << " |\n";
+}
+
 } // namespace
 
-TEST_CASE("Filter Control report: candidate combining laws on LadderFilter", "[.][filter-control-report]")
+TEST_CASE("Filter Control report: the built law and the candidates on LadderFilter", "[.][filter-control-report]")
 {
     std::cout << "\n## Filter Control report\n";
     reportEvidence();
@@ -1227,4 +1264,10 @@ TEST_CASE("Filter Control report: candidate combining laws on LadderFilter", "[.
     reportClamps();
     reportResonance();
     reportFeeding();
+    reportResonanceFeeding();
+}
+
+TEST_CASE("Filter Control report: feeding k only", "[.][filter-control-resonance-feeding]")
+{
+    reportResonanceFeeding();
 }

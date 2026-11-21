@@ -6,6 +6,35 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.3 Filter Control
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[filter-control]"` and `"[filter]"`, 100 samples per benchmark. The previous column is commit 9dec978 in the same session: for `[filter]`, built in a separate worktree and alternating with this commit, two runs each (means); for `[filter-control]`, one run of each.
+- **What changed** ([filter-control.md](../dsp/filter-control.md#as-built)): new `filter_control.hpp` (the combining law, `constexpr`, no state), `LinearSmoother::valueAfter` (a ramp read ahead without advancing), and `LadderFilter::setResonanceModulation` (k added at the grid, interpolated like g, the sum capped at 64), which adds a few float operations per sample to the loop that already computes k. The `[filter-control]` rows now measure the built law (stage 1's (a2) and resonance prototype rows replaced), plus the voice's whole feed and the filter with k fed through the new input.
+
+| Benchmark (ns / sample) | this commit | previous |
+|---|---:|---:|
+| filter-control: `filterCutoffOctaves` with keytrack, 2 filters × 16 grid points per 512 | 0.08 (40 ns per block) | 0.09 (48, the (a2) prototype) |
+| filter-control: `filterResonanceK`, 2 filters × 16 grid points per 512 | 0.04 (21 ns per block) | 0.04 (21, the prototype) |
+| filter-control: the voice's feed (6 ramps read with `valueAfter`, keytrack, 2 filters' cutoff and k), 16 grid points per 512 | 0.17 (87 ns per block) | |
+| filter-control: filter fed W1 (the knobs via `setCutoff`) / W2 (the whole sum as modulation) | 88.54 / 93.76 | 92.91 / 87.67 |
+| filter-control: filter fed W2, k through `setResonanceModulation` (built) | 89.21 | |
+| filter: Warm on (tanh), k 2, drive 2 / k 6, drive 16 | 94.83 / 123.38 | 97.28 / 122.16 |
+| filter: Warm off (cubic), k 2, drive 2 / k 6, drive 16 | 63.02 / 84.41 | 68.75 / 80.44 |
+| filter: stereo (2 channels), Warm on / off | 193.49 / 129.24 | 188.89 / 127.60 |
+| filter: a cutoff ramp every block, Warm on / off | 93.06 / 66.97 | 92.83 / 63.39 |
+| filter: modulation every 32 samples, Warm on / off | 93.92 / 63.53 | 93.15 / 65.37 |
+| filter: 2× with the Oversampler, Warm on / off | 197.36 / 142.07 | 201.45 / 136.70 |
+| filter: 4× with the Oversampler, Warm on / off | 387.09 / 261.47 | 382.73 / 265.31 |
+| filter: bypassed | 0.06 | 0.05 |
+| filter: 16 voices × 2 stereo filters (64 channels), Warm on | 6,024.73 (28.9% of a core) | 5,995.51 |
+
+### Observations
+
+- **The Filter Control costs 0.17 ns per sample per voice**: at each of a voice's grid points, six knob ramps read in closed form, keytrack once, and both filters' cutoff and k. The filter runs at 63–123 ns per channel-sample, so this is under 0.3% of one filter.
+- **The resonance modulation input costs nothing measurable**: every `[filter]` row is within −8.3% to +5.7% of the previous commit's, a mean of +0.9%, inside the spread of the runs themselves (the previous commit's own two runs differ by up to 6.5%); the bypass row is 0.05–0.06 ns either way. Its few operations sit in the per-segment control loop beside k's ramp, not in the per-channel solve. Fed through it, the filter is within noise of W1 and W2.
+
+---
+
 ## 2026-11-15: M1.3 filter stability
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[filter-stability]"` and `"[filter]"`, 100 samples per benchmark. The previous column is commit 26cd4ec built in a separate worktree and run in the same session, alternating with this commit, four runs each (means).

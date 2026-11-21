@@ -3,7 +3,8 @@
 // response, with Warm Drive on and off; the self-oscillation threshold and
 // pitch; the passband against resonance; drive; Warm Drive's harmonics;
 // bounds under stress; bypass; response crossfades; cutoff ramps on the
-// grid; block sizes; stereo; the lifecycle; allocation; subnormals; NaN.
+// grid; the resonance modulation input; block sizes; stereo; the lifecycle;
+// allocation; subnormals; NaN.
 //
 // Tolerances are derived in each test from the model (the bilinear map of
 // the analog ladder is exact, so the small-signal response is the warped
@@ -33,6 +34,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <numbers>
 #include <span>
@@ -212,7 +214,133 @@ double energyAbove1k(std::span<const float> x, std::size_t at, double rate)
     return sum;
 }
 
+/// A linear trapezoidal ladder in double (the same equations, no
+/// saturators), fed g and k per sample: what LadderFilter is at -80 dBFS.
+std::vector<double> linearLadder(std::span<const float> x, const std::function<double(std::size_t)>& gAt,
+                                 const std::function<double(std::size_t)>& kAt)
+{
+    std::array<double, 4> s{};
+    std::vector<double> y(x.size());
+    for (std::size_t i = 0; i < x.size(); ++i)
+    {
+        const double g = gAt(i);
+        const double k = kAt(i);
+        const double big = g / (1.0 + g);
+        double sum = 0.0;
+        double power = 1.0;
+        for (std::size_t j = 4; j-- > 0;)
+        {
+            sum += power * s[j] / (1.0 + g);
+            power *= big;
+        }
+        const double u = (static_cast<double>(x[i]) - (k * sum)) / (1.0 + (k * power));
+        double in = u;
+        for (std::size_t j = 0; j < 4; ++j)
+        {
+            const double out = (big * in) + (s[j] / (1.0 + g));
+            s[j] = (2.0 * out) - s[j];
+            in = out;
+        }
+        y[i] = in;
+    }
+    return y;
+}
+
 } // namespace
+
+TEST_CASE("Ladder filter: a constant resonance modulation is setResonance() bit for bit, capped at 64 with it",
+          "[dsp][filter]")
+{
+    // The modulation adds to setResonance()'s k. With setResonance(0) and a
+    // constant modulation, k is the modulation exactly; the sum is capped at
+    // the DSP's ceiling, 64; a negative or NaN modulation counts as 0, +inf
+    // as 64. And reset() starts the grid at the modulation already set, as a
+    // note-on must, with no ramp from 0.
+    constexpr double rate = 48000.0;
+    const auto x = saw(220.0, rate, 6000, 0.8f);
+    const auto withK = [&](float knob, float modulation)
+    {
+        LadderFilter f;
+        f.setCutoff(900.0f);
+        f.setResonance(knob);
+        f.setResonanceModulation(modulation);
+        f.prepare(specAt(rate));
+        return render(f, x);
+    };
+    for (const float k : {0.0f, 0.37f, 3.0f, 4.4f, 12.0f, 64.0f})
+    {
+        CAPTURE(k);
+        const auto direct = withK(k, 0.0f);
+        CHECK(bitIdentical(withK(0.0f, k), direct));
+    }
+    CHECK(bitIdentical(withK(40.0f, 40.0f), withK(64.0f, 0.0f)));
+    CHECK(bitIdentical(withK(3.0f, -5.0f), withK(3.0f, 0.0f)));
+    CHECK(bitIdentical(withK(3.0f, std::numeric_limits<float>::quiet_NaN()), withK(3.0f, 0.0f)));
+    CHECK(bitIdentical(withK(0.0f, std::numeric_limits<float>::infinity()), withK(64.0f, 0.0f)));
+    // It adds to setResonance()'s k (1 + 2.5 is 3.5 exactly).
+    CHECK(bitIdentical(withK(1.0f, 2.5f), withK(3.5f, 0.0f)));
+}
+
+TEST_CASE("Ladder filter: the resonance modulation is read at the next grid point and runs linearly to it",
+          "[dsp][filter]")
+{
+    // As the cutoff modulation does (the g interpolation test above): a
+    // modulation set mid-segment is read at the next grid point G, and k then
+    // runs linearly from its old value at G to the new one at G + 32. At
+    // -80 dBFS the ladder is linear, so the double-precision linear ladder fed
+    // that k per sample must agree to the bound of that test, 1e-4 of the
+    // output's peak. Applying it at once, or stepping it at G, differs by
+    // more than ten times that.
+    constexpr double rate = 48000.0;
+    constexpr std::size_t n = 2048;
+    constexpr std::size_t setAt = 1000;
+    constexpr std::size_t gridPoint = 1024;
+    constexpr double k0 = 0.5;
+    constexpr double k1 = 3.5;
+    const auto x = saw(310.0, rate, n, 1e-4f);
+    LadderFilter f;
+    f.setCutoff(700.0f);
+    f.setResonanceModulation(static_cast<float>(k0));
+    f.prepare(specAt(rate));
+    Buffer buffer{1, n};
+    std::ranges::copy(x, buffer.channel(0).begin());
+    f.process(buffer.block().subBlock(0, setAt));
+    f.setResonanceModulation(static_cast<float>(k1));
+    f.process(buffer.block().subBlock(setAt, n - setAt));
+    const auto y = buffer.channel(0);
+
+    const double g = std::tan(pi * 700.0 / rate);
+    const auto gAt = [&](std::size_t)
+    {
+        return g;
+    };
+    const auto distance = [&](const std::function<double(std::size_t)>& kAt)
+    {
+        const auto reference = linearLadder(x, gAt, kAt);
+        double peak = 0.0;
+        double worst = 0.0;
+        for (std::size_t i = 0; i < n; ++i)
+        {
+            peak = std::max(peak, std::fabs(reference[i]));
+            worst = std::max(worst, std::fabs(static_cast<double>(y[i]) - reference[i]));
+        }
+        return worst / peak;
+    };
+    const double interpolated = distance(
+        [&](std::size_t i)
+        {
+            if (i < gridPoint)
+            {
+                return k0;
+            }
+            return i >= gridPoint + 32 ? k1 : k0 + ((k1 - k0) * static_cast<double>(i - gridPoint) / 32.0);
+        });
+    const double atOnce = distance([&](std::size_t i) { return i < setAt ? k0 : k1; });
+    const double stepped = distance([&](std::size_t i) { return i < gridPoint ? k0 : k1; });
+    CHECK(interpolated < 1e-4);
+    CHECK(atOnce > 1e-3);
+    CHECK(stepped > 1e-3);
+}
 
 TEST_CASE("Ladder filter: the tap table is the six responses' stage mixes", "[dsp][filter]")
 {
@@ -633,6 +761,7 @@ TEST_CASE("Ladder filter: output does not depend on the block size", "[dsp][filt
             case 4:
                 f.setDrive(16.0f);
                 f.setCutoffModulation(-1.5f);
+                f.setResonanceModulation(1.5f);
                 break;
             case 5:
                 f.setBypassed(true);
@@ -916,6 +1045,7 @@ TEST_CASE("Ladder filter: controls clamp, and NaN is safe", "[dsp][filter]")
         f.setCutoff(bad);
         f.setCutoffModulation(bad);
         f.setResonance(bad);
+        f.setResonanceModulation(bad);
         f.setDrive(bad);
         f.prepare(specAt(rate));
         const auto y = render(f, x);

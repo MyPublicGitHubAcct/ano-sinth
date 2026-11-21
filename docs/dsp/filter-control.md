@@ -6,7 +6,7 @@ Sylenth1's Filter Control panel has a Cutoff, a Resonance, a Keytrack, and the W
 - what is known about Sylenth1's Filter Control, including evidence the inventory didn't have: the developer's 2008 answer on how the knobs combine, the old LCD's Hz scale, and the knobs' default;
 - the candidate models prototyped here, and why these;
 - what each measured on `LadderFilter`: what each predicts for the settings that tutorials and users report, the effective cutoff over a grid of filter × Filter Control positions, the reachable range and where the DSP's ceiling takes over, how the knob feels, keytrack from C1 to C7, full modulation with each clamp, resonance, four ways of feeding the sum (a step, a MIDI CC sweep, a clamp during a ramp, block sizes), and CPU;
-- the recommendations, which are stage 1's: the project owner decides, and the next round builds.
+- the decision (the project owner's, 2026-11-21) and how it is built: the law in `filter_control.hpp`, a closed-form read of the global knob ramps, and a resonance modulation input on `LadderFilter`, measured and tested as built.
 
 Read [filters.md](filters.md) (the filter and its 32-sample grid), [keytracking.md](keytracking.md) (keytrack in octaves and the "Knob law" open question this page answers), and [filter-stability.md](filter-stability.md) (the DSP's ceilings and the parameter-layer clamp, F24) first.
 
@@ -90,7 +90,7 @@ Four feeds, as in the theory: **W1** the filter's ramp, **W2** the voice's ramp 
 
 ## What they measured
 
-By the hidden `[filter-control-report]` ([filter_control_report.cpp](../../tests/dsp/filters/filter_control_report.cpp), about 12 s) and the `[filter-control]` benchmarks ([filter_control_benchmark.cpp](../../tests/dsp/benchmarks/filter_control_benchmark.cpp)), on the prototypes and `LadderFilter` as built:
+Stage 1's measurements, by the hidden `[filter-control-report]` ([filter_control_report.cpp](../../tests/dsp/filters/filter_control_report.cpp), about 12 s) and the `[filter-control]` benchmarks ([filter_control_benchmark.cpp](../../tests/dsp/benchmarks/filter_control_benchmark.cpp)), on the prototypes and `LadderFilter`. Since stage 2 the report measures the library's law for the chosen model, fed as the voice will feed it; every figure in this section reproduces to the printed digit but one ([Results, as built](#results-as-built)):
 
 ```sh
 cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
@@ -349,27 +349,150 @@ And the self-oscillation at those k (440 Hz, 48 kHz):
 
 The combining law costs 0.1 ns per sample per voice, against the filter's 90; feeding everything through the modulation input is within the filter's run-to-run noise of W1.
 
-## Recommendations
+## The decision
 
-*Stage 1: these are recommendations for the project owner's decision. Nothing here is built; the next round builds what is chosen, test-first, and replaces the prototypes.*
+*Decided by the project owner on 2026-11-21: every recommendation of stage 1, as written ([PLAN.md](../../PLAN.md), Decisions log). The stage-1 reasons are kept in the last column. [As built](#as-built) says how each one is built and measured.*
 
-| # | Question | Recommendation | Why |
+| # | Question | Decision | Why (stage 1) |
 |---|---|---|---|
-| 1 | **Cutoff: where the terms combine** | **(a2): add in knob units, then one exponential law at 1 octave per unit**: S = [Cutoff X + its modulation] + [Filter Control + Cutoff AB modulation] + Keytrack × (pitch − 9)/120, cutoff = 4.5675 Hz × 2^S (146.16 Hz with one knob at 5 and the other at 0; 4,677 Hz at the defaults). Equivalently, octaves added: every term is one octave per unit. | The developer, twice: the knob values add, on a logarithmic scale, and the base frequency comes from their sum. That rules out (c). Keytrack adds knob units and keytrack 10 is 1:1, which forces 1 octave per unit, so not (a1) (1320 cents per octave). Among the 1-octave members only the anchor is free: (a2)'s is the old LCD's one exact reading, and it fits every reported setting (default open-ish, one knob at 10 fully open, "adjust both" when the other is low, the "useless" display five octaves under the cutoff at the defaults, plausible tutorial patches). (b) fits no reading and makes every reported patch dark. The anchor is one constant: F3/F27 measure it. |
-| 2 | **Clamping** | **Each control plus its own modulation to [0, 10]** (Cutoff X with Cutoff X's modulation; the Filter Control with Cutoff AB's), **then add; keytrack after the clamps, unclamped** (as its source is, F20); **no clamp on the sum**; then the DSP's [1 Hz, 0.495 fs], which takes over at S = 12.22 (44.1 kHz), 12.34 (48), 13.34 (96), 14.34 (192). The same for the resonances. | F24's hypothesis, applied to each control as it says. The sum to [0, 10] contradicts "fully open at 10" and the developer's top at half the sample rate (the cutoff could never pass 4.68 kHz) and makes the Filter Control's Resonance do nothing for a filter at 10. The sum to [0, 20] behaves the same except where modulation could borrow the other knob's room; nothing separates them, per control is what F24 states, and F29 settles it. Under (a2) the bottom (S = 0, 4.57 Hz) is above the DSP's 1 Hz floor; only keytrack below A-1 goes lower (2.72 Hz at MIDI 0). |
-| 3 | **Resonance** | **Added in knob units** (the same as adding k under F5's linear law), each control plus its modulation clamped to [0, 10], then F5's law on the sum: **k = 0.6 × (Resonance X + Filter Control Resonance), 0 to 12**. Self-oscillation from a sum of 6.67. | The developer's 2008 answer covered "knob values" for a question about cutoff and resonance. Multiplied and the larger contradict "added". k 12 is bounded and well-behaved (−10.4 dBFS, −137.7 cents, Warm on; the DSP is correct to 64). The Filter Control's Resonance default is not known (F26); 0 keeps a filter's own knob meaning what F5 says. |
-| 4 | **Where it lives** | **`libs/dsp`: a header next to `keytrack.hpp` (`filters/filter_control.hpp`) of `constexpr` pure functions**: the clamped sum in knob units for one filter (cutoff and resonance), with the knob range as a parameter, and the law's two numbers (anchor, octaves per unit) as parameters with (a2)'s as defaults. No state, no JUCE. The parameter layer (M1.9) supplies smoothed knob positions; the voice (M1.4) adds its per-voice modulation and keytrack and calls it. | The clamp couples global knobs with per-voice modulation at the grid rate, which only the voice can see: the parameter layer has no per-voice modulation. A pure function is what both the voice and its tests can share, as `keytrackOctaves` is. The DSP still takes physical units: the function's output is octaves and k. |
-| 5 | **What runs where** | **Per block** (global): the 10 ms ramps of the knob positions (both Cutoffs, the Filter Control's Cutoff and Resonance, both Resonances), as ramps whose value can be read at any sample. **Per voice, per 32-sample grid point** (that voice's grid, counted from its note's `reset()`): the knob positions at the end of the coming segment, plus the voice's modulation to Cutoff X / AB and Reso X / AB, plus keytrack units, clamped and summed: 0.1 ns per sample per voice. | Voices' grids are not aligned (each counts from its own note-on), so a global smoother advanced on one grid would read the wrong instant; a ramp read in closed form at each voice's segment end gives every voice W1's exact sequence. |
-| 6 | **The ramp** | **W2: the knobs ramp once, in the voice's sum; the whole cutoff goes into `setCutoffModulation`, and `setCutoff` stays at the anchor**, so the filter's own ramp never runs. Not W1, not both. | W2 is W1 to 0.000 cents wherever no clamp bites, and exact where one does (W1: 2,400 cents off and 24 dB more click). Ramping twice lags 18 ms. No ramp zippers in 94-cent steps on a MIDI CC. The same CPU. Resonance needs the same treatment in stage 2: `setResonance()` restarts a 10 ms ramp at each call, so per-grid-point modulation of k through it would be slewed; stage 2 measures a k fed per grid point against that. |
-| 7 | **The keytrack knob law** | **Stands**: amount = Keytrack / 10, linear, reference A-1; `keytrackOctaves` unchanged. Under recommendation 1 it is also exactly the knob-unit term, so the knob and the misc source (F20) can't disagree. | Keytrack in knob units at 1 octave per unit is `keytrackOctaves`. At keytrack 10, Cutoff A + Filter Control = 1.59 plays each note's own frequency (A-1's 13.75 Hz at the reference), less the self-oscillation detune. |
-| 8 | **The fast-sweep overshoot** | **Record it; change nothing in this task.** Carry it to M1.5 (the modulation rates) and M1.8 (golden renders), with F30 to compare against Sylenth1. | It is the trapezoidal ladder's response (the reference agrees), independent of the combining law and of the clamp choice except that clamps which pin the cutoff hide it. |
+| 1 | **Cutoff: where the terms combine** | **(a2): add in knob units, then one exponential law at 1 octave per unit**: S = [Cutoff X + its modulation]₀¹⁰ + [Filter Control Cutoff + Cutoff AB modulation]₀¹⁰ + Keytrack × (pitch − 9)/120, cutoff = 4.5675 Hz × 2^S (146.16 Hz with one knob at 5 and the other at 0; 4,677 Hz at the defaults). Built: `filterCutoffUnits`, `filterCutoffOctaves` ([filter_control.hpp](../../libs/dsp/include/anoesis/dsp/filters/filter_control.hpp)). | The developer, twice: the knob values add, on a logarithmic scale, and the base frequency comes from their sum. That rules out (c). Keytrack adds knob units and keytrack 10 is 1:1, which forces 1 octave per unit, so not (a1) (1320 cents per octave). Among the 1-octave members only the anchor is free: (a2)'s is the old LCD's one exact reading, and it fits every reported setting (default open-ish, one knob at 10 fully open, "adjust both" when the other is low, the "useless" display five octaves under the cutoff at the defaults, plausible tutorial patches). (b) fits no reading and makes every reported patch dark. The anchor is one constant: F3/F27 measure it. |
+| 2 | **Clamping** | **Each control plus its own modulation to [0, 10]**, **then add; keytrack after the clamps, unclamped; no clamp on the sum**; then the DSP's [1 Hz, 0.495 fs], from S = 12.22 (44.1 kHz), 12.34 (48), 13.34 (96), 14.34 (192). The same for the resonances. Built: `clampToKnob`. | F24's hypothesis, applied to each control as it says. The sum to [0, 10] contradicts "fully open at 10" and the developer's top at half the sample rate (the cutoff could never pass 4.68 kHz) and makes the Filter Control's Resonance do nothing for a filter at 10. The sum to [0, 20] behaves the same except where modulation could borrow the other knob's room; nothing separates them, per control is what F24 states, and F29 settles it. |
+| 3 | **Resonance** | **Added in knob units**, each control plus its modulation clamped to [0, 10], then **k = 0.6 × (Resonance X + Filter Control Resonance), 0 to 12**. Self-oscillation from a sum of 6.67. The Filter Control's Resonance defaults to 0 until F26 is measured. Built: `filterResonanceUnits`, `filterResonanceK`. | The developer's 2008 answer covered "knob values" for a question about cutoff and resonance. Multiplied and the larger contradict "added". k 12 is bounded and well-behaved (−10.4 dBFS, −137.7 cents, Warm on; the DSP is correct to 64). 0 keeps a filter's own knob meaning what F5 says. |
+| 4 | **Where it lives** | **`libs/dsp/include/anoesis/dsp/filters/filter_control.hpp`**: `constexpr` pure functions, no state, no JUCE, next to `keytrackOctaves`. The knob range, the anchor, and the octaves per unit are parameters (`FilterControlLaw`, with k per unit too), with (a2)'s values as defaults. It returns octaves (above the anchor) and k. | The clamp couples global knobs with per-voice modulation at the grid rate, which only the voice can see. A pure function is what both the voice and its tests can share, as `keytrackOctaves` is. The DSP still takes physical units. |
+| 5 | **What runs where** | **The knob ramps are global**, and their value can be read at any sample (`LinearSmoother::valueAfter`, [smoother.hpp](../../libs/dsp/include/anoesis/dsp/control/smoother.hpp)). **The clamped sum is computed per voice, at each of that voice's own 32-sample grid points**, with the knob values at the end of the coming segment. | Voices' grids are not aligned (each counts from its own note-on), so a global smoother advanced on one grid would read the wrong instant; a ramp read in closed form at each voice's segment end gives every voice W1's exact sequence. |
+| 6 | **The ramp** | **W2: the voice ramps the knobs once, over 10 ms, and feeds the whole cutoff into `setCutoffModulation`; `setCutoff` stays at the anchor.** For k, stage 2 measured `setResonance()` per grid point first: it slews, so k goes through a new resonance modulation input, `setResonanceModulation` ([below](#feeding-k-a-resonance-modulation-input)), with `setResonance` at 0. | W2 is W1 to 0.000 cents wherever no clamp bites, and exact where one does (W1: 2,400 cents off and 24 dB more click). Ramping twice lags 18 ms. No ramp zippers in 94-cent steps on a MIDI CC. The same CPU. |
+| 7 | **The keytrack knob law** | **Stands**: amount = Keytrack / 10, linear, reference A-1; `keytrackOctaves` unchanged. Under decision 1 it is exactly the knob-unit term, so the voice passes `keytrackOctaves(pitch, Keytrack / 10)` as keytrack's knob units. | At keytrack 10, Cutoff A + Filter Control = 1.59 plays each note's own frequency (A-1's 13.75 Hz at the reference), less the self-oscillation detune. |
+| 8 | **The fast-sweep overshoot** | **Recorded only; nothing changes for it in this task.** Carried to M1.5 (the modulation rates) and M1.8 (golden renders), with F30 to compare against Sylenth1. | It is the trapezoidal ladder's response (the reference agrees), independent of the combining law and of the clamp choice except that clamps which pin the cutoff hide it. |
 
-### What this pushes back on
+### What it changed in the inventory
 
-- **F3 (the cutoff knob's law).** The placeholder, 10 Hz × 2^(11·x) per knob, doesn't survive knob-unit addition. With the knobs defaulting to 5 it puts the default patch at 20.5 kHz and half of the knob square at the ceiling (44.1 kHz), and its 1.1 octaves per unit makes keytrack 10 track at 1320 cents per octave. It also misses the old LCD's only exact reading (452.5 Hz at 5 against 146.16) and the tutorial's "7 ≈ 800 Hz" (2,079). Proposed: **the law is over the sum, 4.5675 Hz × 2^S, 1 octave per unit**, so one knob spans 10 octaves (keytracking.md's condition for 1:1) and the sum 20. Its "how to settle" needs changing too: the v3.040 Hz display is the developer's "same (faulty) Hz scale", each knob's own term, not the cutoff, so reading the LCD measures the anchor of that display (F27), and the effective cutoff must be measured with the Filter Control at 0 and at 5.
-- **F5 (resonance).** The law applies to the sum, so k = 0.6 per unit reaches 12 at both knobs' tops, not 6, and self-oscillation starts at a sum of 6.67 (from Resonance A at 6.67 alone, or at 1.67 with the Filter Control at 5). F5's measurement must hold the Filter Control's Resonance at 0 and then repeat at 5 and 10.
-- **F24 (the clamp).** It stands, applied to each control with its own modulation, and not to the sum. Its consequence changes: the voice can ask for k up to 12 (two clamped controls added), not 6, and for a cutoff sum up to 20 units (6–8 of them above the ceiling, which the DSP takes over).
-- **The keytrack knob law** stands, but its 1:1 now depends on the cutoff law: if the demo finds r ≠ 1 octave per unit, then either Sylenth1's keytrack isn't 1:1 (F21) or keytrack enters in octaves rather than knob units (F20's second test), and the term must be scaled.
+- **F3 (the cutoff knob's law).** Replaced: the placeholder 10 Hz × 2^(11·x) per knob does not survive knob-unit addition (the default patch at 20.5 kHz, half of the knob square at the ceiling, keytrack 10 at 1320 cents per octave, and it misses the LCD's 146.16 Hz at 5 and "7 ≈ 800 Hz"). The adopted hypothesis: **the law is over the sum, 4.5675 Hz × 2^S, 1 octave per unit**, so one knob spans 10 octaves (keytracking.md's condition for 1:1) and the sum 20. Its "how to settle" measures the effective cutoff with the Filter Control at 0 and at 5, not the LCD: the v3.040 Hz display is the developer's "same (faulty) Hz scale", each knob's own term (F27).
+- **F5 (resonance).** The law applies to the sum: k = 0.6 per unit reaches 12 at both knobs' tops, not 6, and self-oscillation starts at a sum of 6.67 (Resonance A at 6.67 alone, or at 1.67 with the Filter Control at 5). F5's measurement holds the Filter Control's Resonance at 0, then repeats at 5 and 10 (F28).
+- **F12 (the combining law)** and **F24 (the clamp)**. Adopted as above. F24's clamp of each control plus its own modulation is now built into the law for cutoff and resonance, which the voice computes (it is the only place that sees both the global knob and the voice's modulation); for Drive and every other destination it stays with M1.5/M1.9. The voice can ask for k up to 12 (two clamped controls added), not 6, and for a cutoff sum up to 20 units, 6–8 of them above the ceiling.
+- **The keytrack knob law** stands, but its 1:1 depends on the cutoff law: if the demo finds r ≠ 1 octave per unit, then either Sylenth1's keytrack isn't 1:1 (F21) or keytrack enters in octaves rather than knob units (F20's second test), and the term must be scaled.
+
+## As built
+
+### The functions
+
+[filter_control.hpp](../../libs/dsp/include/anoesis/dsp/filters/filter_control.hpp) holds the law as `constexpr` functions with no state and no includes, in keytrack.hpp's style:
+
+- `FilterControlLaw` holds the law's numbers: the knob range (`knobMin` 0, `knobMax` 10), `anchorHz` (4.5675, which is 146.16 Hz five octaves down, exactly in float), `octavesPerUnit` (1), and `kPerUnit` (0.6, F5). `filterControlLaw` is the decided instance. A demo measurement (F3, F5, F27–F29) changes a default, not a function.
+- `FilterCutoffTerms` and `FilterResonanceTerms` name one filter's terms in knob units: its own knob and modulation, the Filter Control's knob and the AB modulation, and, for the cutoff, keytrack.
+- `clampToKnob(units)` holds one control plus its modulation to the knob's range. It is written out rather than `std::clamp`, so the header needs no include, and NaN passes through.
+- `filterCutoffUnits(terms)` is S: the two clamped brackets added, then keytrack, unclamped. `filterCutoffOctaves(terms)` is octavesPerUnit × S, the octaves above the anchor that the voice feeds to `setCutoffModulation()`.
+- `filterResonanceUnits(terms)` is the two clamped resonance brackets added (0 to 20), and `filterResonanceK(terms)` is kPerUnit × that (0 to 12).
+
+Keytrack's term is in knob units: the developer's misc source times the knob, Keytrack × (pitch − 9)/120. At one octave per unit that is `keytrackOctaves(pitch, Keytrack / 10)`, so the voice passes that, computed once per voice for both filters. With other law numbers it is still knob units, scaled by `octavesPerUnit` like every other term, which is why F3's 1.1 octaves per unit would make keytrack 10 track 1.1:1.
+
+NaN in gives NaN out, as keytrack.hpp does. Note what that now means on the filter: with the whole cutoff in the modulation input, a NaN cutoff modulation counts as 0 octaves, so the cutoff falls to the anchor, 4.57 Hz, where with keytrack alone it meant "no keytrack". A NaN k counts as 0. The voice must not feed NaN; whether it can is a question for M1.4 (recorded there in PLAN.md).
+
+### The knob ramps: one global ramp, read at each voice's grid
+
+The parameter layer (M1.9) ramps each knob linearly over 10 ms from its event's sample: Filter A's and B's Cutoff and Resonance, and the Filter Control's Cutoff and Resonance. Each is one `LinearSmoother`, global, shared by every voice. A voice's 32-sample grid counts from its own note-on, so voices read the ramps at different samples. `LinearSmoother` had no way to read its value at an arbitrary offset, so it gains the smallest thing that does: `valueAfter(n)`, the value `next()` would return n calls from now, computed with the same `start + step·k` expression, so it is that value bit for bit, without advancing ([parameter-smoothing.md](parameter-smoothing.md)). The parameter layer positions the ramps at the start of each piece of a host block, split at events; a voice at a grid point G reads `valueAfter(G + 32 − pieceStart)`; after the piece, the ramps `skip()` its length. Reading n ahead after skipping m is the same as reading m + n ahead, so the host's block size changes nothing.
+
+The ramp starts at the event's own sample, wherever that falls on any voice's grid. Each voice then reads it exactly at its segment ends, except for the one segment that holds the event: that segment's end was computed at its grid point, before the event, so it keeps the old value. The filter latches a segment's end when the segment starts, so no feed can do better without changing the filter. W1, the filter's own ramp, is as late there and then lags for the whole ramp (it starts at the next grid point). Stage 1's W2 advanced per-voice smoothers on the grid, so a mid-segment event started its ramp at the next grid point too. Where events fall on the grid, as in every stage-1 measurement, the two are the same.
+
+### Feeding k: a resonance modulation input
+
+`setResonance()` restarts its 10 ms ramp at every call. So k fed through it at each grid point is slewed: each call moves 32/480 of the way towards a target that has already moved. Stage 2 measured that first, against the knob's own ramp, with stage 1's metrics. All figures are at 48 kHz, from the report:
+
+| Feed | Step to 90% | Distance from the knob's ramp | Click | CC sweep: largest step / roughness / lag | LFO on Reso A, ±1.2 in k: swing and lag at 2 / 5 / 20 Hz |
+|---|---|---|---|---|---|
+| The filter's ramp: `setResonance()` once at the event (the knob's own ramp; no per-voice modulation possible) | 9.33 ms | 0.0000 | −57.3 dB | | |
+| `setResonance()` at each grid point | **18.00 ms** | 1.0832 in k | −67.8 dB | 0.0029 / 0.00039 / **0.0526 (17.5 ms)** | **0.993× / 9.3 ms; 0.957× / 9.1 ms; 0.636× / 6.7 ms** |
+| `setResonanceModulation()` at each grid point (built) | 9.33 ms | 0.0000 | −57.4 dB | 0.0031 / 0.00091 / 0.0306 (10.2 ms) | 1.000× / 0.0 ms at each |
+| Steady (no step) | | | −115.3 dB | | |
+
+The step is the Filter Control's Resonance from 1 to 4 with Resonance A at 2 (k 1.8 → 3.6), at 1,169 Hz, under a 150 Hz sine at −12 dBFS. The sweep is a 7-bit MIDI CC from 0 to 10 in 2 s (k 0 → 6) in host blocks of 512; the knob itself lags 10.2 ms behind the unquantised sweep, its 10 ms ramp.
+
+**`setResonance()` per grid point slews**: it smooths twice, as W3 does for the cutoff. A step takes 18 ms to reach 90% where the knob's ramp takes 9.3. A sweep lags 7.3 ms more. An LFO on Reso X or AB loses swing and lags (−3.9 dB and 6.7 ms at 20 Hz). Its quieter click is only the slower ramp. So k goes through a new input:
+
+- **`LadderFilter::setResonanceModulation(k)`**, analogous to `setCutoffModulation`: unramped, read at the next grid point, where k then runs linearly over the 32 samples to it (as g does). It is clamped to [0, 64], and NaN counts as 0. It adds to `setResonance()`'s ramped k, and the sum is capped at 64, the DSP's ceiling. `reset()` starts the grid at the modulation already set, as a note-on must.
+- **The voice feeds the whole k through it** at each grid point, the k for the segment's end, with `setResonance(0)`, as the cutoff goes through `setCutoffModulation()` with `setCutoff()` at the anchor. At the grid points k is then exactly the voice's k; between them it is linear, which is exact on a linear knob ramp except at the ramp's two corners.
+- With the modulation at 0, k is `setResonance()`'s exactly (k + 0 is k, under 64), so every existing filter figure and test is unchanged, bit for bit. The change is a few float operations per sample in the control loop that already computes k, not in the solve. `LadderFilter` grows from 344 to 360 bytes.
+
+### How a voice uses it (M1.4)
+
+```cpp
+// Global, per block (the parameter layer, M1.9): each knob is a LinearSmoother
+// ramping 10 ms from its event's sample; the block is split at events, and the
+// ramps skip() each piece's length after the voices have read it.
+//
+// Per voice, at each of its filter's 32-sample grid points G (counted from its
+// note-on), for the END of the coming segment (gridEnd = G + 32):
+const auto ahead = gridEnd - pieceStart;
+const float keytrack = keytrackOctaves(pitch(gridEnd), keytrackKnob / 10.0f); // once for both filters
+filterA.setCutoffModulation(filterCutoffOctaves({
+    .cutoff = cutoffA.valueAfter(ahead),
+    .cutoffModulation = modCutoffA(gridEnd),
+    .controlCutoff = controlCutoff.valueAfter(ahead),
+    .controlModulation = modCutoffAB(gridEnd),
+    .keytrack = keytrack,
+}));
+filterA.setResonanceModulation(filterResonanceK({
+    .resonance = resonanceA.valueAfter(ahead),
+    .resonanceModulation = modResoA(gridEnd),
+    .controlResonance = controlResonance.valueAfter(ahead),
+    .controlModulation = modResoAB(gridEnd),
+}));
+// ... the same for filter B with its own knobs and Cutoff B / Reso B modulation.
+// At the note-on: setCutoff(filterControlLaw.anchorHz) and setResonance(0) (both
+// held for good), the two modulations for the note-on's sample, then reset().
+```
+
+The tests' stand-in for the parameter layer and the voice, [filter_control_support.hpp](../../tests/dsp/filters/filter_control_support.hpp), does exactly this: global `KnobRamps`, host blocks split at events, any number of voices with their own note-ons, modulation, and pitch. The report uses it to measure the other feeds (W1, W3, W4, k through `setResonance()`) against it.
+
+### Results, as built
+
+The `[filter-control-report]` now measures the library's law for the chosen model, (a2) with each control clamped and the resonances added, fed through the stand-in voice, beside stage 1's other candidates, which stay in [filter_control_candidates.hpp](../../tests/dsp/filters/filter_control_candidates.hpp) for comparison. Every figure in [What they measured](#what-they-measured) reproduces to the printed digit, with one exception:
+
+- **W2 against W1 through the Filter Control step: 0.001 cents (stage 1: 0.000).** The prototype held `setCutoff` at 2^2.1914047, a constant for log₂ 146.16 − 5; the build holds it at 4.5675 Hz in float, whose log₂ is 0.0003 cents from that constant, and adds the knob units to it in one rounding. One ulp of log₂ of the cutoff at 8–16 octaves is 2⁻²⁰ octaves, 0.0011 cents. The test bound for W2 against W1 is 0.014 cents, counted from the roundings on each path.
+
+Two report texts changed with the build: the block-size row now says that W2's global ramp starts at the event's sample (stage 1's started at the next grid point), and the report adds the resonance-feeding section above.
+
+**CPU** (`tools/bench.sh "[filter-control]"`, `relwithdebinfo`, Apple M1 Ultra, virtualised):
+
+| Benchmark | ns per block of 512 | ns per sample |
+|---|---:|---:|
+| `filterCutoffOctaves` with keytrack, 2 filters × 16 grid points | 40 | 0.08 |
+| `filterResonanceK`, 2 filters × 16 grid points | 21 | 0.04 |
+| **The voice's whole feed**: 6 knob ramps read with `valueAfter`, keytrack, both filters' cutoff and k, 16 grid points | **87** | **0.17** |
+| (a1), (b), (c), stage 1's other candidates, for comparison | 45, 39, 182 | 0.09, 0.08, 0.36 |
+| `LadderFilter`, W1 (the knobs through `setCutoff`) | 45,332 | 88.5 |
+| `LadderFilter`, W2 (the whole sum as modulation) | 48,003 | 93.8 |
+| `LadderFilter`, W2 with k through `setResonanceModulation` (built) | 45,675 | 89.2 |
+
+The whole Filter Control costs 0.17 ns per sample per voice, against the filter's 63–123 ns per channel. The resonance modulation input costs nothing measurable: against commit 9dec978 in the same session, two interleaved runs each, every `[filter]` row is within −8.3% to +5.7%, a mean of +0.9%, where the previous commit's own two runs differ by up to 6.5% ([baselines](../performance/baselines.md)). Its few operations sit in the per-segment loop that already ramps k, not in the per-channel solve.
+
+### Tests
+
+[filter_control_test.cpp](../../tests/dsp/filters/filter_control_test.cpp), 13 tests; two in [ladder_filter_test.cpp](../../tests/dsp/filters/ladder_filter_test.cpp) (with the resonance modulation added to its block-size and NaN tests); one in [smoother_test.cpp](../../tests/dsp/control/smoother_test.cpp). Each tolerance is derived in the test:
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| The law's values | 0, 5, 5, 10, 20 octaves for S = 0, one knob at 5 (either), the defaults, both tops, evaluated at compile time; the law's numbers; on the filter 4.5675, 146.16, and 4,677.12 Hz; `static_assert`s on the sums and on `noexcept` | exact; on the filter 2⁻¹⁹ + 2⁻²⁴ relative: log₂ of the anchor (2⁻²² octaves), the sum (2⁻²⁰), exp2 (2⁻²³ relative), and the anchor's own rounding |
+| Each control clamped, the sum not | modulation past a control's end is lost even with room in the other (so not the sum to [0, 20]); each control's modulation is its own; modulation brings a control at its end back; all slots at ±160 give 0 and 20; the range as a parameter | exact |
+| Keytrack after the clamps | a filter at its top still rises with the note (23 units), a closed one falls below 0; keytrack 10 over MIDI 0–129; the knob-unit term is `keytrackOctaves` bit for bit at every quarter tone from note −24 to 150 at six amounts, and the developer's Keytrack × (pitch − 9)/120 to rounding | exact; 5 × 2⁻²⁴ relative (three roundings against two) |
+| Resonance | 0, 3, 6, 12; self-oscillation at a sum of 20/3 either way; each control clamped with its own modulation; ±160 on every slot stays in 0–12; k per unit as a parameter | one or two roundings of 0.6 × the sum (2⁻²⁴ each) |
+| The parameters | F3's 1.1 octaves per unit scales the sum and keytrack alike; the units don't depend on the slope | one rounding |
+| The ceiling | S* = 12.22, 12.34, 13.34, 14.34 at 44.1, 48, 96, 192 kHz; on the filter, S* − 0.01 is the law and S* + 0.01 is 0.495 fs exactly | the printed digits; 0.01 unit is 12 cents, far outside rounding |
+| NaN | NaN in any term gives NaN out | exact |
+| The −12 dB point | ten settings (S from −0.75 to 20, a clamp, keytrack at C7 and at note 0) at 44.1 and 96 kHz, fed as the voice feeds it | stage 1's 0.14 cents: the filter tests' small-signal bound of 4·10⁻⁵ at \|H\| = 1/4, and LP24's 12.04 dB per octave there |
+| Self-oscillation from 6.67 | Resonance A 6.65 decays and 6.6833 grows; at 1.65 and 1.6833 with the Filter Control at 5; Warm on and off; through the voice's resonance input | the filter tests' pinned threshold, k 3.99 and 4.01: 1/60 of a unit either side |
+| W2 is W1 where no clamp bites | a Filter Control step and a 7-bit CC sweep, every grid point; W4 misses by more than 24 cents | 12 × 2⁻²⁰ octaves (0.014 cents), the roundings of the two paths counted in the test |
+| Exact where a clamp bites mid-ramp | A 2 → 9 with +3 of modulation and the Filter Control at 2: every grid point is the clamp of the ramped knob in double; W1 is over an octave off | the same 0.014 cents |
+| Each voice reads the ramp at its own grid | two voices (note-ons 0 and 13), an event at sample 1000 on neither grid: each segment end is the ramp there, except the segment that holds the event (the old value); a voice's output is the same with or without the other | the same 0.014 cents; bit for bit |
+| Block sizes, allocation | events at arbitrary samples, two voices, LFOs on Cutoff X and Reso AB and Reso X, keytrack 7 on a glide: blocks of 1 and 37 against 4096 | bit for bit; 0 allocations |
+| The resonance modulation input (ladder_filter_test.cpp) | constant: `setResonance()` bit for bit at k 0–64; the sum capped at 64; negative, NaN, +inf; it adds to `setResonance()`'s k. A change mid-segment: read at the next grid point and linear to it, against a double linear ladder fed that k per sample; applied at once, or stepped at the grid point, differs by over ten times the bound | bit for bit; 10⁻⁴ of the peak, the g-interpolation test's bound |
+| `valueAfter` (smoother_test.cpp) | bit for bit what `next()` returns, in seven states; not advancing; the target past the end; unchanged by where `skip()` splits it; no ramp time | bit for bit |
+
+Red first: against inert stubs (every law function returning 0, `valueAfter` returning the current value, `setResonanceModulation` doing nothing), all 7 law tests, the `valueAfter` test, and both resonance-input tests failed; the behaviour tests were written after the law was green and the input built. Then 25 deliberate breaks, one at a time, each run against the tests that cover it:
+
+- **The law** (12): the anchor at 146.16 Hz; F3's 1.1 octaves per unit; k per unit ignored; the sum clamped to [0, 20] or to [0, 10] instead of each control; keytrack inside the clamp; only the knob clamped, not knob plus modulation; Cutoff AB's modulation in filter X's bracket; resonance multiplied, the larger, or its sum clamped to [0, 10]; NaN clamped to the bottom. Six were stopped at compile time by the `static_assert`s (1.1 octaves per unit, the sum to [0, 20], keytrack inside the clamp, the knob alone clamped, the AB modulation swapped, resonance multiplied); the rest by one to seven tests each.
+- **`valueAfter`** (4): one sample late, n ignored, the current value past the ramp's end, accumulated as current + step·n. Each caught by its own test and by one to four Filter Control tests on the filter.
+- **The resonance input** (7): stepped at the grid point, applied at once, the sum not capped at 64, NaN not mapped to 0, negative allowed, and two in `reset()`. All caught but one: `reset()` setting the segment's start to 0 rather than its end is unobservable, because the first grid point overwrites the start with the end before any sample uses it, exactly as for g. The meaningful line, the segment's end, was broken instead (left at 0), and is caught by both tests.
+- **The voice's feed** in the stand-in (2): the grid point's value instead of the segment end's (caught by three tests), and the ramps read from the host block's start instead of the piece's (caught by the block-size test). They keep the stand-in honest for M1.4.
 
 ## References
 

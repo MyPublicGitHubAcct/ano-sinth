@@ -38,6 +38,7 @@ enum class SmoothingShape : std::uint8_t
 ///   setRampTime(seconds)  applies from the next setTarget()
 ///   setTarget(value)      starts a new ramp from the current value
 ///   next()                advances one sample and returns the new value
+///   valueAfter(n)         (linear) the value n samples ahead, not advancing
 ///
 /// All members except prepare() are real-time safe. Doc:
 /// docs/dsp/parameter-smoothing.md
@@ -164,6 +165,27 @@ public:
         {
             sample = next();
         }
+    }
+
+    /// The value next() will return `samples` calls from now (currentValue()
+    /// at 0), without advancing: the ramp read in closed form at any sample
+    /// ahead, bit for bit what next() and skip() give. Lets many readers share
+    /// one ramp, each at its own offsets (the voices reading the global knob
+    /// ramps at their own grid points, docs/dsp/filter-control.md). Linear
+    /// only: an exponential ramp would need a pow per read.
+    [[nodiscard]] float valueAfter(std::size_t samples) const noexcept
+        requires(Shape == SmoothingShape::linear)
+    {
+        if (samples == 0)
+        {
+            return current;
+        }
+        if (samples >= remainingSteps)
+        {
+            return target;
+        }
+        // next()'s expression at the step it would be on.
+        return start + (step * static_cast<float>(activeLength - (remainingSteps - samples)));
     }
 
     /// The value most recently returned by next() (or set directly).

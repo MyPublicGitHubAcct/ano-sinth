@@ -285,9 +285,9 @@ Keytracking costs nothing that matters: at most 0.23 ns per sample per voice to 
 | **Knob law (hypothesis for M1.9)** | **a = Keytrack / 10, linear**; reference A-1. How it combines with the cutoff knobs is task 6 (F12): **if the cutoffs add in knob units, F3's law must span 10 octaves for keytrack 10 to be 1:1** (F3's 11-octave placeholder would give 1.1:1). | The developer's "additive" in knob units, and Chris-S's one-to-one at 10. The DSP takes octaves, so this is a mapping in the parameter table, settled by F21's slope measurement. |
 | **The solver failure near Nyquist** | **Fix it in M1.3 task 7 (stability), and do that task before task 6**, test-first, with a test that holds the cutoff near 0.495 fs at k up to 8, Warm on and off. | It is a defect in the built filter, reachable with the cutoff knob alone at 44.1 kHz and made easier to reach by keytrack. Keytrack's own build doesn't depend on it, since it adds octaves to an input that already exists. |
 
-### Leaving room for task 6
+### How task 6 combined it
 
-The Filter Control's combining law (F12) is open, and this round doesn't settle it. Keytrack produces one number per voice: an offset in octaves, already scaled by its amount. Task 6 decides how it combines with Filter A's or B's cutoff and the Filter Control's cutoff. For example, all three may add in knob units before one exponential law, or in octaves after it. Either way keytrack stays an input to that sum: in octaves if the law adds octaves, or converted by the cutoff law's octaves per knob unit if it adds in knob units. Stage 1 of task 6 ([filter-control.md](filter-control.md), 2026-11-21) recommends knob units at 1 octave per unit, where the two are the same number, so `keytrackOctaves` would need no change.
+This round left the Filter Control's combining law (F12) open: keytrack produces one number per voice, an offset in octaves already scaled by its amount, and task 6 decided how it combines with Filter A's or B's cutoff and the Filter Control's. Task 6 decided on 2026-11-21 ([filter-control.md](filter-control.md)): all three add in knob units, keytrack after the two clamped knobs and unclamped, through one law at **1 octave per unit**. There keytrack's knob units (the developer's Keytrack × (pitch − 9)/120) and `keytrackOctaves(pitch, Keytrack / 10)` are the same number, bit for bit, so the voice passes `keytrackOctaves`'s value as the `keytrack` term of `filterCutoffOctaves`, and this round's function is unchanged. If the demo finds another slope (F3), the term scales with it, and keytrack 10 would no longer be 1:1 (F20, F21).
 
 ## How it is applied here
 
@@ -314,9 +314,10 @@ const float tune = masterTuneSemitones(masterTuneHz);
 // as the value g reaches at the next grid point.
 const float pitch = key + glide.at(gridEnd) + bendSemitones(gridEnd) + tune; // not drift, not osc offsets
 const float keytrack = keytrackOctaves(pitch, keytrackKnob / 10.0f);
-// Task 6 combines it with the cutoffs; with octaves added, for example:
-filterA.setCutoffModulation(keytrack + modulationOctavesA);
-filterB.setCutoffModulation(keytrack + modulationOctavesB);
+// Task 6's law adds it, in knob units, after each filter's clamped knobs
+// (filter-control.md has the whole feed):
+filterA.setCutoffModulation(filterCutoffOctaves({/* the knobs and Cutoff A / AB modulation */ .keytrack = keytrack}));
+filterB.setCutoffModulation(filterCutoffOctaves({/* the knobs and Cutoff B / AB modulation */ .keytrack = keytrack}));
 // The misc source (M1.5): keytrackSource(pitch).
 ```
 

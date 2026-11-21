@@ -2,9 +2,12 @@
 // Copyright (c) 2026 Anoesis Audio
 
 // Candidate combining laws for Sylenth1's Filter Control (M1.3 task 6,
-// inventory F12; docs/dsp/filter-control.md). Test-only prototypes, measured
-// by the hidden [filter-control-report] and the [filter-control] benchmarks
-// on the real LadderFilter. Nothing here is library code.
+// inventory F12; docs/dsp/filter-control.md), measured by the hidden
+// [filter-control-report] and the [filter-control] benchmarks on the real
+// LadderFilter. The chosen model, (a2) with each control clamped and the
+// resonances added (the project owner's decision, stage 2), now calls the
+// library's filter_control.hpp; the others stay here as stage 1 built them,
+// for comparison. Nothing else here is library code.
 //
 // The Filter Control's Cutoff and Resonance act on filters A and B at once;
 // the developer: the knob values "are added to the knob values of both
@@ -20,12 +23,17 @@
 
 #pragma once
 
+#include <anoesis/dsp/filters/filter_control.hpp>
+#include <anoesis/dsp/filters/keytrack.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 
 namespace anoesis::test::filter_control
 {
+
+namespace dsp = anoesis::dsp;
 
 /// One cutoff knob's exponential law: hzAtZero x 2^(octavesPerUnit x units).
 struct CutoffLaw
@@ -52,8 +60,24 @@ struct CutoffLaw
 inline constexpr CutoffLaw f3Law{.log2HzAtZero = 3.3219281f, .octavesPerUnit = 1.1f}; // log2(10)
 
 /// One octave per knob unit through the old LCD's 146.16 Hz at the knob's
-/// centre (a user's reading, 2013): 4.5675 Hz x 2^units.
+/// centre (a user's reading, 2013): 4.5675 Hz x 2^units, the library's
+/// dsp::filterControlLaw (whose anchor is in Hz; this is its log2).
 inline constexpr CutoffLaw lcdLaw{.log2HzAtZero = 2.1914047f, .octavesPerUnit = 1.0f}; // log2(146.16) - 5
+
+/// The chosen model as the library computes it: knob units in, octaves
+/// above the anchor out (dsp::filterCutoffOctaves), keytrack as
+/// keytrackOctaves().
+[[nodiscard]] inline float builtOctavesAboveAnchor(float filter, float filterMod, float control, float controlMod,
+                                                   float keytrack, float pitch) noexcept
+{
+    return dsp::filterCutoffOctaves({
+        .cutoff = filter,
+        .cutoffModulation = filterMod,
+        .controlCutoff = control,
+        .controlModulation = controlMod,
+        .keytrack = dsp::keytrackOctaves(pitch, keytrack / 10.0f),
+    });
+}
 
 enum class CutoffModel : std::uint8_t
 {
@@ -125,6 +149,12 @@ struct CutoffInputs
     case CutoffModel::knobSumF3:
         return f3Law.octaves(clampedSum(in, clamp) + keytrackUnits(in.keytrack, in.pitch));
     case CutoffModel::knobSumOctave:
+        if (clamp == Clamp::perControl)
+        {
+            // The decision: the library's law.
+            return lcdLaw.log2HzAtZero +
+                   builtOctavesAboveAnchor(in.filter, in.filterMod, in.control, in.controlMod, in.keytrack, in.pitch);
+        }
         return lcdLaw.octaves(clampedSum(in, clamp) + keytrackUnits(in.keytrack, in.pitch));
     case CutoffModel::centredOffset:
     {
@@ -180,7 +210,13 @@ struct ResonanceInputs
     switch (model)
     {
     case ResonanceModel::knobSum:
-        return kPerUnit * (a + c);
+        // The decision: the library's law.
+        return dsp::filterResonanceK({
+            .resonance = in.filter,
+            .resonanceModulation = in.filterMod,
+            .controlResonance = in.control,
+            .controlModulation = in.controlMod,
+        });
     case ResonanceModel::knobSumTo10:
         return kPerUnit * std::clamp(in.filter + in.filterMod + in.control + in.controlMod, 0.0f, 10.0f);
     case ResonanceModel::multiplied:
