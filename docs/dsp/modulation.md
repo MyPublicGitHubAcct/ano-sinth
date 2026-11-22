@@ -4,9 +4,9 @@ Modulation moves a control over time without anyone turning its knob. A source (
 
 - **Theory:** fixed slots against a matrix; additive modulation in knob units, and what that means for each kind of knob; scaling a source; polyphonic and monophonic sources and destinations, and the four ways they meet; control rate against audio rate; order and feedback when sources are also destinations; and bounds for skipping.
 - **Sylenth1** (task 1): what is known about its sources, destinations and amounts, and what that means for the build.
-- **The model** (task 2, stage 1): the candidates for the registries, the routing, each destination's rate, the order through cycles, a per-voice source on a global destination, and each source's bound; what they measured; and the recommendations, which await the project owner's decision.
+- **The model** (task 2): the candidates for the registries, the routing, each destination's rate, the order through cycles, a per-voice source on a global destination, and each source's bound; what they measured; the recommendations; and the project owner's decision (every recommendation, 2026-11-22).
 
-Tasks 3–5 will add the decision and the as-built sections.
+Task 2's stage 2 and tasks 3–5 will add the as-built sections.
 
 Read [lfos.md](lfos.md) and [envelopes.md](envelopes.md) (the sources), [keytracking.md](keytracking.md) (the keytrack source), [filter-control.md](filter-control.md) (the first destination built with modulation inputs, and the clamp), [mixer.md](mixer.md) (Mix, a destination applied per sample), and [part-solo-and-skipping.md](part-solo-and-skipping.md) (why each source must bound its value) first.
 
@@ -434,7 +434,7 @@ Every candidate gives the same output at host blocks of 1, 37 and 4096, with no 
 
 ## Recommendations
 
-*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question (M1–M13), the recommendation is the working hypothesis, and the measurement is what makes it the safer default.*
+*Stage 1's recommendations, as written. Where only the demo can settle a question (M1–M13), the recommendation is the working hypothesis, and the measurement is what makes it the safer default. Chosen by the project owner on 2026-11-22, every one ([The decision](#the-decision)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -481,6 +481,22 @@ Every candidate gives the same output at host blocks of 1, 37 and 4096, with no 
 - **part-solo-and-skipping.md's mono path:** a Pan route ends it for its part, about 110 ns per voice on the init patch.
 - **filter-control.md, recommendation 8:** the modulation's read point doesn't remove the overshoot, and the peak moves ×2.8 between 44.1 and 48 kHz, so M1.8's golden renders should fix the sample rate.
 - **`MinBlepOscillator` runs only forwards.** Deep phase modulation on low notes becomes band-limited jumps (36% of the samples of a 55.6 Hz note at ±180°). Whether that is heard against Sylenth1's is a question for M1.13.
+
+## The decision
+
+Chosen by the project owner on 2026-11-22: every recommendation (Decisions log). Stage 2 builds the model in `libs/dsp`, bit for bit the stage-1 prototype at host blocks of 1, 37 and 4096, with no allocation.
+
+- **The registries:** `constexpr` tables indexed by an enum, holding only the DSP's fields in `libs/dsp`. A destination row holds its target, parts, scope, rate, units per amount and knob range. A source row holds its scope, range and bound kind. The keys and labels live with the parameter table (M1.9), tied to the enum at compile time.
+- **The persisted ID:** a string key per destination and source (`"osc.pitch.ab"`, `"lfo.1"`, `"none"`), stable once released, never reused, never a position.
+- **Routing:** the 16 slots compiled into a list of live routes at a note-on and at the first grid point after the patch changes; an empty slot or an amount of 0 drops out. Sums per target and part: AB is both parts, except Cutoff AB and Reso AB, which are the Filter Control's own terms.
+- **Rates:**
+  - Pitch, Phase, Volume and Mix per sample;
+  - Phase as a running offset folded into the oscillator's phase step, set once per sample while it moves, with a band-limited jump where the step would leave [0, Nyquist);
+  - Pan ramped on the grid (each unison voice's gains at the grid points, interpolated); a Pan route takes its part off the mono path;
+  - Cutoff and Reso as M1.3 decided, with the sources as they stand at the grid point.
+- **LFO Rate and Gain, and the order:** segment order. At each grid point each LFO's rate (held) and gain (ramped) are set from the sources as they stand there, and its wave is rendered for the whole segment ahead; a retrigger mid-segment renders the rest again from a copy taken at the grid point. The delay through a cycle or a self-route is up to one segment.
+- **A per-voice source on a global destination:** each per-voice source has a global copy, which the global destinations read on the absolute 32-sample grid, ramped: an envelope gated by the first key down and released by the last, the last note-on's velocity, a free LFO's global instance, the last note's keytrack. A requirement on M1.7.
+- **Each source's bound:** an envelope by stage; an LFO exact, from its segment rendered ahead; a linear source its two ends; the rest their range. A slot at Volume 0 is silent only while its Volume routes can't lift it.
 
 ## Tests
 
