@@ -108,7 +108,7 @@ The full source table with ratings is in the inventory: [§6, Sources, destinati
   | | LFO1Rate, LFO1Gain, LFO2Rate, LFO2Gain | per voice (each voice has its own LFOs, L8) | the knobs' units | `Lfo::setFrequency`, its gain |
   | | DistAmnt | **global** | the distortion's Amount knob | M1.7 |
 
-  "A", "B" and "AB" are probably part A's two oscillators (or filter A), part B's, and all of them (M3). KVR counts 24, and the menu's order and labels are unconfirmed (M1). The destinations do not include envelope stages (AL8), Main Volume (X7), Detune, Octave or Fine, Drive, Keytrack, any amount, or any effect parameter other than the two above. Users asked for envelope stages and more targets between 2007 and 2021, and no changelog added any after v1.20.
+  "A", "B" and "AB" are probably part A's two oscillators (or filter A), part B's, and all of them (M3). The demo's popups confirm the list (M1, settled 2026-11-22): the 27 in the template's order, in three columns (Oscillators, Filters, Misc), labelled "Volume A and B" rather than "AB", and the same in every slot. KVR's 24 doesn't match. The destinations do not include envelope stages (AL8), Main Volume (X7), Detune, Octave or Fine, Drive, Keytrack, any amount, or any effect parameter other than the two above. Users asked for envelope stages and more targets between 2007 and 2021, and no changelog added any after v1.20.
 - **The misc sources** (11, and "None"): Velocity, ModWheel, KeyTrack, AmpEnv A, AmpEnv B, ModEnv 1, ModEnv 2, LFO 1, LFO 2, Aftertouch, Step Vlcty. Aftertouch came in v1.1 and Step Vlcty in v1.20. Nothing suggests polyphonic aftertouch or a random value per note. Their scopes and ranges:
 
   | Source | Scope | Range, hypothesis (M7) | In ours |
@@ -123,7 +123,7 @@ The full source table with ratings is in the inventory: [§6, Sources, destinati
   | Step Vlcty | global (the arpeggiator's) | the step's velocity, 0–1, and its "hold" (M1.6) | M1.6 |
 
 - **Per voice and global.** The manual says pitch and phase modulation are evaluated per voice (p. 30). Only two destinations are global, PhsrFreq and DistAmnt, and nothing says what a per-voice source does there (M10). The developer's own wah uses the phaser's internal LFO.
-- **What is open.** The menus (M1, M2), what A, B and AB select (M3), the amount's display and law (M4, M5), the LFO's scale (M6), each source's range and each destination's units (M7, M8), where each destination clamps (M9), per-voice sources on global destinations (M10), cycles (M11), each destination's update rate (M12), and 7-bit controller steps (M13). M1 and M2 need only screenshots of the demo's popups. The project owner can take them at any time, and the clean-room rule allows it.
+- **What is open.** What A, B and AB select (M3), the amount's display and law (M4, M5), the LFO's scale (M6), each source's range and each destination's units (M7, M8), where each destination clamps (M9), per-voice sources on global destinations (M10), cycles (M11), each destination's update rate (M12), and 7-bit controller steps (M13). The menus (M1, M2) are settled: the project owner's screenshots of the demo's popups (2026-11-22) show the template's entries in the template's order. The source menu (M2): "-", Velocity, Mod Wheel, KeyTrack, Amp Env A, Amp Env B, Mod Env 1, Mod Env 2, LFO 1, LFO 2, Aftertouch, Step Velocity.
 
 ### What this means for the build
 

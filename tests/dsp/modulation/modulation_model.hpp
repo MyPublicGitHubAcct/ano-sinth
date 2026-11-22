@@ -56,7 +56,7 @@ inline constexpr std::array evalRates{EvalRate::perSample, EvalRate::gridHeld, E
     return "?";
 }
 
-/// The popup's groups (M1's hypothesis).
+/// The popup's groups (M1, confirmed by the demo: three columns).
 enum class Group : std::uint8_t
 {
     none,
@@ -248,9 +248,9 @@ namespace detail
 } // namespace detail
 
 /// Every destination, "None" first. The internal order is ours; the
-/// popup's order (M1) is a separate presentation list. The rates are the
-/// recommendations (docs/dsp/modulation.md); the prototype voice takes a
-/// rate per target from its patch instead.
+/// popup's order (M1) happens to be the same, and is still a separate
+/// presentation list. The rates are the decision (docs/dsp/modulation.md);
+/// the prototype voice takes a rate per target from its patch instead.
 inline constexpr std::array<DestinationInfo, destinationCount> destinationRows{
     DestinationInfo{.key = "none", .name = "None"},
     detail::osc("osc.volume.a", "Volume A", Target::volume, partA, EvalRate::perSample, 1.0f, knob10),
