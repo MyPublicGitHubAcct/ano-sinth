@@ -1,6 +1,7 @@
 # Tests for libs/dsp. No JUCE, mirroring the library.
 add_executable(anoesis_dsp_tests
     library_test.cpp
+    benchmarks/amp_link_benchmark.cpp
     benchmarks/foundations_benchmark.cpp
     benchmarks/drift_benchmark.cpp
     benchmarks/envelope_benchmark.cpp
@@ -63,6 +64,7 @@ add_executable(anoesis_dsp_tests
     resampling/oversampler_test.cpp
     support/allocation_counter.cpp
     voice/allocation_report.cpp
+    voice/amp_link_report.cpp
     voice/glide_test.cpp
     voice/legato_test.cpp
     voice/legato_report.cpp

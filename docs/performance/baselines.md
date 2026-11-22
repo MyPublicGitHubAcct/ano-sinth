@@ -6,6 +6,25 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.4 AmpEnv A/B link, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[amp-link]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.1–1.7%, one row 5.0% from one slow run).
+- **What is measured** ([amp-envelope-link.md](../dsp/amp-envelope-link.md#cpu)): 16 voices held (keys 40–55) through `VoiceAllocator`, linked from before the notes with part B's own knobs different: `dsp::Voice` unlinked and under a parameter link (the engine mirroring the knobs: the same code), the stage-1 `LinkVoice` in tests/dsp/voice/link_candidates.hpp with no link, with one generator shared by both parts (b), and with a signal link (c). Four cases: the init patch, two parts (A1 and B1 saws), a pad (unison into filter A on AB), and two parts with both envelopes in a 10 s attack (a level computed every sample).
+
+| Benchmark: 16 voices (ns / sample) | `dsp::Voice`, no link | (a) `dsp::Voice` linked | prototype, no link | (b) shared | (c) signal |
+|---|---:|---:|---:|---:|---:|
+| init | 2,017.25 | 2,011.43 | 2,011.56 | 2,023.77 | 2,015.02 |
+| two parts | 3,925.12 | 3,932.70 | 3,937.01 | 3,954.34 | 3,944.04 |
+| pad | 8,680.39 | 8,639.36 | 8,624.26 | 8,662.91 | 8,665.02 |
+| two parts, 10 s attacks | 3,955.08 | 3,960.49 | 3,960.72 | 3,950.27 | 3,958.87 |
+
+### Observations
+
+- **No candidate costs or saves anything measurable.** One envelope in a moving stage costs 0.52 ns per sample (the M1.2 entry), so sharing one generator saves at most about 8 ns per sample for 16 voices, 0.2% of the two-part case and below the spread.
+- **The init patch reads 2,017 against the task 5 entry's 1,958 for the same code**: 3% of session-to-session spread on this machine. Compare rows within one entry.
+
+---
+
 ## 2026-11-22: M1.4 part solo and skipping, as built (`dsp::Voice`'s plan, the mono path, `PartSolo`)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[solo]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.4–5.2%; one prototype row 26.9%, from one slow run).

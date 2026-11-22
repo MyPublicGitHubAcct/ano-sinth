@@ -370,7 +370,7 @@ Host blocks of 1 and 37 against 4096, Solo as a gain and as routing:
 - **E11** (a sustain-0 hold keeps its voice busy) stands for the allocator. Row 6 stops such a part being rendered.
 - **V12**: 16 notes at Voices 0 cost nothing in ours already (the allocator frees them), so the demo's reading of that case tells us only whether Sylenth1 does the same.
 - **Task 2's in-place retrigger** keeps the filters. Under row 6 a skipped part's frozen state is what it keeps, 30–37 dB from the state it would have had.
-- **AmpEnv A/B link (task 6)** is noted only. With the link on, the envelope that applies to a part is the linked one, so row 6's envelope test (and `isActive()`) must read that envelope. Nothing else here depends on it.
+- **AmpEnv A/B link (task 6)** is noted only. With the link on, the envelope that applies to a part is the linked one, so row 6's envelope test (and `isActive()`) must read that envelope. Nothing else here depends on it. Task 6's stage 1 measured it ([amp-envelope-link.md](amp-envelope-link.md#the-skip-test-and-isactive-read-the-envelope-that-applies)): under a parameter link, its recommendation, each part's own envelope applies and nothing here changes; under a signal link, reading a part's own envelope skips a part that sounds (−3.1 dB) or frees a voice whose tail still plays.
 
 ## The decision
 
