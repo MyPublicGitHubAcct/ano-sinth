@@ -321,7 +321,7 @@ filterB.setCutoffModulation(filterCutoffOctaves({/* the knobs and Cutoff B / AB 
 // The misc source (M1.5): keytrackSource(pitch).
 ```
 
-`key` is the MIDI key, or the arpeggiator's note when it plays (its octaves and the step sequencer's Transpose are notes). A legato note with no portamento steps the pitch, and the step goes through the modulation input like any other: one 32-sample ramp of g. The tests' stand-in for the voice, [keytrack_support.hpp](../../tests/dsp/filters/keytrack_support.hpp), feeds the filter this way, and the report measures the other feeds against it.
+`key` is the MIDI key, or the arpeggiator's note when it plays (its octaves and the step sequencer's Transpose are notes). A legato note with no portamento steps the pitch, and the step goes through the modulation input like any other: one 32-sample ramp of g. The tests' stand-in for the voice, [keytrack_support.hpp](../../tests/dsp/filters/keytrack_support.hpp), feeds the filter this way, and the report measures the other feeds against it. `dsp::Voice` composes this pitch since M1.4 task 3 (2026-11-21): its glide plus the pitch bend, plus `masterTuneSemitones()` for the master tune it gives its slots, fed for the segment's end at each grid point; measured on the voice, the filter follows an octave glide to 0.24 cents and a 5 ms bend ramp to 0.14 ([legato-portamento.md](legato-portamento.md#the-filter-following-the-glide-and-the-bend)).
 
 ## Results, as built
 

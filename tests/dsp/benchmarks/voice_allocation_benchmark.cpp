@@ -184,14 +184,7 @@ Policy withEnd(StealEnd end)
 class NullVoice
 {
 public:
-    struct Knobs
-    {
-        std::size_t offset = 0;
-        [[nodiscard]] Knobs advanced(std::size_t samples) const noexcept
-        {
-            return {.offset = offset + samples};
-        }
-    };
+    using Knobs = dsp::VoiceKnobs;
 
     explicit NullVoice(std::uint64_t /*seed*/) noexcept {}
     void prepare(const dsp::ProcessSpec& /*spec*/) noexcept {}
@@ -199,9 +192,25 @@ public:
     {
         active = false;
     }
-    void noteOn(float /*note*/, const Knobs& /*knobs*/) noexcept
+    void noteOn(float /*note*/, const Knobs& /*knobs*/, const dsp::NoteStart& /*start*/) noexcept
     {
         active = true;
+    }
+    void legatoNoteOn(float /*note*/, const Knobs& /*knobs*/, const dsp::NoteStart& /*start*/) noexcept
+    {
+        active = true;
+    }
+    [[nodiscard]] static float currentPitch() noexcept
+    {
+        return 69.0f;
+    }
+    [[nodiscard]] static bool hasPlayed() noexcept
+    {
+        return true;
+    }
+    [[nodiscard]] static float velocity() noexcept
+    {
+        return 1.0f;
     }
     void noteOff() noexcept {}
     void stop() noexcept
@@ -266,19 +275,12 @@ public:
 private:
     [[nodiscard]] V::Knobs knobs() const
     {
-        if constexpr (std::is_same_v<typename V::Knobs, dsp::VoiceFilterKnobs>)
-        {
-            return {
-                .cutoff = {&rampsA.cutoff, &rampsB.cutoff},
-                .resonance = {&rampsA.resonance, &rampsB.resonance},
-                .controlCutoff = &rampsA.controlCutoff,
-                .controlResonance = &rampsA.controlResonance,
-            };
-        }
-        else
-        {
-            return {};
-        }
+        return {
+            .cutoff = {&rampsA.cutoff, &rampsB.cutoff},
+            .resonance = {&rampsA.resonance, &rampsB.resonance},
+            .controlCutoff = &rampsA.controlCutoff,
+            .controlResonance = &rampsA.controlResonance,
+        };
     }
 
     void process(std::span<const dsp::VoiceEvent> blockEvents)

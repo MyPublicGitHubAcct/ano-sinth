@@ -318,7 +318,7 @@ private:
 
     /// The global ramps copied and moved on to the absolute sample `at`
     /// (dsp::Voice reads its knobs positioned at the block it is given).
-    [[nodiscard]] dsp::VoiceFilterKnobs positioned(std::size_t at) noexcept
+    [[nodiscard]] dsp::VoiceKnobs positioned(std::size_t at) noexcept
     {
         held = {
             knobs->a.cutoff,    knobs->b.cutoff,        knobs->a.resonance,

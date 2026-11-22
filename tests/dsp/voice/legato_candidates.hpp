@@ -268,7 +268,7 @@ struct VoiceOptions
 /// and the absolute sample of the block's first sample (for the bend).
 struct VoiceKnobs
 {
-    dsp::VoiceFilterKnobs filter{};
+    dsp::VoiceKnobs filter{};
     const BendRamp* bend = nullptr;
     std::uint64_t at = 0;
 
@@ -700,7 +700,7 @@ private:
     {
         return ramp != nullptr ? ramp->valueAfter(ahead) : 0.0f;
     }
-    void feedFilter(std::size_t f, const dsp::VoiceFilterKnobs& knobs, std::size_t ahead, float keytrack) noexcept
+    void feedFilter(std::size_t f, const dsp::VoiceKnobs& knobs, std::size_t ahead, float keytrack) noexcept
     {
         ahead += knobs.offset;
         const float octaves = dsp::filterCutoffOctaves({

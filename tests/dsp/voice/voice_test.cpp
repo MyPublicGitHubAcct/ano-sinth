@@ -63,7 +63,7 @@ std::size_t samples(double seconds)
     return static_cast<std::size_t>(seconds * static_cast<double>(rate));
 }
 
-dsp::VoiceFilterKnobs knobsOf(const KnobRamps& a, const KnobRamps& b, float keytrack = 0.0f)
+dsp::VoiceKnobs knobsOf(const KnobRamps& a, const KnobRamps& b, float keytrack = 0.0f)
 {
     return {
         .cutoff = {&a.cutoff, &b.cutoff},
@@ -780,7 +780,7 @@ TEST_CASE("Voice: a NaN from the knobs leaves the filter where it was", "[voice]
         }
         cutoff.setCurrentAndTarget(5.0f);
         resonance.setCurrentAndTarget(5.0f);
-        const dsp::VoiceFilterKnobs k{
+        const dsp::VoiceKnobs k{
             .cutoff = {&cutoff, &cutoff},
             .resonance = {&resonance, &resonance},
             .controlCutoff = &cutoff,

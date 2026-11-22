@@ -129,7 +129,7 @@ struct KnobSet
         controlCutoff.setCurrentAndTarget(v.controlCutoff);
         controlResonance.setCurrentAndTarget(v.controlResonance);
     }
-    [[nodiscard]] dsp::VoiceFilterKnobs filter() const noexcept
+    [[nodiscard]] dsp::VoiceKnobs filter() const noexcept
     {
         return {
             .cutoff = {&cutoff, &cutoff},
@@ -337,9 +337,9 @@ std::string dbText(double db)
 // --- 0. The prototype against the library ------------------------------------------------------
 
 template <typename V>
-V::Knobs knobsOf(const dsp::VoiceFilterKnobs& filter, std::size_t at)
+V::Knobs knobsOf(const dsp::VoiceKnobs& filter, std::size_t at)
 {
-    if constexpr (std::is_same_v<typename V::Knobs, dsp::VoiceFilterKnobs>)
+    if constexpr (std::is_same_v<typename V::Knobs, dsp::VoiceKnobs>)
     {
         (void)at;
         return filter;
@@ -497,13 +497,10 @@ void printEquivalence()
     const auto events = allocatorSequence();
     constexpr std::size_t length = 72000;
     const auto library = runAllocator<dsp::Voice<>>(padDrift, padKnobs, events, length, 37);
-    const auto pitched = runAllocator<PitchedVoice<>>(padDrift, padKnobs, events, length, 37);
     Scenario const s{.patch = padDrift, .knobs = padKnobs, .polyphony = 4, .length = length, .hostBlock = 37};
     const auto engine = runEngine(s, events);
     std::cout << "\nThe allocator sequence (the pad with drift, steals, a repeated key, Polyphony 4 -> 2 -> 6), "
                  "blocks of 37:\n\n";
-    std::cout << "- VoiceAllocator<PitchedVoice> against VoiceAllocator<dsp::Voice>: "
-              << (bitIdentical(pitched, library) ? "identical" : "differs") << "\n";
     std::cout << "- Engine (poly, no glide, bend or pedal) against VoiceAllocator<dsp::Voice>: "
               << (bitIdentical(engine.out, library) ? "identical" : "differs") << "\n";
 }

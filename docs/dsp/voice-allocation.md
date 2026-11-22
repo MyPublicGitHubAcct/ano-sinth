@@ -337,7 +337,7 @@ A sequence with steals, releases and a Polyphony change: the resonant pad free-r
 - **Mono Legato** discards Polyphony (p. 29). The allocator needs a mono mode with one voice and a stack of held keys: a key released while others are held returns to one of them (which one is task 3's question). It also needs `Adsr::legatoGateOn` instead of a retrigger, and the previous pitch for the glide.
 - **Portamento Normal** slides "only … whenever at least one other key is pressed" (p. 29). At each note-on the allocator must say whether another key is held. Slide mode always glides, so the voice needs its last pitch even after a release.
 - **Polyphony 1 without Mono Legato** is a steal of the single voice at every note (1b). It is not legato: the envelopes retrigger.
-- **The hold pedal** (CC 64). A record needs "sustained by the pedal" alongside "key down". Pedal up releases only voices whose keys are up (the developer, 2007). A key pressed again while sustained takes a new voice, as 2 (P7). For 1a, a pedal-sustained note counts as held.
+- **The hold pedal** (CC 64). A record needs "sustained by the pedal" alongside "key down". Pedal up releases only voices whose keys are up (the developer, 2007). A key pressed again while sustained takes a new voice, as 2 (P7). For 1a, a pedal-sustained note counts as held. *(Task 3 measured this and decided otherwise: counted as held, a pedalled melody steals the held bass; a sustained note now comes after released notes and before held keys, [legato-portamento.md](legato-portamento.md#the-hold-pedal).)*
 - **Pitch bend** is global and reaches every voice. The allocator plays no part in it.
 
 ### What this pushes back on
@@ -441,7 +441,7 @@ Chosen by the project owner on 2026-11-21, after the voice's part: every remaini
 
   The plugin publishes them from the audio thread after each block for the UI (M1.9, M1.11).
 - **What it leaves to later tasks:**
-  - Mono Legato, portamento, pitch bend, the hold pedal (task 3, which needs the hooks listed above);
+  - Mono Legato, portamento, pitch bend, the hold pedal (task 3, which needs the hooks listed above; built 2026-11-21, [legato-portamento.md](legato-portamento.md#as-built));
   - velocity (M1.5);
   - the arpeggiator's notes (M1.6);
   - Mix and the output bus (task 4).

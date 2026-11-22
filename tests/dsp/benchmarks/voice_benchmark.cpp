@@ -149,7 +149,7 @@ private:
         return defaults;
     }
 
-    [[nodiscard]] dsp::VoiceFilterKnobs feed() const
+    [[nodiscard]] dsp::VoiceKnobs feed() const
     {
         return {
             .cutoff = {&rampsA.cutoff, &rampsB.cutoff},

@@ -30,6 +30,7 @@ These are the controls that move a note's pitch after its note-on, or that keep 
   - block sizes and allocation;
   - CPU.
 - **The recommendations** for the project owner, with the alternatives and the open question that settles each, and what the voice and the allocator would need to change.
+- **The project owner's decision** (every recommendation) and **what was built**: `Glide`, `PitchBend`, the voice's pitch input, and Mono Legato, portamento, the bend and the pedal in `VoiceAllocator`, with the tests that pin them and their cost.
 
 Read [voice-allocation.md](voice-allocation.md) (the allocator this extends), [keytracking.md](keytracking.md) (which pitch the filter follows, F18–F22), [envelopes.md](envelopes.md) (`legatoGateOn`, a retrigger from the current level), [oscillator-range.md](oscillator-range.md) (band-limited pitch steps) and [parameter-smoothing.md](parameter-smoothing.md) (zipper noise) first.
 
@@ -108,7 +109,7 @@ To stay independent of the host's block size, the glide is a closed form of the 
 
 ## Sylenth1: what is known
 
-The full source table with ratings and the open questions with their demo protocols are in the inventory: [§7 Mono Legato, portamento, pitch bend, and the hold pedal](../reference/sylenth1-features.md#mono-legato-portamento-pitch-bend-and-the-hold-pedal) (L1–L19), with P7 and §4's Mono Legato and Retrigger rows. In short:
+The full source table with ratings and the open questions with their demo protocols are in the inventory: [§7 Mono Legato, portamento, pitch bend, and the hold pedal](../reference/sylenth1-features.md#mono-legato-portamento-pitch-bend-and-the-hold-pedal) (K1–K19), with P7 and §4's Mono Legato and Retrigger rows. In short:
 
 - **The manual (p. 29).**
   - Mono Legato: "Sylenth1 will be forced into mono mode and the polyphony setting on the top bar will be discarded. It will also stop retriggering notes whenever another key is pressed. This enables you to slide notes up and down in pitch and velocity without actually restarting a new note."
@@ -216,7 +217,7 @@ Mono Legato, Portamento 0. The key sounding after each event:
 | A3 up | G3 | G3 | G3 |
 | G3 up | G3, released | G3, released | G3, released |
 
-Last makes 7 legato notes, low 1 and high 5, and none of them retriggers. Each priority behaves as its definition says. The table is what L1's protocol reads on the demo.
+Last makes 7 legato notes, low 1 and high 5, and none of them retriggers. Each priority behaves as its definition says. The table is what K1's protocol reads on the demo.
 
 ### The click at a legato step and at a returning key
 
@@ -286,7 +287,7 @@ The length, measured to the last period more than 1 cent from the target, per sa
 | exponential (RC), constant time | 66.5 ms | 96.9 ms | 99.1 ms |
 | linear in Hz, constant time | 97.3 ms | 98.0 ms | 98.9 ms |
 
-The two time laws separate by a factor of 24 between a semitone and two octaves, which L7's protocol reads directly. The exponential reaches within 1 cent of a semitone in two-thirds of its time, so its audible length depends on the interval as well.
+The two time laws separate by a factor of 24 between a semitone and two octaves, which K7's protocol reads directly. The exponential reaches within 1 cent of a semitone in two-thirds of its time, so its audible length depends on the interval as well.
 
 **An interrupted glide:** C3 held, C5 legato at 24000 (200 ms, linear), and E4 at 28800, where the glide is at C4.
 
@@ -469,31 +470,31 @@ The engine's events, 512-sample blocks, ns per sample, with the cost per event:
 
 ## Recommendations
 
-*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (L1–L19), and the measurement is what makes it the safer default.*
+*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (K1–K19), and the measurement is what makes it the safer default. Chosen by the project owner on 2026-11-21, every one ([The decision](#the-decision), [As built](#as-built)). The inventory's questions were numbered L1–L19 in stage 1's commit, which collided with the LFOs' L1–L14; they are K1–K19 here and in the inventory.*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
-| 1 | **Mono Legato's note priority** | **Last note**: the most recent key still held sounds; releasing it returns to the key held before it. | The 2016 user's "retrigger & last note priority mono mode", read by elimination; the usual choice; trills work both ways (7 legato notes in the sequence against 1 for low). | Low (a held bass can't be displaced); high. | L1 |
-| 2 | **A returning key** | **A legato note**, gliding as any legato note (in Normal too, since a key is still held). | Legato returns at −48.5 dB (init) against −6.2 for a retrigger and −6.6 for a phase restart; the user's hint that Mono Legato doesn't retrigger. | A retrigger from the envelopes' level. | L2 |
-| 3 | **Retrig and Phase on a legato note** | **The phases are kept**: a legato note never restarts the oscillators. | "without actually restarting a new note"; a restart clicks at −21 dB on a step and up to −6.6 dB on a return, whatever the glide. | Restart per Retrig (then legato only spares the envelopes). | L4 |
-| 4 | **Velocity at a legato note** | **Ramped linearly to the new velocity over the glide's length**, at once at Portamento 0. The same wherever a note glides, in poly too (not measured there). | The product description: portamento "will slide both velocity and pitch"; −60.4 dB at 30 ms against −27.0 at once. | At once; kept from the phrase's first note (no velocity change at all). | L3 |
-| 5 | **Mono Legato and Polyphony** | **One voice, whatever Polyphony, 0 included.** | "the polyphony setting on the top bar will be discarded". | Mono Legato silent at Polyphony 0. | L5 |
-| 6 | **Switching Mono Legato while notes sound** | **The switch releases every sounding note**, clears the stack, and keys still down sound when next played. Not measured. | The simplest transition that can't hang a note (v3.024 fixed a crash there). | Carrying the most recent held key over into the new mode. | L6 |
-| 7 | **The glide's time law** | **Constant time.** | "the amount of time it takes to slide from one note to another". | Constant rate per octave (a semitone in 8.2 ms, two octaves in 199 ms at 100 ms per octave). | L7 |
-| 8 | **The glide's curve** | **Linear in semitones**, landing exactly at its time. | An even glide in pitch, exact length, no definition of "done" needed. | Exponential (an RC lag; within 1 cent of a semitone in two-thirds of its time); linear in Hz. Each is one switch in the glide. | L8 |
-| 9 | **The knob, and Portamento 0** | **The DSP takes seconds; 0 is an exact jump.** The knob's law belongs to the parameter table (M1.9). Placeholder: E1's 25 s · x^4.64 (0.6 ms at knob 1, 14 ms at 2, 1 s at 5). | No source for the range. The placeholder fits a user's "above 1" before a glide is heard. | (576^x − 1)/23 (39 ms at knob 1); 10 s · x³; 2 s · x². | L9 |
-| 10 | **An interrupted glide** | **From the pitch it has reached.** | Continuous: the largest step is the glide's own slope (51.7 cents a period), against an 808-cent jump from the last target. | From the last target. | L10 |
-| 11 | **Normal and Slide** | **Normal glides only from a key still held. Slide always glides from the last note's pitch, and after a gap it is a new note (the envelopes retrigger from their level).** | The manual; the developer's "sliding notes after pauses"; a user's "attack/transient" without overlap. | Slide after a gap as a legato note (no retrigger). | L12 |
-| 12 | **Portamento in poly** | **Poly notes glide too, from the last note played, at the pitch it has reached.** Normal glides only while another key is held. | The product description says poly; the same patch glides the same way at any Polyphony (from its voice's own last pitch, nothing glides at Polyphony 16 and the chord voice-leads at 3). | From the voice's own last pitch (voice-led chords when voices are reused); no poly glide. | L11 |
+| 1 | **Mono Legato's note priority** | **Last note**: the most recent key still held sounds; releasing it returns to the key held before it. | The 2016 user's "retrigger & last note priority mono mode", read by elimination; the usual choice; trills work both ways (7 legato notes in the sequence against 1 for low). | Low (a held bass can't be displaced); high. | K1 |
+| 2 | **A returning key** | **A legato note**, gliding as any legato note (in Normal too, since a key is still held). | Legato returns at −48.5 dB (init) against −6.2 for a retrigger and −6.6 for a phase restart; the user's hint that Mono Legato doesn't retrigger. | A retrigger from the envelopes' level. | K2 |
+| 3 | **Retrig and Phase on a legato note** | **The phases are kept**: a legato note never restarts the oscillators. | "without actually restarting a new note"; a restart clicks at −21 dB on a step and up to −6.6 dB on a return, whatever the glide. | Restart per Retrig (then legato only spares the envelopes). | K4 |
+| 4 | **Velocity at a legato note** | **Ramped linearly to the new velocity over the glide's length**, at once at Portamento 0. The same wherever a note glides, in poly too (not measured there). | The product description: portamento "will slide both velocity and pitch"; −60.4 dB at 30 ms against −27.0 at once. | At once; kept from the phrase's first note (no velocity change at all). | K3 |
+| 5 | **Mono Legato and Polyphony** | **One voice, whatever Polyphony, 0 included.** | "the polyphony setting on the top bar will be discarded". | Mono Legato silent at Polyphony 0. | K5 |
+| 6 | **Switching Mono Legato while notes sound** | **The switch releases every sounding note**, clears the stack, and keys still down sound when next played. Not measured. | The simplest transition that can't hang a note (v3.024 fixed a crash there). | Carrying the most recent held key over into the new mode. | K6 |
+| 7 | **The glide's time law** | **Constant time.** | "the amount of time it takes to slide from one note to another". | Constant rate per octave (a semitone in 8.2 ms, two octaves in 199 ms at 100 ms per octave). | K7 |
+| 8 | **The glide's curve** | **Linear in semitones**, landing exactly at its time. | An even glide in pitch, exact length, no definition of "done" needed. | Exponential (an RC lag; within 1 cent of a semitone in two-thirds of its time); linear in Hz. Each is one switch in the glide. | K8 |
+| 9 | **The knob, and Portamento 0** | **The DSP takes seconds; 0 is an exact jump.** The knob's law belongs to the parameter table (M1.9). Placeholder: E1's 25 s · x^4.64 (0.6 ms at knob 1, 14 ms at 2, 1 s at 5). | No source for the range. The placeholder fits a user's "above 1" before a glide is heard. | (576^x − 1)/23 (39 ms at knob 1); 10 s · x³; 2 s · x². | K9 |
+| 10 | **An interrupted glide** | **From the pitch it has reached.** | Continuous: the largest step is the glide's own slope (51.7 cents a period), against an 808-cent jump from the last target. | From the last target. | K10 |
+| 11 | **Normal and Slide** | **Normal glides only from a key still held. Slide always glides from the last note's pitch, and after a gap it is a new note (the envelopes retrigger from their level).** | The manual; the developer's "sliding notes after pauses"; a user's "attack/transient" without overlap. | Slide after a gap as a legato note (no retrigger). | K12 |
+| 12 | **Portamento in poly** | **Poly notes glide too, from the last note played, at the pitch it has reached.** Normal glides only while another key is held. | The product description says poly; the same patch glides the same way at any Polyphony (from its voice's own last pitch, nothing glides at Polyphony 16 and the chord voice-leads at 3). | From the voice's own last pitch (voice-led chords when voices are reused); no poly glide. | K11 |
 | 13 | **The rate the pitch enters the oscillators** | **Per sample while the pitch moves (a glide, a bend ramp), the slot's constant path otherwise.** Keytrack stays as decided (F22: at grid points, for the segment's end). | Exact on every curve (0.00 cents) and for a bend at its sample. The constant path keeps a held note at today's cost (366 against 375 ns), and the two are identical to the bit at a constant pitch. A moving pitch costs 5–13%. | Grid, held from the midpoint (0.24 cents on a linear glide, 0.82 exponential; the bend's ramp a −92 dB staircase; 4–7% instead of 5–13%). Grid, ramped (exact on a linear glide, the same cost as per sample). | Not the demo's: a cost/accuracy choice. |
-| 14 | **The bend's resolution and smoothing** | **14-bit, with a linear ramp to each new value over 5 ms**, read by every voice at its own samples. | −113.8 dB of zipper against −75.5 stepped (7-bit: −74.5 against −64.2), for a lag of at most the ramp (12.5 cents at a fast 2 Hz wheel). | Stepped (Sylenth1 may step: the user reports); 10 ms (−81 dB on 7-bit, 25 cents of lag); a one-pole. | L14 |
-| 15 | **The Bend Range** | **One control, 0–24 semitones, the same up and down; 14-bit values scaled by 8,192 both ways.** | The manual's one control "in half notes"; v1.1's 24; full up 0.29 cents short at 24, inaudible, and the same step size both ways. | Exact at both ends (/8,191 up). The default range from the demo. | L13 |
-| 16 | **The bend and released voices** | **Every sounding voice follows the wheel**, releasing ones included. | A global pitch offset is simplest and what a wheel usually does. | Frozen at the note-off (the release keeps the pitch it had: 59.00 against 57.00 in the test). | L15 |
-| 17 | **MIDI learn for the bend** | **An interop feature (M1.10)**: the wheel is a learnable control. Nothing in the DSP. | v3.072: "Added MidiLearn for PitchBend". | — | L16 |
-| 18 | **CC 64's threshold** | **Down at 64 and above.** | The MIDI convention; v1.21's "Correct implementation of Midi CC's 64". | Hysteresis (one toggle per motion against 10 for a noisy pedal; 178 resting at 62); > 0. | L17 |
+| 14 | **The bend's resolution and smoothing** | **14-bit, with a linear ramp to each new value over 5 ms**, read by every voice at its own samples. | −113.8 dB of zipper against −75.5 stepped (7-bit: −74.5 against −64.2), for a lag of at most the ramp (12.5 cents at a fast 2 Hz wheel). | Stepped (Sylenth1 may step: the user reports); 10 ms (−81 dB on 7-bit, 25 cents of lag); a one-pole. | K14 |
+| 15 | **The Bend Range** | **One control, 0–24 semitones, the same up and down; 14-bit values scaled by 8,192 both ways.** | The manual's one control "in half notes"; v1.1's 24; full up 0.29 cents short at 24, inaudible, and the same step size both ways. | Exact at both ends (/8,191 up). The default range from the demo. | K13 |
+| 16 | **The bend and released voices** | **Every sounding voice follows the wheel**, releasing ones included. | A global pitch offset is simplest and what a wheel usually does. | Frozen at the note-off (the release keeps the pitch it had: 59.00 against 57.00 in the test). | K15 |
+| 17 | **MIDI learn for the bend** | **An interop feature (M1.10)**: the wheel is a learnable control. Nothing in the DSP. | v3.072: "Added MidiLearn for PitchBend". | — | K16 |
+| 18 | **CC 64's threshold** | **Down at 64 and above.** | The MIDI convention; v1.21's "Correct implementation of Midi CC's 64". | Hysteresis (one toggle per motion against 10 for a noisy pedal; 178 resting at 62); > 0. | K17 |
 | 19 | **The pedal in poly** | **Pedal-up releases only notes whose keys are up; a key played again under the pedal takes a new voice** (P7 as hypothesised). | The developer, 2007; measured: the key sounds twice, and pedal-up leaves a held key sounding. | Retriggering the sustained voice (1 voice on the key). | P7 |
-| 20 | **A sustained note in the steal order** | **Between: released notes first, then sustained ones, then held keys** (oldest first within each). | Counted as held, a pedalled melody steals the bass under the player's hand (stolen, against sounding); a sustained note's key is up, as the developer's "notes that are not being pressed". | As released (no difference from a fading note); as held. | L19 |
-| 21 | **The pedal in Mono Legato** | **The held-key stack follows the keys; the pedal holds the last note's gate; a key played while the pedal holds the note is legato.** | Returns work as without the pedal, and a note held by the pedal counts as held for the envelopes (0 retriggers against 1). | The stack follows the keys and a new key retriggers; released keys stay in the stack until pedal-up. | L18 |
+| 20 | **A sustained note in the steal order** | **Between: released notes first, then sustained ones, then held keys** (oldest first within each). | Counted as held, a pedalled melody steals the bass under the player's hand (stolen, against sounding); a sustained note's key is up, as the developer's "notes that are not being pressed". | As released (no difference from a fading note); as held. | K19 |
+| 21 | **The pedal in Mono Legato** | **The held-key stack follows the keys; the pedal holds the last note's gate; a key played while the pedal holds the note is legato.** | Returns work as without the pedal, and a note held by the pedal counts as held for the envelopes (0 retriggers against 1). | The stack follows the keys and a new key retriggers; released keys stay in the stack until pedal-up. | K18 |
 
 ### What the voice needs
 
@@ -534,6 +535,164 @@ The engine's events, 512-sample blocks, ns per sample, with the cost per event:
 - **E5** stands for every retrigger here: a gap in Slide, Polyphony 1, and the alternative return.
 - **F18–F22** stand. On the voice, the filter follows a glide to 0.24 cents and a 5 ms bend ramp to 0.14, fed at grid points.
 - **`dsp::Voice`'s "the note's glide, bend and master tune are task 3's":** the changes above, for the owner to approve.
+
+## The decision
+
+Chosen by the project owner on 2026-11-21: every recommendation, 1–21 (Decisions log).
+
+- **Mono Legato:**
+  - last-note priority;
+  - returns as legato notes, gliding as any legato note;
+  - the oscillators' phases kept;
+  - the velocity ramped over the glide;
+  - one voice whatever Polyphony, 0 included;
+  - a switch releases every note.
+- **Portamento:**
+  - constant time, linear in semitones, from the pitch reached;
+  - Portamento 0 is a jump, and the knob's law is the parameter table's;
+  - Normal glides only from a held key, and Slide always, so after a gap the next note is a new note that glides;
+  - poly notes glide from the last note played.
+- **The pitch:** per sample while it moves, the constant path otherwise; keytrack as decided (F22).
+- **The bend:** 14-bit, ramped over 5 ms, 0–24 semitones both ways, scaled by 8192, reaching every sounding voice; MIDI learn for it is M1.10's.
+- **The pedal:**
+  - down at 64 and above;
+  - pedal-up releases only keys that are up;
+  - a key played again takes a new voice;
+  - a sustained note comes between released and held notes for stealing;
+  - in Mono Legato the stack follows the keys, and a key played under a pedal-held note is legato.
+
+## As built
+
+- **[glide.hpp](../../libs/dsp/include/anoesis/dsp/voice/glide.hpp), `Glide`:** a linear ramp in closed form from the samples since it began, from + (to − from) × n / N.
+  - N = round(seconds × rate). The time is clamped to 60 s. A time of 0, NaN or a negative one, or a glide to the note it is on, is a jump.
+  - `at(ahead)` reads ahead without advancing, which is how the voice feeds keytrack for a segment's end. `advance(n)` moves on, and the value lands exactly on the target after N samples.
+  - `startSamples()` gives the velocity's ramp the pitch's length.
+  - The arithmetic is the prototype's, so the voice is the prototype's to the bit.
+- **[pitch_bend.hpp](../../libs/dsp/include/anoesis/dsp/voice/pitch_bend.hpp), `PitchBend` and `pitchBendFraction()`:**
+  - `pitchBendFraction()` is (value − 8192) / 8192, clamped to 0–16383.
+  - The range is 0–24 semitones (default 2; NaN ignored) and applies from the next value.
+  - Each value is reached by a 5 ms linear ramp (240 samples at 48 kHz) from where the bend is, at absolute sample times.
+  - `isSteadyFrom(t)` tells a voice when it can use its constant path.
+- **[voice_knobs.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice_knobs.hpp):**
+  - `VoiceKnobs` is what was `VoiceFilterKnobs` in voice.hpp, renamed and moved here so the allocator needn't include the voice. It gains `bend` (a `PitchBend*`) and `time` (the absolute sample of the block's first sample), and `advanced(n)` moves both. The filter fields and their order are unchanged, so every caller that set them still compiles.
+  - `NoteStart` says how a note-on moves the pitch and the velocity: the velocity, whether it glides, from where, over what time, and the velocity a gliding note ramps from.
+- **[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp), `dsp::Voice`:**
+  - **`noteOn(note, knobs, start = {})`** jumps or glides the pitch. The velocity is taken at once, or ramped from `start.fromVelocity` over the glide. The rest is unchanged: from silence the filters are fed and reset; on a sounding voice they keep their state.
+  - **`legatoNoteOn(note, knobs, start)`** moves the pitch the same way and ramps the velocity from where it is over the glide. The envelopes get `legatoGateOn()`: a held one goes on, and a released one opens again. Nothing else restarts: the phases whatever Retrig says, the drift, the filters and the grid. On a voice that isn't sounding it is `noteOn()`.
+  - **Rendering.** A chunk (at most 32 samples) is *moving* when the glide hasn't ended at its start, or the bend isn't steady from there.
+    - Moving, the slots get a note per sample (glide + bend + drift) through `process(out, notes)`.
+    - Otherwise they get one note, as before. At a constant pitch the two are identical to the bit, so switching between them is exact.
+  - **Keytrack** follows the glide plus the bend plus `masterTuneSemitones()`, read at each grid point for the segment's end (F18, F19, F22), and at a note-on from silence for its sample.
+  - **`setMasterTune(hz)`** sets the four slots' reference and keytrack's offset. Anything not finite and positive counts as 440.
+  - **Readouts:** `currentPitch()`, `targetPitch()`, `hasPlayed()`, `velocity()`. `stop()` keeps the pitch, so Slide glides from the last note after its voice was freed. `reset()` puts it at A4.
+- **[voice_allocator.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice_allocator.hpp), `VoiceAllocator`:**
+  - **Its interface:**
+    - `VoiceEvent` gains a velocity (1–127, clamped) and three kinds: `pedal` (CC 64's value), `pitchBend` (14-bit) and `monoLegato` (0 or not).
+    - Settings: `setMonoLegato`, `setPortamento(seconds)` (NaN or negative counts as 0), `setPortamentoMode` (`PortamentoMode::normal`, `slide`) and `setBendRange`.
+    - Readouts: `monoKey()`, `isPedalDown()`, `isSustained(i)`.
+    - `AllocatableVoice` now requires `VoiceKnobs`, the three-argument `noteOn`, `legatoNoteOn`, `currentPitch()`, `hasPlayed()` and `velocity()`.
+  - **What it keeps:** a map of the 128 keys down, a stack of the keys held in Mono Legato, the last key played and its velocity, the voice that took it, the pedal, a `sustained` flag per record, one `PitchBend`, and a sample clock from `prepare()`/`reset()` that gives the bend's absolute times. Each block's knobs get the bend and the clock.
+  - **Mono Legato:**
+    - Voice 0 alone, with no Polyphony check (0 included).
+    - A note-on while no key is held (and no pedal-held note) is a new note: `noteOn`, a retrigger in place if the voice sounds. Otherwise it is a legato note on the new key.
+    - A note-off of the sounding key returns, legato, to the most recent key still held.
+    - The last key up releases the voice, or, under the pedal, marks it sustained.
+    - The glide starts from the voice's `currentPitch()`: in Normal only for a legato note; in Slide always, once the voice has played.
+  - **Poly:** as before, plus:
+    - Normal glides when another key is down. Slide always glides, once a note has played.
+    - The glide starts from the last note played: its voice's `currentPitch()` and `velocity()` if that voice still plays it, else its key and velocity.
+    - Under the pedal a note-off marks the record sustained instead of releasing. Pedal-up releases every sustained record whose key is up.
+    - A steal takes the oldest of the lowest tier: released (0), sustained (1), held (2).
+  - **A switch of Mono Legato** (a setter or an event) releases every busy voice whose key is down or sustained, and clears the stack and the mono key. The same value again does nothing.
+  - **`reset()`** frees every voice, lets go of every key and the pedal, and puts the bend at 0 and the clock at 0. It keeps the settings: Polyphony, Mono Legato, portamento and the Bend Range.
+- **Settled in the build:**
+  - A gliding note-on ramps its velocity from the last note's: recommendation 4's "wherever a note glides", which the prototype left as a jump. Velocity reaches no audio until M1.5, so the output is still the prototype's to the bit.
+  - The stage-1 report's `VoiceAllocator<PitchedVoice>` row is retired. The allocator's concept now requires the library's `VoiceKnobs`, and the report's `Engine` row (the prototype engine against `VoiceAllocator<dsp::Voice>`) covers the same comparison.
+
+### Tests
+
+[glide_test.cpp](../../tests/dsp/voice/glide_test.cpp) and [legato_test.cpp](../../tests/dsp/voice/legato_test.cpp) have 21 test cases. The allocator's stub voice moved to [stub_voice.hpp](../../tests/dsp/voice/stub_voice.hpp), which also records legato notes and the pitch each note started from.
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| Glide | a jump; an octave in 100 ms is 4800 samples, at(1200/2400/4800) = 51/54/60; every sample within 3.9e-6 of the line; constant time for a semitone and two octaves; advancing equals reading ahead; 0, negative, NaN and tiny times jump; clamped at 60 s; in samples; the rate | exact where the arithmetic is exact; otherwise one rounding each of the product and the sum (≤ 3.9e-6 below 64) |
+| PitchBend | the fraction at 0, 4096, 8192, 16383 and clamped outside, `constexpr`; 0 until a value; the ramp's start, middle and end at 48 kHz, steady from 240 samples on; a value mid-ramp continuous; the range from the next value, clamped, NaN ignored; 96 kHz; reset | exact (1 ULP at the ramp's middle) |
+| The voice against the prototype | dsp::Voice against the stage-1 `PitchedVoice` (per sample) through glides on legato notes and on a retrigger, a legato note at Portamento 0, a 2 Hz wheel every 96 samples, velocities, a note-off; three patches (the pad with drift, a crossing patch with Retrig on, a sine); host blocks 1/37/4096 against 4096 | bit for bit; 0 allocations from `prepare()` on |
+| A glide on its line | after each sample of an octave glide, the oscillator's increment against the formula | 0.01 cents (the increment's quantum is 1e-4 cents, a float note's 4e-4) |
+| The bend | per sample through a value's 240-sample ramp; no bend without one in the knobs; `currentPitch()` without the bend | 0.01 cents |
+| A legato note leaves the envelopes and phases alone | the decay goes on (a note-on attacks); the envelopes' levels equal a voice with no legato note, bit for bit, while the pitch is the new note's; a released envelope opens again; Retrig on and Phase 180: the largest step between samples at the change within 1% of the new pitch's own slope, and a retrigger more than twice it | bit for bit; 1% (one sample's slope change at the corner) |
+| Keytrack | the filter's cutoff after a glide's segment (52, then 60), with the bend at full range 12, and at 432 Hz, against the steady cutoff | 2e-5 relative (the cutoff law in float) |
+| The master tune | A4 plays `incrementFor(432)`; NaN, 0, −5, inf count as 440 | exact |
+| Velocity | at once at a note-on; ramped over a legato glide (0.8 → 0.5 at half → 0.2); at once at Portamento 0; a gliding note-on from `fromVelocity`, a jumping one not | 1e-6 at a ramp's middle; exact at its ends |
+| The pitch through `stop()` and `reset()` | 54 half way, kept by `stop()`; a jump; 69, unplayed and velocity 1 after `reset()` | exact |
+| Mono Legato's priority | on a stub: C3, G3, E3 down, released in turn, the returns legato to the key held before; a non-sounding key's release changes nothing; the last up releases; only voice 0 plays; Polyphony 0; a new phrase a retrigger | exact |
+| Normal and Slide | the first note jumps; a legato one glides from the pitch the voice reached (49.5); a return too, at its velocity; a gap: Normal jumps, Slide glides from the last note at its velocity; Portamento 0 never glides | exact |
+| An interrupted glide | on dsp::Voice: C5 over C3 in 200 ms reaches 60 half way; E4 there glides from 60 (62 after another half) | 1e-5 |
+| Poly portamento | the first note doesn't glide; one over a held key glides from the last note's voice's pitch (48.7) and velocity; then from the next; nothing held in Normal: no glide; Slide after the last note's voice was freed: from its key | exact |
+| A switch of Mono Legato | three held notes released; the same value twice changes nothing; a released key's later note-off changes nothing; the next note plays mono; an event at its sample back to poly | exact |
+| The pedal in poly | 63 up, 64 down; a key released under it sustained, not released; played again, a new voice; pedal-up releases both and leaves the held key; the steal order released → sustained → held, with the sustained note older than the released one | exact |
+| The pedal in Mono Legato | a release returns to the held key; the last up leaves the note sustained; a key under it legato; pedal-up with a key held changes nothing; with none, releases | exact |
+| The bend through the allocator | on dsp::Voice: a held and a releasing voice both bent at the value's sample; the range from the next value; `reset()` with the pedal down and a mono note: all released, no bend after | 0.01 cents |
+| Velocity | 64 → 64/127, 0 → 1/127, 200 → 1 | exact |
+| The allocator against the prototype | VoiceAllocator<dsp::Voice> against the stage-1 `Engine` in its decided configuration (per sample): the mono sequence (Slide, returns, a gap, the pedal) and the poly one (Normal, steals, the pedal), both with the wheel; host blocks 1/37/4096 | bit for bit; 0 allocations from `prepare()` on |
+
+**Red first**, against inert headers with the decided interface (`Glide` and `PitchBend` returning 0, `legatoNoteOn` doing nothing, the allocator ignoring the new events and settings): 20 of the 21 test cases failed (158 assertions).
+
+- During the red run, three tests turned out to pass for the wrong reason, and were strengthened before going on:
+  - the envelopes' and the phases' sections passed with a legato note that did nothing, so both now require the new pitch;
+  - the steal order passed with the pedal ignored (every note simply released), so the sustained note is now older than the released one, which only the tiered order puts second.
+- Then 30 deliberate breaks of the new code:
+  - **The first pass caught 27.** They covered:
+    - the glide not ramping, not advancing, or its time not clamped;
+    - the bend stepping, ramping from 0, scaled by 8191, or its range unclamped;
+    - a legato note restarting the slots or retriggering the envelopes;
+    - the voice never per sample, or deaf to a bend's ramp;
+    - keytrack without the master tune, or at the segment's start;
+    - a legato velocity taken at once;
+    - the master tune not reaching the slots;
+    - a return to the first key held, or as a retrigger;
+    - Normal gliding after a gap;
+    - a poly glide from the chosen voice, or ignoring held keys in Normal;
+    - pedal-up releasing held keys;
+    - no legato under a pedal-held mono note;
+    - CC 64 above 64;
+    - a switch releasing nothing;
+    - `reset()` keeping the bend;
+    - the glide from the last target;
+    - no bend reaching the voices.
+  - **One survived:** counting a sustained note as held. In the steal-order test the sustained note was also the oldest, so "as held" stole it at the same point.
+  - **One didn't compile** under `-Werror` (a bend of 0 that left its arguments unused). It was rewritten, and then caught.
+  - The steal-order test was strengthened: the held key is now the oldest, the sustained note between, and the released note the newest. With one more break (a sustained note counted as released), all 30 were caught.
+
+### Results, as built
+
+- **Bit for bit the stage-1 prototype:**
+  - the voice: 9 of 9 (three patches at three block sizes);
+  - the allocator: 6 of 6 (two sequences at three block sizes);
+  - 0 allocations.
+- **The stage-1 report reproduces unchanged**, except its retired row.
+- **The task-1 and task-2 tests pass unchanged.** Only the stub voice moved to a shared header, and the knobs type was renamed.
+
+**CPU** (`tools/bench.sh "[legato]"`, `relwithdebinfo`, the same machine, the median of three runs; one voice; ns per sample):
+
+| Benchmark | as built | the stage-1 prototype (this session) |
+|---|---:|---:|
+| `dsp::Voice`, init, constant pitch | 369.23 | 368.32 (`dsp::Voice` before task 3's rows: 367.64) |
+| `dsp::Voice`, init, gliding 3 octaves a second | 383.48 | 387.34 (per sample) |
+| `dsp::Voice`, init, the wheel every 96 samples | 367.21 | 375.50 (per sample) |
+| `dsp::Voice`, worst case, gliding | 843.63 | 849.80 (per sample); `dsp::Voice` constant 743.65 |
+| `VoiceAllocator` Mono Legato, one key held, no events | 361.85 | 359.84 |
+| … 64 legato note events per block | 388.86 (216 ns per event) | 389.99 |
+| … 64 with a 30 ms glide | 389.49 (221 ns per event) | 386.79 |
+| … 64 pedal toggles per block | 381.00 (153 ns per event) | 377.82 |
+| `VoiceAllocator`, 64 poly note events with glides on voices with no oscillators | 156.98 (1.26 µs per event) | 161.50 (`Engine`) |
+
+- **A constant pitch costs what it did** (369.23 against 368.32 in the same runs): the constant path is the old one.
+- **A moving pitch costs 4% (init) to 13% (worst case)**, as stage 1 measured for per sample.
+- **An event** costs about 0.2 µs in Mono Legato and 1.26 µs for a poly note-on from silence, within noise of the prototype.
+- One run read 1,252 ns for `dsp::Voice`'s worst case, against 743 in the other two: this machine's noise again.
+
+**Memory:** `dsp::Voice` gains two 32-float buffers and two glides, about 0.3 KB on 25 KB. `VoiceAllocator` gains the key map, the stack, the bend and a few words, about 0.7 KB on its 400 KB of voices.
 
 ## References
 

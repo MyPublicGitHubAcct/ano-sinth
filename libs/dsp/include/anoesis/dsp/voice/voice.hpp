@@ -13,6 +13,9 @@
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
+#include <anoesis/dsp/voice/glide.hpp>
+#include <anoesis/dsp/voice/pitch_bend.hpp>
+#include <anoesis/dsp/voice/voice_knobs.hpp>
 
 #include <algorithm>
 #include <array>
@@ -54,19 +57,27 @@
 ///   note-on on a sounding voice (a steal, a retrigger in place) keeps the
 ///   filters and the grid; isActive() counts only what can be heard; stop()
 ///   silences a finished voice so its next note starts from silence.
+/// - The pitch (M1.4 task 3, docs/dsp/legato-portamento.md): a Glide
+///   (linear in semitones, constant time, from NoteStart) plus the global
+///   PitchBend read through the knobs at absolute samples. While it moves in
+///   a chunk the slots get a note per sample; otherwise one, which is the
+///   same to the bit at a constant pitch. Keytrack follows the glide, the
+///   bend and the master tune (setMasterTune()), fed for the segment's end.
+///   legatoNoteOn() moves the pitch and leaves the envelopes to
+///   Adsr::legatoGateOn(), the phases, drift, filters and grid untouched.
+///   The velocity ramps over a glide (the velocity source, M1.5).
 ///
 /// Rendering runs in chunks that stop at the grid (at most 32 samples): the
 /// four slots added into their part's buffer (in drift's runs of constant
 /// offset), both envelopes, each filter's input built in its own buffer,
 /// the filters in place, and each filter's output times its part's envelope
 /// added into channels 0 and 1 of the caller's block. The scratch is fixed
-/// (10 buffers of 32 samples), so nothing is allocated, prepare() included;
+/// (12 buffers of 32 samples), so nothing is allocated, prepare() included;
 /// the output does not depend on how the caller splits its blocks.
 ///
-/// Mix A/B, velocity and the voice's output bus are the mixer's (task 4)
-/// and the modulation system's (M1.5); the note's glide, bend and master
-/// tune are task 3's. About 25 KB at 64 taps.
-/// Doc: docs/dsp/voice-architecture.md
+/// Mix A/B, velocity's routes and the voice's output bus are the mixer's
+/// (task 4) and the modulation system's (M1.5). About 25 KB at 64 taps.
+/// Docs: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md
 namespace anoesis::dsp
 {
 
@@ -79,38 +90,12 @@ enum class FilterInput : std::uint8_t
     both, ///< AB: both parts, summed
 };
 
-/// The global knobs that feed a voice's filters through the Filter Control
-/// (filter_control.hpp): the parameter layer's ramps, each positioned
-/// `offset` samples before the first sample of the block the voice
-/// processes next (or of its note-on), read ahead with
-/// LinearSmoother::valueAfter(). A null ramp reads as 0.
-struct VoiceFilterKnobs
-{
-    std::array<const LinearSmoother*, 2> cutoff{};    ///< Cutoff A, Cutoff B (knob units)
-    std::array<const LinearSmoother*, 2> resonance{}; ///< Resonance A, Resonance B
-    const LinearSmoother* controlCutoff = nullptr;    ///< the Filter Control's Cutoff
-    const LinearSmoother* controlResonance = nullptr; ///< the Filter Control's Resonance
-    float keytrack = 0.0f;                            ///< the Keytrack knob, 0-10
-    /// Samples from where the ramps stand to the first sample of the block
-    /// the voice is given: 0 when the voice gets the whole host block, and
-    /// the piece's start when an allocator renders it in pieces.
-    std::size_t offset = 0;
-
-    /// The same knobs for a block starting `samples` later.
-    [[nodiscard]] constexpr VoiceFilterKnobs advanced(std::size_t samples) const noexcept
-    {
-        VoiceFilterKnobs k = *this;
-        k.offset += samples;
-        return k;
-    }
-};
-
 template <std::size_t Taps = minBlepTaps>
 class Voice
 {
 public:
     using Slot = OscillatorSlot<Taps>;
-    using Knobs = VoiceFilterKnobs;
+    using Knobs = VoiceKnobs;
     static constexpr std::size_t partCount = 2;
     static constexpr std::size_t slotsPerPart = 2;
     static constexpr std::size_t slotCount = partCount * slotsPerPart;
@@ -229,6 +214,8 @@ public:
             e.prepare(spec);
         }
         pitchDrift.prepare(spec);
+        glide.prepare(spec.sampleRate);
+        velocityRamp.prepare(spec.sampleRate);
         reset();
     }
 
@@ -252,12 +239,18 @@ public:
         gridPosition = 0;
         lastOctaves = {};
         lastK = {};
+        glide.jump(referenceNote);
+        velocityRamp.jump(1.0f);
+        played = false;
     }
 
     /// A note-on before the next process() call, with the knobs positioned at
-    /// its sample. The slots, the drift and both envelopes start (or, on a
-    /// sounding voice, retrigger: the slots as Retrig says, the envelopes
-    /// attacking from their level).
+    /// its sample. The pitch jumps to `note`, or glides to it from
+    /// `start.from` over `start.glideSeconds` (linear in semitones); the
+    /// velocity is `start.velocity`, or, while it glides, ramps there from
+    /// `start.fromVelocity` over the same time. The slots, the drift and both
+    /// envelopes start (or, on a sounding voice, retrigger: the slots as
+    /// Retrig says, the envelopes attacking from their level).
     ///
     /// - From silence (isActive() false): pending routing applies, and each
     ///   filter is fed for this sample and reset(), so the voice's grid
@@ -266,13 +259,23 @@ public:
     ///   keep their state and the voice keeps its grid, counted from the
     ///   note-on from silence; the new note's keytrack reaches the filters at
     ///   the next grid point, and pending routing applies there, as during
-    ///   any note (M1.4 task 2: a reset there clicks as hard as a cut).
+    ///   any note (M1.4 task 2: a reset there clicks as hard as a cut). The
+    ///   oscillators take the new pitch at once.
     ///
     /// A voice that has finished should be stop()ped before its next note.
-    void noteOn(float note, const VoiceFilterKnobs& knobs) noexcept
+    void noteOn(float note, const VoiceKnobs& knobs, const NoteStart& start = {}) noexcept
     {
         const bool sounding = isActive();
-        voiceNote = note;
+        startPitch(note, start);
+        if (glide.isGliding())
+        {
+            velocityRamp.startSamples(start.fromVelocity, start.velocity, glide.lengthSamples());
+        }
+        else
+        {
+            velocityRamp.jump(start.velocity);
+        }
+        played = true;
         for (auto& s : slots)
         {
             s.noteOn();
@@ -287,12 +290,35 @@ public:
             return;
         }
         applyPending();
-        feedFilters(knobs, 0);
+        feedFilters(knobs, 0, keytrackPitch(knobs, 0, 0));
         for (auto& f : filters)
         {
             f.reset();
         }
         gridPosition = 0;
+    }
+
+    /// A legato note (Mono Legato, M1.4 task 3): the pitch jumps or glides to
+    /// `note` as at noteOn(), and the velocity ramps from where it is to
+    /// `start.velocity` over the glide (at once without one). Nothing else
+    /// restarts: the envelopes are left to Adsr::legatoGateOn() (a held one
+    /// goes on; a released one opens again), the oscillators keep their
+    /// phases whatever Retrig says, and the drift, the filters and the grid
+    /// carry on. On a voice that isn't sounding it is noteOn().
+    void legatoNoteOn(float note, const VoiceKnobs& knobs, const NoteStart& start) noexcept
+    {
+        if (!isActive())
+        {
+            noteOn(note, knobs, start);
+            return;
+        }
+        startPitch(note, start);
+        velocityRamp.startSamples(velocityRamp.at(0), start.velocity, glide.lengthSamples());
+        played = true;
+        for (auto& e : envelopes)
+        {
+            e.legatoGateOn();
+        }
     }
 
     void noteOff() noexcept
@@ -301,6 +327,47 @@ public:
         {
             e.gateOff();
         }
+    }
+
+    /// The master tune: the frequency of A4 in Hz, for the four slots and for
+    /// keytrack (inventory F19: the filter follows it). Anything not finite
+    /// and positive counts as 440.
+    void setMasterTune(float referenceHz) noexcept
+    {
+        const bool valid = std::isfinite(referenceHz) && referenceHz > 0.0f;
+        masterTuneHz = valid ? referenceHz : concertPitchHz;
+        masterTuneOffset = masterTuneSemitones(masterTuneHz);
+        for (auto& s : slots)
+        {
+            s.setReferenceHz(masterTuneHz);
+        }
+    }
+    [[nodiscard]] float masterTune() const noexcept
+    {
+        return masterTuneHz;
+    }
+
+    /// The pitch the glide has reached (a fractional note, without the bend
+    /// or the master tune), and the note it is heading for. stop() keeps
+    /// them, so a note after the voice has finished can glide from there;
+    /// reset() puts them at A4.
+    [[nodiscard]] float currentPitch() const noexcept
+    {
+        return glide.at(0);
+    }
+    [[nodiscard]] float targetPitch() const noexcept
+    {
+        return glide.target();
+    }
+    /// Whether a note has played since prepare() or reset().
+    [[nodiscard]] bool hasPlayed() const noexcept
+    {
+        return played;
+    }
+    /// The note's velocity now, 0-1 (the velocity modulation source, M1.5).
+    [[nodiscard]] float velocity() const noexcept
+    {
+        return velocityRamp.at(0);
     }
 
     /// Silences the voice at once: the slots and the drift stop and the
@@ -371,7 +438,7 @@ public:
 
     /// Adds the voice into channels 0 and 1 of `out` (two channels needed),
     /// with the knobs positioned at its first sample.
-    void process(const AudioBlock& out, const VoiceFilterKnobs& knobs) noexcept
+    void process(const AudioBlock& out, const VoiceKnobs& knobs) noexcept
     {
         const auto n = out.numSamples();
         std::size_t done = 0;
@@ -380,10 +447,12 @@ public:
             if (gridPosition == 0)
             {
                 applyPendingAtGrid(knobs, done);
-                feedFilters(knobs, done + gridSamples);
+                feedFilters(knobs, done + gridSamples, keytrackPitch(knobs, done, gridSamples));
             }
             const auto length = std::min(n - done, gridSamples - gridPosition);
-            renderChunk(out.subBlock(done, length));
+            renderChunk(out.subBlock(done, length), knobs, done);
+            glide.advance(length);
+            velocityRamp.advance(length);
             done += length;
             gridPosition = (gridPosition + length) % gridSamples;
         }
@@ -398,6 +467,39 @@ private:
         bool active = false; ///< the filter has an input (not "--")
         bool both = false;   ///< AB
     };
+
+    void startPitch(float note, const NoteStart& start) noexcept
+    {
+        if (start.glide)
+        {
+            glide.start(start.from, note, start.glideSeconds);
+        }
+        else
+        {
+            glide.jump(note);
+        }
+    }
+
+    /// The bend `ahead` samples into the block these knobs are for.
+    [[nodiscard]] static float bendAt(const VoiceKnobs& knobs, std::size_t ahead) noexcept
+    {
+        return knobs.bend != nullptr ? knobs.bend->semitonesAt(knobs.time + ahead) : 0.0f;
+    }
+
+    /// The oscillators' pitch `ahead` samples after the block's sample `done`,
+    /// where the glide stands (the glide plus the bend; the master tune is
+    /// the slots').
+    [[nodiscard]] float pitchAt(const VoiceKnobs& knobs, std::size_t done, std::size_t ahead) const noexcept
+    {
+        return glide.at(ahead) + bendAt(knobs, done + ahead);
+    }
+
+    /// The pitch keytrack follows (F18, F19): the oscillators' plus the
+    /// master tune.
+    [[nodiscard]] float keytrackPitch(const VoiceKnobs& knobs, std::size_t done, std::size_t ahead) const noexcept
+    {
+        return pitchAt(knobs, done, ahead) + masterTuneOffset;
+    }
 
     [[nodiscard]] std::size_t partVoices(std::size_t p) const noexcept
     {
@@ -442,7 +544,7 @@ private:
 
     /// At a grid point: a filter that comes on (from "--" or out of Bypass)
     /// is fed for this sample and starts from rest, on the voice's grid.
-    void applyPendingAtGrid(const VoiceFilterKnobs& knobs, std::size_t ahead) noexcept
+    void applyPendingAtGrid(const VoiceKnobs& knobs, std::size_t ahead) noexcept
     {
         std::array<bool, partCount> wasRunning{};
         for (std::size_t f = 0; f < partCount; ++f)
@@ -454,7 +556,7 @@ private:
         {
             if (routes[f].active && !filters[f].isBypassed() && !wasRunning[f])
             {
-                feedFilter(f, knobs, ahead, keytrackOctaves(voiceNote, knobs.keytrack / 10.0f));
+                feedFilter(f, knobs, ahead, keytrackOctaves(keytrackPitch(knobs, ahead, 0), knobs.keytrack / 10.0f));
                 filters[f].reset();
             }
         }
@@ -465,7 +567,7 @@ private:
         return ramp != nullptr ? ramp->valueAfter(ahead) : 0.0f;
     }
 
-    void feedFilter(std::size_t f, const VoiceFilterKnobs& knobs, std::size_t ahead, float keytrack) noexcept
+    void feedFilter(std::size_t f, const VoiceKnobs& knobs, std::size_t ahead, float keytrack) noexcept
     {
         ahead += knobs.offset; // the ramps stand that many samples before this block
         const float octaves = filterCutoffOctaves({
@@ -492,9 +594,9 @@ private:
     }
 
     /// Each running filter, for the sample `ahead` samples into the block.
-    void feedFilters(const VoiceFilterKnobs& knobs, std::size_t ahead) noexcept
+    void feedFilters(const VoiceKnobs& knobs, std::size_t ahead, float pitch) noexcept
     {
-        const float keytrack = keytrackOctaves(voiceNote, knobs.keytrack / 10.0f); // once for both
+        const float keytrack = keytrackOctaves(pitch, knobs.keytrack / 10.0f); // once for both
         for (std::size_t f = 0; f < partCount; ++f)
         {
             if (routes[f].active && !filters[f].isBypassed())
@@ -510,12 +612,24 @@ private:
         return {pointers.data(), 2, length};
     }
 
-    void renderChunk(const AudioBlock& out) noexcept
+    void renderChunk(const AudioBlock& out, const VoiceKnobs& knobs, std::size_t done) noexcept
     {
         const auto length = out.numSamples();
 
         // 1. The oscillators of each heard part, added into its buffer at the
-        // note plus drift, in runs of constant drift.
+        // pitch plus drift, in runs of constant drift. While the pitch moves
+        // (a glide, a bend's ramp) the slots take it every sample; otherwise
+        // once, which is the same to the bit at a constant pitch and cheaper.
+        const bool moving =
+            glide.isGliding() || (knobs.bend != nullptr && !knobs.bend->isSteadyFrom(knobs.time + done));
+        const float steadyPitch = pitchAt(knobs, done, 0);
+        if (moving)
+        {
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                pitches[i] = pitchAt(knobs, done, i);
+            }
+        }
         std::array<AudioBlock, partCount> parts{};
         for (std::size_t p = 0; p < partCount; ++p)
         {
@@ -528,6 +642,13 @@ private:
         pitchDrift.process(length,
                            [&](std::size_t start, std::size_t run, float offset) noexcept
                            {
+                               if (moving)
+                               {
+                                   for (std::size_t i = 0; i < run; ++i)
+                                   {
+                                       notes[i] = pitches[start + i] + offset;
+                                   }
+                               }
                                for (std::size_t p = 0; p < partCount; ++p)
                                {
                                    if (!heard[p])
@@ -538,9 +659,17 @@ private:
                                    for (std::size_t s = 0; s < slotsPerPart; ++s)
                                    {
                                        auto& slot = slots[(p * slotsPerPart) + s];
-                                       if (slot.soundingVoices() > 0)
+                                       if (slot.soundingVoices() == 0)
                                        {
-                                           slot.process(piece, voiceNote + offset);
+                                           continue;
+                                       }
+                                       if (moving)
+                                       {
+                                           slot.process(piece, std::span<const float>{notes}.first(run));
+                                       }
+                                       else
+                                       {
+                                           slot.process(piece, steadyPitch + offset);
                                        }
                                    }
                                }
@@ -644,7 +773,13 @@ private:
 
     std::array<float, partCount> lastOctaves{};
     std::array<float, partCount> lastK{};
-    float voiceNote = 69.0f;
+    Glide glide;
+    Glide velocityRamp; ///< the note's velocity, 0-1, ramped over a glide
+    Chunk pitches{};    ///< the pitch per sample of a chunk while it moves
+    Chunk notes{};      ///< ... plus drift, for one of drift's runs
+    float masterTuneHz = concertPitchHz;
+    float masterTuneOffset = 0.0f; ///< masterTuneSemitones(masterTuneHz): 0 at 440
+    bool played = false;
     std::size_t gridPosition = 0;
 };
 

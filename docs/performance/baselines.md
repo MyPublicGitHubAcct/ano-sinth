@@ -6,6 +6,28 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 legato and portamento, as built
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[legato]"`, 100 samples per benchmark, three runs; each row's median.
+- **What changed** ([legato-portamento.md](../dsp/legato-portamento.md#as-built)): `dsp::Voice` has a pitch input (a note per sample to the slots while the pitch moves, once otherwise), and `VoiceAllocator` Mono Legato, portamento, the bend and the pedal. The `[legato]` benchmarks add the built rows; the prototype's stay. One voice per row.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| `dsp::Voice`, init: constant pitch / gliding / the wheel every 96 samples | 369.23 / 383.48 / 367.21 |
+| `dsp::Voice`, worst case: constant / gliding | 743.65 / 843.63 |
+| `VoiceAllocator` Mono Legato, init: no events / 64 legato notes / 64 with a glide / 64 pedal toggles per block | 361.85 / 388.86 / 389.49 / 381.00 |
+| `VoiceAllocator`, 64 poly note events with glides per block, no oscillators | 156.98 |
+| the prototype, the same rows (per sample) | 368.32 / 387.34 / 375.50; 849.80; 359.84 / 389.99 / 386.79 / 377.82; 161.50 (`Engine`) |
+
+### Observations
+
+- **A constant pitch costs nothing** (369.23 against 368.32): the voice uses its old path when the pitch doesn't move.
+- **A moving pitch costs 4% (init) to 13% (worst case)**, the slots' per-sample note conversion, as stage 1 measured.
+- **Per event:** a legato note about 216 ns, a pedal toggle about 153, a poly note-on from silence 1.26 µs, within noise of the prototype.
+- **Noise:** one run read 1,252 ns for `dsp::Voice`'s worst case against 743 in the other two.
+
+---
+
 ## 2026-11-21: M1.4 legato and portamento, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[legato]"`, 100 samples per benchmark, three runs; the table gives each row's median.

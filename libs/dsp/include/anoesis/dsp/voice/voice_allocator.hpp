@@ -5,9 +5,12 @@
 
 #include <anoesis/dsp/core/audio_block.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
+#include <anoesis/dsp/voice/pitch_bend.hpp>
+#include <anoesis/dsp/voice/voice_knobs.hpp>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -19,8 +22,9 @@
 /// from measured candidates (docs/dsp/voice-allocation.md):
 ///
 /// - A note-on takes a free voice while fewer than Polyphony notes are busy.
-///   Otherwise it steals the oldest voice whose key is up (released), else
-///   the oldest; and retriggers it in place: the voice's noteOn() on a
+///   Otherwise it steals the oldest voice whose key is up and isn't held by
+///   the pedal (released), else the oldest sustained by the pedal, else the
+///   oldest; and retriggers it in place: the voice's noteOn() on a
 ///   sounding voice (for dsp::Voice: the slots as Retrig says, the
 ///   envelopes from their level, the filters and grid kept).
 /// - A key played again takes a new voice; the old note's release overlaps
@@ -44,9 +48,35 @@
 /// is constructed in place from the constructor's arguments followed by its
 /// seed (voiceSeed()). Nothing allocates; prepare() is the voices'.
 ///
-/// Mono Legato, portamento, the hold pedal and the arpeggiator's voices are
-/// M1.4 task 3's and M1.6's.
-/// Doc: docs/dsp/voice-allocation.md
+/// Mono Legato, portamento, the pitch bend and the hold pedal (M1.4 task 3,
+/// chosen by the project owner from measured candidates,
+/// docs/dsp/legato-portamento.md):
+///
+/// - Mono Legato: voice 0 alone, whatever Polyphony (0 included), with a
+///   stack of the keys held. Last-note priority: the most recent key held
+///   sounds; releasing it returns to the key held before it as a legato
+///   note (the voice's legatoNoteOn()). A key pressed while none is held is
+///   a new note (a retrigger in place, from the envelopes' level). A switch
+///   of Mono Legato releases every sounding note; keys still down sound
+///   when next played.
+/// - Portamento: a time in seconds (0: none) and a mode. Normal glides only
+///   while another key is held; Slide always, and after a gap the next note
+///   is a new note that glides. A glide starts from the pitch reached: in
+///   Mono Legato the voice's own; in poly the last note played (its voice's
+///   pitch now, if that voice still plays it, else its key). A gliding
+///   note's velocity ramps from the last note's.
+/// - The bend: one PitchBend for every voice, set at each bend event at its
+///   absolute sample (counted from prepare() or reset()) and read by every
+///   sounding voice, releasing ones included, through its knobs.
+/// - The hold pedal (CC 64, down at 64 and above): a key released under it
+///   keeps its gate; pedal-up releases the voices whose keys are up; a key
+///   played again under it takes a new voice. For stealing, a sustained note
+///   comes after released ones and before held keys. In Mono Legato the
+///   stack follows the keys, the pedal holds the last note's gate, and a key
+///   played while it does is legato.
+///
+/// The arpeggiator's voices are M1.6's.
+/// Doc: docs/dsp/voice-allocation.md, docs/dsp/legato-portamento.md
 namespace anoesis::dsp
 {
 
@@ -62,25 +92,39 @@ namespace anoesis::dsp
 /// for a finished voice, the readout's counts, and knobs that can be
 /// advanced into a block.
 template <typename V>
-concept AllocatableVoice = requires(V& v, const V& cv, float note, const V::Knobs& knobs, const AudioBlock& block,
-                                    const ProcessSpec& spec, std::size_t samples) {
-    v.prepare(spec);
-    v.reset();
-    v.noteOn(note, knobs);
-    v.noteOff();
-    v.stop();
-    v.process(block, knobs);
-    { cv.isActive() } -> std::convertible_to<bool>;
-    { cv.activeOscillatorVoices() } -> std::convertible_to<std::size_t>;
-    { cv.oscillatorVoicesPerNote() } -> std::convertible_to<std::size_t>;
-    { knobs.advanced(samples) } -> std::convertible_to<typename V::Knobs>;
-};
+concept AllocatableVoice = std::same_as<typename V::Knobs, VoiceKnobs> &&
+                           requires(V& v, const V& cv, float note, const VoiceKnobs& knobs, const NoteStart& start,
+                                    const AudioBlock& block, const ProcessSpec& spec) {
+                               v.prepare(spec);
+                               v.reset();
+                               v.noteOn(note, knobs, start);
+                               v.legatoNoteOn(note, knobs, start);
+                               v.noteOff();
+                               v.stop();
+                               v.process(block, knobs);
+                               { cv.isActive() } -> std::convertible_to<bool>;
+                               { cv.activeOscillatorVoices() } -> std::convertible_to<std::size_t>;
+                               { cv.oscillatorVoicesPerNote() } -> std::convertible_to<std::size_t>;
+                               { cv.currentPitch() } -> std::convertible_to<float>;
+                               { cv.hasPlayed() } -> std::convertible_to<bool>;
+                               { cv.velocity() } -> std::convertible_to<float>;
+                           };
 
 enum class VoiceEventKind : std::uint8_t
 {
-    noteOn,    ///< value: the key
-    noteOff,   ///< value: the key
-    polyphony, ///< value: the new limit, clamped to [0, maxVoices]
+    noteOn,     ///< value: the key
+    noteOff,    ///< value: the key
+    polyphony,  ///< value: the new limit, clamped to [0, maxVoices]
+    pedal,      ///< value: the hold pedal's CC 64, 0-127
+    pitchBend,  ///< value: the 14-bit bend, 0-16383
+    monoLegato, ///< value: Mono Legato off (0) or on
+};
+
+/// Portamento's modes (manual p. 29).
+enum class PortamentoMode : std::uint8_t
+{
+    normal, ///< glides only while at least one other key is held
+    slide,  ///< always glides to the next note, from the last
 };
 
 /// An event at a sample offset within the block it is passed with.
@@ -89,6 +133,7 @@ struct VoiceEvent
     std::size_t offset = 0;
     VoiceEventKind kind = VoiceEventKind::noteOn;
     int value = 0;
+    int velocity = 127; ///< a note-on's MIDI velocity, 1-127
 };
 
 template <AllocatableVoice V, std::size_t MaxVoices = 16>
@@ -140,10 +185,13 @@ public:
         {
             v.prepare(spec);
         }
+        bend.prepare(spec.sampleRate);
         clear();
     }
 
-    /// Every voice reset() (as freshly prepared) and free; Polyphony kept.
+    /// Every voice reset() (as freshly prepared) and free, no key held, the
+    /// pedal up, the bend at 0; the settings (Polyphony, Mono Legato,
+    /// portamento, Bend Range) kept.
     void reset() noexcept
     {
         for (auto& v : voices)
@@ -164,11 +212,72 @@ public:
         return limit;
     }
 
+    /// Mono Legato, from now (between blocks; within a block, a monoLegato
+    /// event). A change releases every sounding note.
+    void setMonoLegato(bool on) noexcept
+    {
+        if (on == mono)
+        {
+            return;
+        }
+        mono = on;
+        for (std::size_t i = 0; i < MaxVoices; ++i)
+        {
+            auto& r = records[i];
+            if (r.busy && (r.keyDown || r.sustained))
+            {
+                voices[i].noteOff();
+            }
+            r.keyDown = false;
+            r.sustained = false;
+        }
+        stackSize = 0;
+        monoNote = -1;
+    }
+    [[nodiscard]] bool monoLegato() const noexcept
+    {
+        return mono;
+    }
+    /// Portamento's time in seconds (0: no glide) and its mode, for the
+    /// glides that start from now.
+    void setPortamento(float seconds) noexcept
+    {
+        portamentoSeconds = std::isnan(seconds) ? 0.0f : std::max(seconds, 0.0f);
+    }
+    void setPortamentoMode(PortamentoMode newMode) noexcept
+    {
+        mode = newMode;
+    }
+    /// The Bend Range in semitones (0-24), from the next bend value.
+    void setBendRange(float semitones) noexcept
+    {
+        bend.setRange(semitones);
+    }
+
+    /// Mono Legato's sounding key (-1 when none has played since the last
+    /// prepare(), reset() or switch), the pedal, and a voice held by it.
+    [[nodiscard]] int monoKey() const noexcept
+    {
+        return monoNote;
+    }
+    [[nodiscard]] bool isPedalDown() const noexcept
+    {
+        return pedalDown;
+    }
+    [[nodiscard]] bool isSustained(std::size_t index) const noexcept
+    {
+        return records[index].busy && records[index].sustained;
+    }
+
     /// Adds the busy voices into `out`, handling `events` (sorted by offset;
     /// an offset past the block counts as its end) at their samples, with
-    /// the knobs positioned at the block's first sample.
-    void process(const AudioBlock& out, std::span<const VoiceEvent> events, const Knobs& knobs) noexcept
+    /// the knobs positioned at the block's first sample. The knobs' bend and
+    /// time are the allocator's own.
+    void process(const AudioBlock& out, std::span<const VoiceEvent> events, const Knobs& blockKnobs) noexcept
     {
+        Knobs knobs = blockKnobs;
+        knobs.bend = &bend;
+        knobs.time = clock;
         const auto n = out.numSamples();
         std::size_t from = 0;
         std::size_t e = 0;
@@ -193,6 +302,7 @@ public:
         {
             handle(events[e], knobs.advanced(n));
         }
+        clock += n;
     }
 
     /// The Voices readout: busy notes; their active oscillator voices; the
@@ -242,10 +352,13 @@ public:
     }
 
 private:
+    static constexpr std::size_t keyCount = 128;
+
     struct Record
     {
         bool busy = false;
         bool keyDown = false;
+        bool sustained = false; ///< key up, held by the pedal
         int note = 0;
         std::uint64_t age = 0;      ///< note-on order
         std::size_t sinceCheck = 0; ///< samples since the last check point
@@ -264,6 +377,16 @@ private:
         counter = 0;
         stealCount = 0;
         ignoredCount = 0;
+        keys = {};
+        stack = {};
+        stackSize = 0;
+        monoNote = -1;
+        lastKey = -1;
+        lastVelocity = 1.0f;
+        newest = MaxVoices;
+        pedalDown = false;
+        bend.reset();
+        clock = 0;
     }
 
     void free(std::size_t i) noexcept
@@ -286,21 +409,67 @@ private:
     void handle(const VoiceEvent& event, const Knobs& knobs) noexcept
     {
         freeFinished();
+        const int key = std::clamp(event.value, 0, static_cast<int>(keyCount) - 1);
         switch (event.kind)
         {
         case VoiceEventKind::noteOn:
-            noteOn(event.value, knobs);
+        {
+            const float velocity = static_cast<float>(std::clamp(event.velocity, 1, 127)) / 127.0f;
+            keys[static_cast<std::size_t>(key)] = true;
+            if (mono)
+            {
+                monoNoteOn(key, velocity, knobs);
+            }
+            else
+            {
+                noteOn(key, velocity, knobs);
+            }
+            lastKey = key;
+            lastVelocity = velocity;
             break;
+        }
         case VoiceEventKind::noteOff:
-            noteOff(event.value);
+            keys[static_cast<std::size_t>(key)] = false;
+            if (mono)
+            {
+                monoNoteOff(key, knobs);
+            }
+            else
+            {
+                noteOff(key);
+            }
             break;
         case VoiceEventKind::polyphony:
             setPolyphony(static_cast<std::size_t>(std::max(event.value, 0)));
             break;
+        case VoiceEventKind::pedal:
+            pedal(event.value >= 64);
+            break;
+        case VoiceEventKind::pitchBend:
+            bend.setValue(knobs.time, event.value);
+            break;
+        case VoiceEventKind::monoLegato:
+            setMonoLegato(event.value != 0);
+            break;
         }
     }
 
-    void noteOn(int key, const Knobs& knobs) noexcept
+    /// Whether a key other than `key` is down (Normal's condition).
+    [[nodiscard]] bool otherKeyHeld(int key) const noexcept
+    {
+        for (std::size_t k = 0; k < keyCount; ++k)
+        {
+            if (keys[k] && std::cmp_not_equal(k, key))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // --- Poly ---
+
+    void noteOn(int key, float velocity, const Knobs& knobs) noexcept
     {
         if (limit == 0)
         {
@@ -317,8 +486,21 @@ private:
             chosen = victim();
             ++stealCount;
         }
-        records[chosen] = {.busy = true, .keyDown = true, .note = key, .age = ++counter, .sinceCheck = 0};
-        voices[chosen].noteOn(static_cast<float>(key), knobs);
+        NoteStart start{.velocity = velocity};
+        const bool slides = mode == PortamentoMode::slide || otherKeyHeld(key);
+        if (slides && portamentoSeconds > 0.0f && lastKey >= 0)
+        {
+            // From the last note played: its voice's pitch and velocity now,
+            // if it still plays it, else its key and velocity.
+            const bool sounding = newest < MaxVoices && records[newest].busy && records[newest].note == lastKey;
+            start.glide = true;
+            start.from = sounding ? voices[newest].currentPitch() : static_cast<float>(lastKey);
+            start.glideSeconds = portamentoSeconds;
+            start.fromVelocity = sounding ? voices[newest].velocity() : lastVelocity;
+        }
+        records[chosen] = {.busy = true, .keyDown = true, .sustained = false, .note = key, .age = ++counter};
+        voices[chosen].noteOn(static_cast<float>(key), knobs, start);
+        newest = chosen;
     }
 
     void noteOff(int key) noexcept
@@ -329,7 +511,14 @@ private:
             if (r.busy && r.keyDown && r.note == key)
             {
                 r.keyDown = false;
-                voices[i].noteOff();
+                if (pedalDown)
+                {
+                    r.sustained = true;
+                }
+                else
+                {
+                    voices[i].noteOff();
+                }
             }
         }
     }
@@ -346,8 +535,19 @@ private:
         return MaxVoices;
     }
 
-    /// The oldest busy voice whose key is up, else the oldest. Only called
-    /// with at least one voice busy (Polyphony >= 1 notes are).
+    /// The steal order's tier: released notes (0), then those the pedal
+    /// sustains (1), then held keys (2).
+    [[nodiscard]] static int tier(const Record& r) noexcept
+    {
+        if (r.keyDown)
+        {
+            return 2;
+        }
+        return r.sustained ? 1 : 0;
+    }
+
+    /// The oldest busy voice of the lowest tier. Only called with at least
+    /// one voice busy (Polyphony >= 1 notes are).
     [[nodiscard]] std::size_t victim() const noexcept
     {
         std::size_t best = 0;
@@ -360,7 +560,9 @@ private:
                 continue;
             }
             const auto& b = records[best];
-            const bool better = !found || (r.keyDown != b.keyDown ? !r.keyDown : r.age < b.age);
+            const int rt = tier(r);
+            const int bt = tier(b);
+            const bool better = !found || (rt != bt ? rt < bt : r.age < b.age);
             if (better)
             {
                 best = i;
@@ -368,6 +570,132 @@ private:
             }
         }
         return best;
+    }
+
+    // --- The pedal ---
+
+    void pedal(bool down) noexcept
+    {
+        if (down == pedalDown)
+        {
+            return;
+        }
+        pedalDown = down;
+        if (down)
+        {
+            return;
+        }
+        if (mono)
+        {
+            if (records[0].busy && records[0].sustained)
+            {
+                records[0].sustained = false;
+                voices[0].noteOff();
+            }
+            return;
+        }
+        for (std::size_t i = 0; i < MaxVoices; ++i)
+        {
+            auto& r = records[i];
+            if (r.busy && r.sustained && !r.keyDown)
+            {
+                r.sustained = false;
+                voices[i].noteOff();
+            }
+        }
+    }
+
+    // --- Mono Legato ---
+
+    void push(int key) noexcept
+    {
+        remove(key);
+        stack[stackSize] = key;
+        ++stackSize;
+    }
+    void remove(int key) noexcept
+    {
+        const auto held = std::span{stack}.first(stackSize);
+        const auto it = std::ranges::find(held, key);
+        if (it != held.end())
+        {
+            std::copy(it + 1, held.end(), it);
+            --stackSize;
+        }
+    }
+
+    /// A note on the mono voice: legato while keys are held and it sounds,
+    /// else a new note (a retrigger in place, or from silence). It glides
+    /// from the pitch the voice has reached: always in Slide; in Normal only
+    /// as a legato note.
+    void monoPlay(int key, float velocity, bool legato, const Knobs& knobs) noexcept
+    {
+        auto& v = voices[0];
+        NoteStart start{.velocity = velocity, .fromVelocity = v.velocity()};
+        if (portamentoSeconds > 0.0f && v.hasPlayed() && (legato || mode == PortamentoMode::slide))
+        {
+            start.glide = true;
+            start.from = v.currentPitch();
+            start.glideSeconds = portamentoSeconds;
+        }
+        if (legato && records[0].busy && v.isActive())
+        {
+            v.legatoNoteOn(static_cast<float>(key), knobs, start);
+        }
+        else
+        {
+            v.noteOn(static_cast<float>(key), knobs, start);
+        }
+        records[0] = {.busy = true, .keyDown = true, .sustained = false, .note = key, .age = ++counter};
+        monoNote = key;
+    }
+
+    void monoNoteOn(int key, float velocity, const Knobs& knobs) noexcept
+    {
+        // A note the pedal holds counts as held: a key played under it is
+        // legato.
+        const bool pedalHeld = records[0].busy && records[0].sustained && voices[0].isActive();
+        const bool held = stackSize > 0 || pedalHeld;
+        push(key);
+        if (!held)
+        {
+            monoPlay(key, velocity, false, knobs);
+            return;
+        }
+        if (key != monoNote || !records[0].busy)
+        {
+            monoPlay(key, velocity, true, knobs);
+        }
+    }
+
+    void monoNoteOff(int key, const Knobs& knobs) noexcept
+    {
+        remove(key);
+        if (!records[0].busy)
+        {
+            return;
+        }
+        if (stackSize == 0)
+        {
+            if (records[0].keyDown)
+            {
+                records[0].keyDown = false;
+                if (pedalDown)
+                {
+                    records[0].sustained = true;
+                }
+                else
+                {
+                    voices[0].noteOff();
+                }
+            }
+            return;
+        }
+        const int next = stack[stackSize - 1];
+        if (next != monoNote)
+        {
+            monoPlay(next, voices[0].velocity(), true, knobs);
+        }
     }
 
     /// Voice i over [from, to) of `out`, in pieces that stop at its check
@@ -396,6 +724,20 @@ private:
     std::uint64_t counter = 0;
     std::size_t stealCount = 0;
     std::size_t ignoredCount = 0;
+
+    bool mono = false;
+    PortamentoMode mode = PortamentoMode::normal;
+    float portamentoSeconds = 0.0f;
+    PitchBend bend;
+    std::uint64_t clock = 0; ///< samples since prepare() or reset()
+    std::array<bool, keyCount> keys{};
+    std::array<int, keyCount> stack{};
+    std::size_t stackSize = 0;
+    int monoNote = -1;
+    int lastKey = -1;
+    float lastVelocity = 1.0f;
+    std::size_t newest = MaxVoices;
+    bool pedalDown = false;
 };
 
 } // namespace anoesis::dsp

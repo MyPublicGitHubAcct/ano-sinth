@@ -12,6 +12,7 @@
 // (allocation_candidates.hpp) in its decided configuration, bit for bit.
 
 #include "allocation_candidates.hpp"
+#include "stub_voice.hpp"
 
 #include "../filters/filter_control_support.hpp"
 #include "../oscillators/oscillator_support.hpp"
@@ -61,93 +62,8 @@ VoiceEvent polyphony(std::size_t offset, int notes)
     return {.offset = offset, .kind = VoiceEventKind::polyphony, .value = notes};
 }
 
-// --- A stub voice --------------------------------------------------------------------------
+// --- A stub voice (stub_voice.hpp) --------------------------------------------------------------
 
-struct StubKnobs
-{
-    std::size_t offset = 0;
-
-    [[nodiscard]] StubKnobs advanced(std::size_t samples) const noexcept
-    {
-        return {.offset = offset + samples};
-    }
-};
-
-/// Records what the allocator tells it. Active from a note-on until
-/// `release` samples after its note-off (0: at once), counted in the blocks
-/// it is given; it reports one oscillator voice while active.
-class StubVoice
-{
-public:
-    using Knobs = StubKnobs;
-
-    explicit StubVoice(std::uint64_t voiceSeed) noexcept : seed(voiceSeed) {}
-
-    void prepare(const dsp::ProcessSpec& /*spec*/) noexcept {}
-    void reset() noexcept
-    {
-        active = false;
-        gate = false;
-    }
-    void noteOn(float key, const Knobs& knobs) noexcept
-    {
-        retriggers += active ? 1 : 0;
-        ++noteOns;
-        note = key;
-        gate = true;
-        active = true;
-        lastOffset = knobs.offset;
-    }
-    void noteOff() noexcept
-    {
-        ++noteOffs;
-        gate = false;
-        remaining = release;
-        active = release > 0;
-    }
-    void stop() noexcept
-    {
-        ++stops;
-        active = false;
-        gate = false;
-    }
-    void process(const dsp::AudioBlock& out, const Knobs& /*knobs*/) noexcept
-    {
-        rendered += out.numSamples();
-        if (active && !gate)
-        {
-            remaining -= std::min(remaining, out.numSamples());
-            active = remaining > 0;
-        }
-    }
-    [[nodiscard]] bool isActive() const noexcept
-    {
-        return active;
-    }
-    [[nodiscard]] std::size_t activeOscillatorVoices() const noexcept
-    {
-        return active ? 1 : 0;
-    }
-    [[nodiscard]] static std::size_t oscillatorVoicesPerNote() noexcept
-    {
-        return 1;
-    }
-
-    std::uint64_t seed;
-    std::size_t release = 0;
-    std::size_t remaining = 0;
-    bool active = false;
-    bool gate = false;
-    float note = 0.0f;
-    std::size_t noteOns = 0;
-    std::size_t noteOffs = 0;
-    std::size_t retriggers = 0; ///< note-ons on an active voice
-    std::size_t stops = 0;
-    std::size_t rendered = 0;
-    std::size_t lastOffset = 0;
-};
-
-static_assert(dsp::AllocatableVoice<StubVoice>);
 static_assert(dsp::AllocatableVoice<dsp::Voice<dsp::minBlepTaps>>);
 
 using StubAllocator = dsp::VoiceAllocator<StubVoice>;
@@ -319,7 +235,7 @@ LibraryRun runLibrary(std::size_t length, std::size_t hostBlock)
                     blockEvents.push_back({.offset = e.at - start, .kind = kindOf(e.kind), .value = e.value});
                 }
             }
-            const dsp::VoiceFilterKnobs k{
+            const dsp::VoiceKnobs k{
                 .cutoff = {&a.cutoff, &b.cutoff},
                 .resonance = {&a.resonance, &b.resonance},
                 .controlCutoff = &a.controlCutoff,
@@ -610,7 +526,7 @@ TEST_CASE("VoiceAllocator: the Voices readout", "[voice-allocator]")
     alloc->prepare({.sampleRate = rate, .maxBlockSize = 480, .numChannels = 2});
     const Knobs defaults;
     KnobRamps ramps{defaults, rate};
-    const dsp::VoiceFilterKnobs k{
+    const dsp::VoiceKnobs k{
         .cutoff = {&ramps.cutoff, &ramps.cutoff},
         .resonance = {&ramps.resonance, &ramps.resonance},
         .controlCutoff = &ramps.controlCutoff,

@@ -833,7 +833,7 @@ Render renderBuilt(const BuiltSpec& spec, std::size_t length, std::size_t noteOf
     KnobRamps rampsB{knobs, rate};
     const auto feed = [&]
     {
-        return dsp::VoiceFilterKnobs{
+        return dsp::VoiceKnobs{
             .cutoff = {&rampsA.cutoff, &rampsB.cutoff},
             .resonance = {&rampsA.resonance, &rampsB.resonance},
             .controlCutoff = &rampsA.controlCutoff,
