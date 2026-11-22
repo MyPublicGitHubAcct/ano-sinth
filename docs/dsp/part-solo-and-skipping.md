@@ -6,7 +6,7 @@ Solo plays only the part the interface shows. Separately, the voice should not c
 - **Sylenth1:** what is known about Solo and the skipping. The manual gives Solo in two sentences, a tutorial says Solo follows Part select, another says Solo taps the filter's output, and the developer says a part with no oscillators has its filter "off".
 - **The candidates:** prototyped on copies of the real filter, slot and voice, over the real `dsp::VoiceAllocator`.
 - **What they measured:** the prototype against the library; Solo's two readings and its clicks; every V13 case under each skip candidate, exact or by how much; an oscillator's phase through a skip; when the test is made; bounds on modulation; the mono path; the real-time terms; CPU.
-- **Recommendations** for the project owner, one per question, with the alternatives.
+- **Recommendations** for the project owner, one per question, with the alternatives, and **the decision** (every recommendation, 2026-11-22).
 
 Read [voice-architecture.md](voice-architecture.md) (the voice, its routing, its 32-sample grid, and question 4's mono path), [mixer.md](mixer.md) (Mix per voice per sample, and "Room for tasks 5 and 6"), [voice-allocation.md](voice-allocation.md) (`isActive()`, E11, a retrigger in place keeping the filters) and [filters.md](filters.md) (the filter's grid and ramps) first.
 
@@ -333,7 +333,7 @@ Host blocks of 1 and 37 against 4096, Solo as a gain and as routing:
 
 ## Recommendations
 
-*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (PS1–PS5, SK1–SK7), and the measurement is what makes it the safer default.*
+*Stage 1's recommendations, as written. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (PS1–PS5, SK1–SK7), and the measurement is what makes it the safer default. Chosen by the project owner on 2026-11-22, every one ([The decision](#the-decision)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -370,6 +370,23 @@ Host blocks of 1 and 37 against 4096, Solo as a gain and as routing:
 - **V12**: 16 notes at Voices 0 cost nothing in ours already (the allocator frees them), so the demo's reading of that case tells us only whether Sylenth1 does the same.
 - **Task 2's in-place retrigger** keeps the filters. Under row 6 a skipped part's frozen state is what it keeps, 30–37 dB from the state it would have had.
 - **AmpEnv A/B link (task 6)** is noted only. With the link on, the envelope that applies to a part is the linked one, so row 6's envelope test (and `isActive()`) must read that envelope. Nothing else here depends on it.
+
+## The decision
+
+Chosen by the project owner on 2026-11-22: every recommendation (Decisions log). Stage 2 builds them in `libs/dsp`.
+
+- **Solo** silences the other part's filter output. A part crossing into the selected part's filter is still heard through it.
+- **How Solo switches:** a gain per part, 0 or 1, ramped linearly over 10 ms and multiplied into the part's Mix gain per sample, on held notes and release tails alike. It follows Part select while it is on, both gains crossing over 10 ms.
+- **Solo and Part select are interface state:** not in presets, not host-automated, not MIDI-mapped, kept with the host's session. `libs/dsp` takes Solo as two gains; where the state is stored is M1.9's.
+- **Exact skips, always:**
+  - a filter at rest whose input can't be non-zero isn't solved, its grid and ramps advanced, still fed at its grid points;
+  - a part's output stage isn't run while its gain's bound is 0;
+  - a crossing part whose envelope is 0 isn't added into the other filter.
+- **A part whose gain is 0 while its filter is fed** (Mix with its modulation's bound at 0, soloed out, its amp envelope idle or held at sustain 0) has its filter and oscillators skipped, the filter's state kept (frozen) for its return.
+- **Oscillators:** the phase advances through a skip (the phase steps added up, a band-limited jump at the return). A slot is skipped when no running filter takes it or its gain is settled at 0, and only while no gain ramp in it moves.
+- **When:** per segment, at each of the voice's 32-sample grid points for the coming segment; a call mid-segment can only end a skip. No hysteresis.
+- **The bound:** an upper bound per factor over the segment (the amp envelope, Mix's ramp at its larger end plus its modulation routes' bounds, Solo's ramp). Each M1.5 source supplies its bound over a segment.
+- **The mono path** as decided in task 1, its output stage writing the stereo path's expression on each channel.
 
 ## References
 
