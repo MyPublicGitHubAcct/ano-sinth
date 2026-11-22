@@ -264,6 +264,7 @@ A1 and B1 saws, Mix B at 0 with modulation on it. atRest + slots skips only the 
 
 - **The tight bound is exact** (identical with every output it proved silent skipped) and finds the LFO's closed half, which the conservative bound never does. For a sine it is the segment's ends, or ±amount if a crest falls inside.
 - **An exponential never proves 0**: the pluck's tail is above 0 for as long as anyone waits (the 0.3% is the gaps between notes). M1.5's mod envelopes end at exactly 0, as the amp envelope does (E10), so a bound on them can.
+- *M1.5 task 2, stage 1 (2026-11-22; [modulation.md](modulation.md#question-6-each-sources-bound)): the tight LFO bound as stated here (the segment's ends, or ±1 if a crest falls inside) is too small across slews. It reads the waveform's row, while a retrigger or an edge slews from wherever the LFO was: too small in 4.4% of random segments, by up to 0.997. Rendering the LFO's segment ahead at the grid point and taking its minimum and maximum is exact. The LFO's range as a source is ±1.125 (a slew carries the wave 0.25 past ±1).*
 
 ### The mono path
 

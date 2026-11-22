@@ -6,6 +6,45 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.5 the modulation model, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[modulation]"`, 100 samples per benchmark, three runs; the tables give each row's median (spread 0.4–6.6%).
+- **What is measured** ([modulation.md](../dsp/modulation.md#cpu)): one voice held at the init patch (A1 one saw, A3, past the attacks), `dsp::Voice` and the stage-1 `ModVoice` (tests/dsp/modulation/modulation_candidates.hpp). For each destination and rate, 4 routes into it (an envelope, an LFO, velocity, the mod wheel) or all 16 (every slot's source). For LFO 1 Rate and Gain, LFO 1 also sits on Pitch A, and that route alone is their 0. Then a mixed patch of 16 routes at the recommended rates, one voice and 16 (keys 40–55); and the three registries on their own.
+
+| Benchmark: one voice (ns / sample) | 0 routes | 4 routes | 16 routes |
+|---|---:|---:|---:|
+| `dsp::Voice` | 130.23 | | |
+| `ModVoice` | 128.73 | | |
+| Pitch A: per sample / held / ramped | | 139.71 / 132.56 / 136.60 | 144.82 / 138.78 / 140.31 |
+| Phase A: per sample / held / ramped | | 140.78 / 134.44 / 136.07 | 146.89 / 138.23 / 141.46 |
+| Volume A: per sample / held / ramped | | 140.05 / 135.93 / 134.25 | 151.10 / 145.08 / 145.05 |
+| Pan A: per sample / held / ramped | | 261.63 / 248.36 / 248.48 | 247.92 / 231.26 / 234.60 |
+| LFO 1 Rate: per sample / held | 158.60 / 135.41 | 170.92 / 140.90 | 235.64 / 141.03 |
+| LFO 1 Gain: per sample / held / ramped | 159.30 / 136.24 / 138.66 | 164.67 / 137.06 / 136.50 | 207.71 / 139.39 / 141.69 |
+| 16 routes, mixed, at the recommended rates | | | 273.46 |
+
+| Benchmark | ns / sample |
+|---|---:|
+| 16 voices, no routes | 2,032.93 |
+| 16 voices, 16 routes, mixed | 4,114.57 |
+
+| Registry: per call | (a) table | (b) functions | (c) types |
+|---|---:|---:|---:|
+| accumulate 16 routes | 13.97 | 39.48 | 42.55 |
+| 16 bounds (sources in a runtime order) | 18.93 | 33.72 | 29.40 |
+| compile 16 routes | 18.71 | | |
+
+### Observations
+
+- **No routes costs nothing measurable** (128.7 against 130.2 ns per voice).
+- **Each destination's own cost is a few ns per voice**: 4 routes into it add 4–12 ns, 16 routes 10–22 ns, at any rate. Per sample costs 3–6 ns more than ramped for Pitch, Phase and Volume.
+- **A Pan route costs 100–135 ns per voice, at every rate.** That is the mono path ([part-solo-and-skipping.md](../dsp/part-solo-and-skipping.md)): a part whose Pan moves isn't centred, so its filters run in stereo. The init patch costs about 240 ns per voice in stereo (the task 5 entry), and the pan law per sample adds about 13 ns on top of that.
+- **LFOs per sample** (sample order) cost 23 ns per voice more than on the grid with one route, and 68–95 ns more with 16 routes into the gain or the rate. On the grid (segment order) they cost nothing measurable.
+- **The mixed patch doubles 16 voices** (2,033 → 4,115 ns per sample), mostly through its Pan routes.
+- **Registry (a) is the fastest at every job.** Its sums are a loop over plain data, while (b) calls through a pointer and (c) walks a fold of comparisons. A benchmark that asked for each source's bound in a compile-time order inlined (b) and (c) down to 2 ns. A voice asks in its routes' order, so the table gives the runtime order.
+
+---
+
 ## 2026-11-22: M1.4 AmpEnv A/B link, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[amp-link]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.1–1.7%, one row 5.0% from one slow run).

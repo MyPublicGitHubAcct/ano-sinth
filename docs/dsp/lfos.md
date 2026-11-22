@@ -331,6 +331,11 @@ voiceLfo.process(lfoBlock);                      // then scaled per destination 
 
 The knob laws live in the parameter table (M1.9). They are working hypotheses: Rate f = 0.1 Hz × 1000^x for knob x ∈ [0, 1]; Gain = knob / 10; Offset = knob / 10 for knob −10..10 (L6, L7).
 
+*M1.5 task 2, stage 1 (2026-11-22; [modulation.md](modulation.md#question-3-the-rate-per-destination)) pushes back on the sketch above in two places:*
+
+- *A modulated Gain can't go through `setGain()`: its 10 ms ramp would lag the modulation. The prototype runs the LFO at gain 1 and offset 0 and scales it outside, by 0.5 × gain × (wave + offset).*
+- *Because a curved row takes a new rate only at its own grid point, per-sample Rate modulation of a sine is the same, to the bit, as setting it once per segment. The recommendation is to set it at the voice's grid points and render each segment ahead, which also makes the LFO's bound for the skip test exact.*
+
 ## Results, as built
 
 From the `[lfo-report]` ([lfo_report.cpp](../../tests/dsp/control/lfo_report.cpp)), which now measures `Lfo` against a naive reference (the same rows read at the same 64-bit phase every sample, with no slew and no grid), and the `[lfo]` benchmarks ([lfo_benchmark.cpp](../../tests/dsp/benchmarks/lfo_benchmark.cpp)):

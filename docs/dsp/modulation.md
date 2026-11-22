@@ -1,11 +1,12 @@
 # Modulation: sources, destinations, and amounts
 
-Modulation moves a control over time without anyone turning its knob. A source (an envelope, an LFO, velocity, the mod wheel) produces a value, and a route adds that value, scaled by an amount, to a destination such as pitch, cutoff or volume. This page covers M1.5. So far it holds task 1, which is research only:
+Modulation moves a control over time without anyone turning its knob. A source (an envelope, an LFO, velocity, the mod wheel) produces a value, and a route adds that value, scaled by an amount, to a destination such as pitch, cutoff or volume. This page covers M1.5:
 
 - **Theory:** fixed slots against a matrix; additive modulation in knob units, and what that means for each kind of knob; scaling a source; polyphonic and monophonic sources and destinations, and the four ways they meet; control rate against audio rate; order and feedback when sources are also destinations; and bounds for skipping.
-- **Sylenth1:** what is known about its sources, destinations and amounts, and what that means for the build.
+- **Sylenth1** (task 1): what is known about its sources, destinations and amounts, and what that means for the build.
+- **The model** (task 2, stage 1): the candidates for the registries, the routing, each destination's rate, the order through cycles, a per-voice source on a global destination, and each source's bound; what they measured; and the recommendations, which await the project owner's decision.
 
-Tasks 2–5 will add the candidates, the measurements, the recommendations, the decision and the as-built sections.
+Tasks 3–5 will add the decision and the as-built sections.
 
 Read [lfos.md](lfos.md) and [envelopes.md](envelopes.md) (the sources), [keytracking.md](keytracking.md) (the keytrack source), [filter-control.md](filter-control.md) (the first destination built with modulation inputs, and the clamp), [mixer.md](mixer.md) (Mix, a destination applied per sample), and [part-solo-and-skipping.md](part-solo-and-skipping.md) (why each source must bound its value) first.
 
@@ -132,9 +133,368 @@ The full source table with ratings is in the inventory: [§6, Sources, destinati
 - **Phase as a destination** is new work for the oscillator slot (a running phase offset, band-limited), and the most expensive per-voice destination, as the manual warns.
 - **The LFO's factor of 2** must be settled before task 3 builds the LFO source (M6). Until the demo answers, halving at the source matches every number the developer gave.
 
+## The candidates
+
+Task 2's stage 1 prototypes the model in `tests/`, on the library's own classes. The model has six parts:
+
+| Question | Candidates |
+|---|---|
+| **1. The registries** ([registry_candidates.hpp](../../tests/dsp/modulation/registry_candidates.hpp)) | (a) `constexpr` descriptor tables indexed by an enum; (b) descriptors with a function per entry; (c) a compile-time type list, one type per destination and source |
+| **2. Routing** | the 16 slots compiled into a list of live routes whenever the patch changes, summed per target and part (one candidate, measured for exactness and cost) |
+| **3. The rate per destination** (Pitch, Phase, Volume, Pan, LFO Rate, LFO Gain) | per sample; at the voice's 32-sample grid points, held; at the grid points, ramped linearly from the previous grid point's value to this one's (one segment late, since the sources can't be read ahead) |
+| **4. Order and feedback** | segment order: each LFO's rate and gain set at its grid point from the sources as they stand there, its wave rendered for the whole segment ahead (a delay of up to one segment through a cycle); sample order: the LFOs run sample by sample, each sample's rate and gain from the sources at the sample before (a delay of one sample) |
+| **5. A per-voice source on a global destination** | the newest voice's value; the oldest held voice's; the sum over voices; a global copy of the source (an envelope gated by the first key down and the last key up, the last note-on's velocity) |
+| **6. Each source's bound over a segment** ([source_bounds.hpp](../../tests/dsp/modulation/source_bounds.hpp)) | an envelope: its range [0, 1], PLAN's rule (0 when idle or held at 0, else [0, 1]), or by stage (between its level and where the stage heads); an LFO: its range (±1.125), the wave's ends and crests over the phases the segment covers (PLAN's rule, which ignores slews), or exact, from the segment rendered ahead; a linear source (velocity, keytrack, a global ramp): its two ends |
+
+**The descriptors** ([modulation_model.hpp](../../tests/dsp/modulation/modulation_model.hpp)). One row per destination, "None" and the 27 of task 1. Each row holds:
+
+- a **key**, the persisted ID (`"osc.pitch.ab"`). It is a string, so it can't be the template's numbering, and it is separate from both the internal order and the menu's (M1);
+- the label and the group;
+- the scope and the evaluation rate;
+- the **target** and the **parts** it acts on (Volume AB is the volume target on both parts);
+- the units per unit of amount (a knob unit, or 12 semitones for Pitch);
+- the knob range for F24's clamp, a wrap for Phase, or none for Pitch.
+
+One row per source, "None" and the 11 of task 1, each with a key, a label, a scope, a range and a **bound kind** (none, linear, envelope, LFO). `static_assert`s check every row: unique keys in a fixed alphabet, ranges in order, a global destination neither per sample nor on a part. Each candidate adds its own checks. In (a), the enum agrees with the rows. In (b) and (c), every destination's function or type adds into its own target and parts and nowhere else, checked by running it in a constant expression.
+
+**Cutoff AB and Reso AB are their own targets.** The Filter Control's law, as decided in M1.3 task 6, clamps each control together with its own modulation. Cutoff AB is therefore the Filter Control's term, and it isn't Cutoff A plus Cutoff B where a clamp acts. Every other AB destination is the same target on both parts.
+
+**The voice.** [modulation_candidates.hpp](../../tests/dsp/modulation/modulation_candidates.hpp) holds `ModVoice`, a copy of `dsp::Voice` as built. It runs on `ModOscillatorSlot` ([mod_oscillator_slot.hpp](../../tests/dsp/modulation/mod_oscillator_slot.hpp)), a copy of `OscillatorSlot` that takes Volume, Pan and Phase modulation, each as a constant, a line across the segment, or a value per sample. With no routes, `ModVoice` is `dsp::Voice` to the bit (measured below). It adds:
+
+- **The sources**, as task 3 would build them:
+  - two mod envelopes (`Adsr`) per voice;
+  - two LFOs (`Lfo`) per voice, restarted at a note-on from silence and retriggered on a sounding voice (Free isn't modelled). An LFO is the `Lfo`'s wave at gain 1 and offset 0, scaled outside as 0.5 × gain × (wave + offset) (M6), so a route can move its Gain without the `Lfo`'s own 10 ms gain ramp;
+  - velocity, keytrack, and the amp envelopes;
+  - ModWheel and Aftertouch as ramps read at absolute samples, and Step Velocity as a constant.
+- **The routes**, compiled with registry (a) at a note-on and at the first grid point after the patch changes.
+- **A rate per target.**
+- **The two LFO orders.**
+- **The bounds.** Each route to Mix adds amount × its source's bound to `mixModulationBound()`, the seam M1.4 task 5 left. A slot at Volume 0 counts as silent only while its part's Volume routes can't lift it.
+- **Cutoff and Reso** are fed at the grid points as M1.3 decided. They read the sources as they stand there or, for the overshoot question, the LFOs at the segment's end.
+- **Mix** is per sample, as M1.4 decided.
+
+`ModEngine` runs the real `VoiceAllocator` over 16 of these voices. Deliverable 5's stand-in global destination is a gain on the absolute 32-sample grid, fed from the voices by each rule.
+
+## What they measured
+
+The candidates were measured by the hidden `[modulation-report]` ([modulation_report.cpp](../../tests/dsp/modulation/modulation_report.cpp), about 2 s) and the `[modulation]` benchmarks ([modulation_benchmark.cpp](../../tests/dsp/benchmarks/modulation_benchmark.cpp)). The default run checks the invariants under `[modulation-model]` ([modulation_test.cpp](../../tests/dsp/modulation/modulation_test.cpp)):
+
+- the three registries agree on 200 random patches;
+- an empty slot or an amount of 0 adds an exact 0;
+- keys, not labels or positions, find each destination;
+- every envelope and LFO bound holds over random segments;
+- the prototype with no routes is the library to the bit;
+- a busy patch gives the same output at host blocks of 1, 37 and 4096, with no allocation, at every rate in both LFO orders.
+
+```sh
+cmake --build --preset relwithdebinfo --target anoesis_dsp_tests
+build/relwithdebinfo/tests/dsp/anoesis_dsp_tests "[modulation-report]"
+tools/bench.sh "[modulation]"
+```
+
+### The prototype against the library
+
+`ModVoice` with no routes against `dsp::Voice`, through `VoiceAllocator` (Polyphony 2, two steals, releases of 50 ms), 0.5 s:
+
+| Patch | host blocks of 512 | of 37 |
+|---|---|---|
+| init (A1 saw) | identical | identical |
+| A1 and B1 saws, own filters | identical | identical |
+| 4 × 8 unison saws, resonant | identical | identical |
+
+The envelopes now render before the slots (they are sources), which changes nothing: nothing they compute depends on the slots.
+
+### Question 1: the registries
+
+Each candidate's data (bytes, arm64; strings extra):
+
+| | (a) table | (b) functions | (c) types |
+|---|---:|---:|---:|
+| a destination descriptor | 56 | 16 + 56 | 56 |
+| the destination table | 1,568 | 448 + 1,568 | 224 + 1,568 |
+| a compiled route | 8 | 24 | 8 |
+| a voice's 16 compiled routes | 136 | 392 | 136 |
+
+**Code size.** Each candidate is compiled on its own (the `registry_size_*.cpp` probes: compile 16 routes, accumulate them, and one bound), with `clang++ -std=c++23 -Os -fno-exceptions -fno-rtti`, then measured with `size -m`:
+
+| | `__text` | constant data | strings | total |
+|---|---:|---:|---:|---:|
+| (a) table, with keys and labels | 576 | 2,144 | 807 | 3,527 |
+| **(a) table, the DSP's fields only** | **568** | **572** | **0** | **1,140** |
+| (b) functions | 1,032 | 2,784 | 807 | 4,623 |
+| (c) types | 892 | 38 | 0 | 930 |
+
+- **(c) folds every descriptor into code**: no table survives. But its dispatch is a chain of comparisons.
+- **(a) and (b) carry the whole table, strings and all**, because the DSP reads rows that also hold the keys and labels. The DSP needs only 20 bytes of each destination's 56: target, parts, scope, rate, units, range. A table of those fields alone (`dspDestinations`) is 1,140 bytes in all, close to (c).
+- **STM32 not measured:** no ARM toolchain is installed (`arm-none-eabi-g++`), so these are arm64 numbers. The ratios are the useful part.
+
+**Speed** (benchmarks, ns per call):
+
+| | (a) | (b) | (c) |
+|---|---:|---:|---:|
+| accumulate 16 routes | 13.97 | 39.48 | 42.55 |
+| 16 bounds, in a runtime order | 18.93 | 33.72 | 29.40 |
+
+(a)'s sums are a loop over plain data, with nothing to dispatch. (b) calls through a pointer per route. (c) walks a fold of comparisons.
+
+**What Phase 2 edits:**
+- **(a):** a row and an enum value, both checked against each other at compile time. A source of a new *kind* of bound also edits one 4-way switch on the kind.
+- **(b):** a row with its functions.
+- **(c):** a type and one more entry in the list.
+
+None of them edits a switch on the destination or the source.
+
+### Question 2: routing
+
+- **No routes is the library to the bit** (above) and costs nothing measurable: 128.7 against 130.2 ns per voice.
+- **An empty slot or an amount of 0 adds nothing.** It drops out when the patch is compiled (`compile()` keeps only live routes), so nothing is summed for it. The default run checks that in all three registries.
+- **Routes add per target and part.** Two routes to Mix A add, as the developer's "+15 (in 2 mod dest slots)" requires.
+- **Routes cost little**: 4 routes into one destination add 4–12 ns per voice and 16 routes 10–22 ns, the destination's own work included (CPU below).
+
+### Question 3: the rate per destination
+
+**Zipper on a 40 Hz LFO.** The setup:
+
+- A1 a sine at A3 (220 Hz), both filters bypassed, drift off, one note;
+- LFO 1 a sine at 40 Hz, Gain 10, on the destination.
+
+The measure is filters.md's click: energy above 1 kHz in a Hann 4096, dB re an instant unit step, averaged over 0.3, 0.5, 0.7 and 0.9 s. *Added* is the same measure on the difference from per sample:
+
+| Destination (depth) | per sample (its own) | grid, held | grid, ramped | added: held | added: ramped |
+|---|---:|---:|---:|---:|---:|
+| Pitch A (±¼ octave) | −72.4 | −41.0 | −72.4 | **−40.9** | −84.2 |
+| Phase A (±18°) | −50.7 | −17.6 | −50.7 | **−17.5** | −65.8 |
+| Volume A (5 ± 5) | −46.6 | −13.3 | −46.6 | **−13.3** | −61.8 |
+| Pan A (centre ± 5, hard left to hard right) | −42.7 | −9.4 | −41.0 | **−9.4** | −45.5 |
+| LFO 2 Rate ±1 unit (LFO 2 at 3.2 Hz on Pitch A, ±¼ octave) | −87.4 | −87.4 | | **exact 0** | |
+| LFO 2 Gain 5 ± 5 (LFO 2 at 3.2 Hz on Volume A, 5 ± 5) | −55.5 | −22.3 | −55.5 | **−22.3** | −65.9 |
+
+- **Held zips on every audio destination**: −9 to −41 dB added. Volume's −13.3 is the mixer's −13 for Mix.
+- **Ramped adds −45 to −84 dB.** Pan ramps its two gains between the grid points rather than its position, so its law is linear between them: −45.5 dB.
+- **LFO Rate per sample is held, to the bit.** `Lfo` takes a new rate on a curved row (the sine) only at its own grid point ([lfos.md](lfos.md)). A voice's LFO restarts with the voice, so that grid is the voice's.
+
+**The same output at any host block size.** The same patches, with ModEnv 1 on Cutoff A, velocity on Mix A, and a sequence (Polyphony 2: four notes, a steal, releases of 50 ms), 1 s at host blocks of 1 and 37 against 4096:
+
+| Destination | per sample | grid, held | grid, ramped | allocations |
+|---|---|---|---|---:|
+| Pitch A, Phase A, Volume A, Pan A, LFO 2 Gain | 2 of 2 | 2 of 2 | 2 of 2 | 0 |
+| LFO 2 Rate | 2 of 2 | 2 of 2 | | 0 |
+
+**Found while building it:** the slot must not reset its oscillators' phase step at the start of each `process()` call while Phase is modulated per sample. The reset makes one extra pitch change per call, which can queue a band-limited bend. So the output depended on how the host split its blocks: renders at blocks of 1 differed from 4096. The prototype sets the step once per sample instead, and the default run's block-size test pins it.
+
+**Phase: does it stay band-limited?** The setup:
+
+- one unison voice of a saw, filters bypassed, drift off;
+- LFO 1 a sine at 40 Hz on Phase A;
+- the carrier off any simple ratio to 40 Hz and to the sample rate, so that aliases miss the modulation's lines.
+
+The measure is the energy below 20 kHz off the phase modulation's lines (k·fc ± m·fm), dB re the total: what aliasing and zipper add. The unmodulated column is the oscillator's own aliasing:
+
+| Case | unmodulated | per sample | grid, held | grid, ramped | jumps (per sample) |
+|---|---:|---:|---:|---:|---:|
+| 1,090 Hz, ±18° | −98.5 | −62.3 | −29.5 | −62.3 | 0 |
+| 1,090 Hz, ±180° | −98.5 | −43.4 | −12.0 | −43.4 | 1 |
+| 55.6 Hz, ±180° | n/a | n/a | n/a | n/a | 25,473 of 70,336 |
+
+- **Per sample and ramped treat Phase as frequency modulation.** Each sample's change of offset goes into the phase step, so it stays band-limited by the oscillator's own pitch-step rule, and both measure the same. What remains off the lines is the LFO's own interpolation and the oscillator's response to a moving step.
+- **Held is a band-limited jump every 32 samples**, and that zips: −29.5 and −12.0 dB.
+- **The oscillator can't run backwards.** Where the offset falls faster than the note's own phase advances, the step would be negative. For ±180° at 40 Hz that happens below 126 Hz. The prototype then makes the change as a band-limited jump: 36% of the samples on a 55.6 Hz note. At that density the lines cover the whole band, so the off-line measure can't separate anything (n/a).
+
+### The fast-sweep overshoot (filter-control.md, recommendation 8)
+
+filter-control.md's patch through the voice:
+
+- a 110 Hz saw;
+- Cutoff A 5 + Control 5, with LFO 1 on Cutoff A through both of its routes at +10 (±10 units);
+- Resonance A and Control 10, with ModEnv 1 (sustain 1) on Reso A at +10 (k 12 under the per-control clamp);
+- Warm on, LP24.
+
+The peak from 0.2 s to 2 s, with the cutoff fed from the sources as they stand at each grid point, or from the LFO's value at the segment's end (it is rendered ahead):
+
+| LFO | 48 kHz: as they stand | 48 kHz: segment's end | 44.1 kHz: as they stand | 44.1 kHz: segment's end |
+|---|---:|---:|---:|---:|
+| held (Gain 0) | 0.37 | 0.37 | 0.36 | 0.36 |
+| 0.5 Hz | 0.88 | 0.78 | 1.14 | 1.67 |
+| 5 Hz | 4.24 | 2.27 | 12.00 | 11.46 |
+
+**The rate doesn't remove the overshoot.** Reading the LFO at the segment's end moves the peak by between −46% and +46%. The sample rate moves it by ×2.8. At 44.1 kHz it is filter-control.md's 13.10 again (12.00). It is the ladder's response to the sweep, as filter-control.md found, and its peak depends on where the sweep falls against the resonance.
+
+### Question 4: order and feedback
+
+The test signal is A1 a sine at A3, filters bypassed, with notes at 0 and 0.63 s, released at 1.25 and 1.67 s, over 2 s. The two orders:
+
+- **Segment order:** LFO Rate held and Gain ramped, on the grid.
+- **Sample order:** both per sample.
+
+*Differs* is the RMS of the difference between the two orders' renders, re the sample-order render, from 0.2 s.
+
+| Case | segment order: same at blocks 1, 37 | sample order: same at 1, 37 | differs | allocations |
+|---|---|---|---:|---:|
+| a cycle: LFO 1 → LFO 2 Rate (+5), LFO 2 → LFO 1 Gain (+10), both on Pitch A | 2 of 2 | 2 of 2 | −6.9 dB | 0 |
+| a self-route: LFO 1 (saw) → LFO 1 Rate (+5) and Pitch A | 2 of 2 | 2 of 2 | +3.3 dB | 0 |
+
+**The delay through a route into a source** (M11's protocol): LFO 1 S&H at 2.03 Hz, so that its steps fall anywhere in a segment, to LFO 2 Rate (+5), with LFO 2 a pulse on Pitch A. The measure is samples from each of LFO 1's steps to LFO 2's rate changing, over 8 steps:
+
+| Order | min | mean | max |
+|---|---:|---:|---:|
+| segment | 1 | 14.0 | 30 |
+| sample | 1 | 1.0 | 1 |
+
+- **Both orders are deterministic and independent of the block size.** Neither allocates.
+- **They sound different through a cycle**: −6.9 dB apart, and the self-route's two renders drift apart altogether (+3.3 dB). The delay is part of the loop, so neither is the "right" sound. M11's demo protocol measures Sylenth1's delay.
+- **Segment order costs nothing measurable.** Sample order costs 23 ns per voice more with one route, and 68–95 ns more with 16 routes (CPU below). It also takes away what rendering ahead gives: the LFOs' exact bounds, and a Cutoff that can read an LFO at the segment's end.
+
+### Question 5: a per-voice source on a global destination
+
+The sequence: four notes 0.4 s apart from 0.1 s (velocities 100, 60, 127, 80), released 0.4 s apart from 2.0 s in the order played. The source is ModEnv 1 (attack 20 ms, decay 200 ms, sustain 0.5, release 300 ms) or velocity. It is read from the voices at each 32-sample point of the absolute grid, onto a stand-in global gain (5 + 5 × value, ramped over each segment) on a fixed 220 Hz sine. The measures:
+
+- *Step*: the largest change between two grid points, from just before an event to 50 ms after (the second to the fourth note-on; every note-off).
+- *Held*: the value 0.35 s after each note-on.
+- *After release*: the value 0.1 s after each note-off.
+- *Click*: filters.md's measure at every note-on and note-off.
+
+| Source | Rule | step at a note-on | at a note-off | held: 1 / 2 / 3 / 4 notes | after each release | click |
+|---|---|---:|---:|---|---|---:|
+| ModEnv 1 | newest voice | **0.438** | 0.008 | 0.50 / 0.50 / 0.50 / 0.50 | 0.50 / 0.50 / 0.50 / 0.05 | −38.6 |
+| | oldest held voice | 0.000 | 0.008 | 0.50 / 0.50 / 0.50 / 0.50 | 0.50 / 0.50 / 0.50 / 0.05 | −69.8 |
+| | sum over voices | 0.062 | 0.008 | **0.50 / 1.00 / 1.50 / 2.00** | 1.55 / 1.05 / 0.55 / 0.05 | −66.3 |
+| | **a global copy** | **0.000** | 0.008 | 0.50 / 0.50 / 0.50 / 0.50 | 0.50 / 0.50 / 0.50 / 0.05 | **−69.8** |
+| velocity | newest voice | 0.528 | 0.000 | 0.79 / 0.47 / 1.00 / 0.63 | 0.63 / 0.63 / 0.63 / 0.63 | −36.6 |
+| | oldest held voice | 0.000 | **0.528** | 0.79 / 0.79 / 0.79 / 0.79 | 0.47 / 1.00 / 0.63 / 0.63 | −36.6 |
+| | sum over voices | 1.000 | 0.000 | **0.79 / 1.26 / 2.26 / 2.89** | 2.89 / 2.10 / 1.63 / 0.63 | −38.9 |
+| | a global copy (the last note's) | 0.528 | 0.000 | 0.79 / 0.47 / 1.00 / 0.63 | 0.63 / 0.63 / 0.63 / 0.63 | −36.6 |
+
+- **The newest voice jumps at every note-on.** Each new envelope starts from 0, a step of 0.44 from the sustain, and it clicks at −38.6 dB.
+- **The oldest held voice jumps when a key goes up.** Velocity changes by 0.53 at the release of the oldest note.
+- **The sum grows with the chord**: four notes give four times one note's value (2.0, 2.89), so the effect depends on how many keys are down.
+- **A global copy is smooth through note-ons and note-offs**, independent of the chord, and defined when nothing sounds (−69.8 dB). It is one envelope, gated by the first key down and released by the last. For velocity it is the last note's, which is the newest voice's.
+
+### Question 6: each source's bound
+
+**Against the source's values over random segments.** Each bound is taken at a random point for the next 1–32 samples, with events only between segments (as the skip test allows: an event re-tests).
+
+- Envelopes: 60 random ADSRs, 200 segments each, with random gates and sustain changes.
+- LFOs: every waveform at random rates (0.1 Hz to 819 Hz), gains and offsets, with random retriggers.
+
+| Source | Bound | segments | too small | worst excess | mean width |
+|---|---|---:|---:|---:|---:|
+| envelope | its range [0, 1] | 12,000 | 0 | 0 | 1.000 |
+| | PLAN's: 0 when idle or held at 0, else [0, 1] | 12,000 | 0 | 0 | 0.875 |
+| | **by stage** | 12,000 | **0** | 0 | **0.397** |
+| LFO | its range (±1.125) | 26,400 | 0 | 0 | 2.250 |
+| | **PLAN's: the wave's ends and crests** | 26,400 | **1,173** | **0.997** | 0.192 |
+| | **exact: the segment rendered ahead** | 26,400 | **0** | 0 | **0.017** |
+
+- **PLAN's LFO bound is too small**: in 4.4% of segments, by up to 0.997. It reads the waveform's row and misses the slews: a retrigger slews from wherever the LFO was, and an edge slews across the jump. A bound that is too small skips audio, so this one is a bug, and the test finds it.
+- **Rendering the segment ahead makes the LFO's bound exact**, and 132× narrower than its range.
+- **By stage** is 2.2× narrower than PLAN's envelope rule, and never too small.
+- **The LFO's range is ±1.125, not ±1.** The halving (M6) makes a Sine at Gain 10 ±0.5, and Offset +10 makes 0 to +1. A slew can carry the wave 0.25 past ±1 ([lfos.md](lfos.md)), which halves to 0.125. The trials here never reached it (largest 1.0000), but a bound must hold in the worst case.
+
+**How much each bound lets the skip test skip.** The setup:
+
+- A1 and B1 saws, own filters;
+- Mix B at 0, through Step Velocity × −10 on Mix B, since `ModEngine` has no Mix knobs;
+- one route lifting Mix B;
+- 16 notes of 0.2 s, one every 0.25 s.
+
+*Skipped* is part B's outputs skipped for their gain, of those tested at grid points:
+
+| Route on Mix B | the sources' ranges | tight |
+|---|---:|---:|
+| LFO 1 sine 8 Hz, +10 (±5 internal) | 0.3% | 52.8% |
+| LFO 1 pulse 8 Hz, Offset −10, at −10 (0 to +10) | 0.3% | 60.5% |
+| ModEnv 1 pluck (decay 50 ms, sustain 0), +10 | 0.3% | 75.1% |
+
+The ranges skip only the gaps between notes, where the amp envelope proves it.
+
+### Real-time terms
+
+Every candidate gives the same output at host blocks of 1, 37 and 4096, with no allocation while processing (the tables above). `ModVoice` holds everything in fixed arrays: 12 sources' chunk buffers, 14 targets' per-sample sums, two LFO segments, and the copies of the LFOs taken at each grid point. Nothing is allocated, `prepare()` included. It is 33,688 bytes against `dsp::Voice`'s 25,424 (+8.3 KB): mostly the per-sample sums (3.5 KB) and the source buffers (1.5 KB), which stage 2 can size to the routes a patch can have.
+
+### CPU
+
+`tools/bench.sh "[modulation]"`, `relwithdebinfo`, Apple M1 Ultra (virtualised). One voice held at the init patch, past the attacks, 512 samples per run at 48 kHz, the median of three runs (spread 0.4–6.6%), ns per sample per voice. For each destination and rate, 4 routes (an envelope, an LFO, velocity, the mod wheel) or all 16. For LFO Rate and Gain, LFO 1 also sits on Pitch A, and that route alone is their 0. The full table is in [baselines.md](../performance/baselines.md#2026-11-22-m15-the-modulation-model-stage-1-prototypes).
+
+| Destination | per sample: 4 / 16 routes | held | ramped |
+|---|---:|---:|---:|
+| (none: `dsp::Voice` / `ModVoice`) | 130.2 / 128.7 | | |
+| Pitch A | 139.7 / 144.8 | 132.6 / 138.8 | 136.6 / 140.3 |
+| Phase A | 140.8 / 146.9 | 134.4 / 138.2 | 136.1 / 141.5 |
+| Volume A | 140.1 / 151.1 | 135.9 / 145.1 | 134.3 / 145.1 |
+| Pan A | 261.6 / 247.9 | 248.4 / 231.3 | 248.5 / 234.6 |
+| LFO 1 Rate (0 / 4 / 16) | 158.6 / 170.9 / 235.6 | 135.4 / 140.9 / 141.0 | |
+| LFO 1 Gain (0 / 4 / 16) | 159.3 / 164.7 / 207.7 | 136.2 / 137.1 / 139.4 | 138.7 / 136.5 / 141.7 |
+| 16 routes, mixed, at the recommended rates | 273.5 | | |
+| 16 voices: no routes / 16 routes, mixed | 2,032.9 / 4,114.6 per sample | | |
+
+- **Each destination's own work is a few ns per voice.** Per sample costs 3–6 ns more than ramped for Pitch, Phase and Volume.
+- **A Pan route costs 100–135 ns per voice, at every rate**, because a part whose Pan moves isn't centred, and the voice leaves its mono path ([part-solo-and-skipping.md](part-solo-and-skipping.md)). The stereo init patch costs about 240 ns per voice. The pan law per sample adds about 13 ns on top, at one unison voice.
+- **LFOs in sample order cost 23 ns per voice more than on the grid with one route, and 68–95 ns more with 16 routes into the gain or the rate.** Most of it is `Lfo::setFrequency()` and a one-sample `process()` every sample. In segment order the LFOs cost nothing measurable.
+- **The mixed patch doubles 16 voices**, mostly through its two Pan routes.
+
+## Recommendations
+
+*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question (M1–M13), the recommendation is the working hypothesis, and the measurement is what makes it the safer default.*
+
+| # | Question | Recommendation | Why | Alternatives | Settled by |
+|---|---|---|---|---|---|
+| 1 | **The registries** | **(a) `constexpr` tables indexed by an enum, holding only the DSP's fields in `libs/dsp`.** A destination row holds its target, parts, scope, rate, units per amount and knob range. A source row holds its scope, range and bound kind. **The keys and labels live with the parameter table (M1.9)**, beside the presets that save them, and a `static_assert` there ties each key to its enum value. | The fastest at every job (16 routes summed in 14 ns, against 39 and 43). 1,140 bytes with no strings, against 930 for (c), 3,527 for (a) with its strings, and 4,623 for (b). An 8-byte compiled route, against (b)'s 24. The data is the behaviour, with no switch on a destination or a source. Every row is checked at compile time. `libs/dsp` stays free of strings it doesn't read, which matters on STM32. | (c) types: smallest, but a fold of comparisons per route (43 ns), and every row a type. (b) functions: an indirect call per route, the largest and slowest. | (ours) |
+| 2 | **The persisted ID** | **A string key per destination and source** (`"osc.pitch.ab"`, `"lfo.1"`): stable once released, never reused, never a position. "None" is `"none"`. | Presets outlive the menu's order (M1 may still change it) and Phase 2's additions. A string can't be mistaken for the template's numbering. The enum's order is internal and free to change. | A number per row, which is smaller but can be confused with an index. | M1.10 (D7) |
+| 3 | **Routing** | **The 16 slots, compiled into a list of live routes** at a note-on and at the first grid point after the patch changes. An empty slot or an amount of 0 drops out. **Sums per target and part**: AB is both parts, except **Cutoff AB and Reso AB, which are the Filter Control's own terms** (the M1.3 law). | No routes is the library to the bit, and costs nothing measurable (128.7 against 130.2 ns). Recompiling at a grid point keeps a mid-block patch change independent of the host's blocks. | Compile on every change at once (not measured: a change mid-segment would then take effect where the host's block falls). | M3 |
+| 4 | **Pitch** | **Per sample**, through the slots' per-sample note path (the glide's) | Exact. Held zips at −40.9 dB added. Ramped is −84.2 dB, but it trails by a segment and saves only 3–5 ns per voice. | Ramped (cheaper by 3%). | M12 |
+| 5 | **Phase** | **Per sample**: each sample's change of offset added to the oscillator's phase step, which is phase modulation as frequency modulation. **Where the step would go negative or past Nyquist, a band-limited jump.** | It stays band-limited (−62.3 dB off the lines at ±18°, as ramped). Held is a jump every segment: −17.5 dB added, −29.5 off the lines. Per sample costs about 5 ns per voice more than ramped. The manual evaluates pitch and phase per voice, and this puts them on one path. | Ramped (−65.8 dB added). Negative steps in `MinBlepOscillator` (it runs only forwards today). | M12 |
+| 6 | **Volume** | **Per sample**, as Mix (M1.4) | Exact, and consistent with Mix. Held zips at −13.3 dB added (Mix's −13). Per sample costs about 6 ns per voice more than ramped. | Ramped (−61.8 dB added). | M12 |
+| 7 | **Pan** | **On the grid, ramped**: each unison voice's two gains computed at the grid points and interpolated linearly. **A Pan route takes its part off the mono path.** | −45.5 dB added at a full-depth 40 Hz sweep. The law (a sine per unison voice) once per segment, not per sample: up to 32 sines per sample per voice at 4 × 8 unison. Leaving the mono path is what costs (about 110 ns per voice on the init patch), and it is the same at every rate. | Per sample (exact, +13 ns per voice at one unison voice, scaling with the count). Held (−9.4 dB: no). | M12 |
+| 8 | **LFO Rate and Gain, and the order** | **Segment order.** At each grid point, each LFO's rate (held) and gain (ramped from the previous point's value) are set from the sources as they stand there, the LFOs at their last output. Its wave is rendered for the whole segment ahead. A retrigger mid-segment renders the rest again from a copy taken at the grid point. **The delay through a cycle or a self-route is up to one segment** (1–30 samples, 14 on average). | Per-sample Rate *is* held for a sine (exact 0 apart), since `Lfo`'s curved rows take a rate only at their grid point. Gain ramped adds −65.9 dB, held −22.3. Costs nothing measurable, where sample order costs 23–95 ns per voice more. Deterministic at any block size. It makes the LFOs' bounds exact, and lets Cutoff read an LFO at the segment's end if wanted. | Sample order (a delay of one sample; per-sample `setFrequency()`). | M11, M12 |
+| 9 | **Cutoff and Reso** | **As decided in M1.3**, at the grid points into the Filter Control's modulation inputs, **with the sources as they stand at the grid point.** | Reading an LFO at the segment's end moves the fast-sweep overshoot by −46% to +46% but doesn't remove it. The sample rate moves it by ×2.8. Reading every source the same way keeps one rule. | The LFOs at the segment's end (exact for them, not for envelopes). | F30 |
+| 10 | **A per-voice source on a global destination** (PhsrFreq, DistAmnt) | **Each per-voice source has a global copy, which global destinations read**: an envelope gated by the first key down and released by the last (legato within a phrase); the last note-on's velocity; a free LFO's global instance (L8); the last note's keytrack. The destinations are evaluated on the absolute 32-sample grid, ramped. **A requirement on M1.7.** | No step at note-ons or note-offs (−69.8 dB), independent of the chord, defined when nothing sounds, and computed once rather than read from 16 voices. | The newest voice (a jump of 0.44 at each note-on, −38.6 dB). The oldest held voice (jumps when a key goes up). The sum (×4 with a four-note chord). | M10 |
+| 11 | **Each source's bound** (the skip test) | **An envelope by stage**: between its level and where the stage heads (1 in the attack, the sustain in the decay and sustain, 0 in the release, [0, 0] when idle). **An LFO exact**, from its segment rendered ahead (gain and offset as intervals). **A linear source, its two ends.** The rest, their range. **A slot at Volume 0 is silent only while its Volume routes can't lift it.** | Never too small in 38,400 random segments. 2.5× (envelope; 2.2× against PLAN's rule) and 132× (LFO) narrower than the ranges, so the skip test skips 53–75% of part B's segments where the ranges skip 0.3%. PLAN's LFO rule is too small in 4.4% of segments, by up to 0.997, because it misses slews. | Every source its range (exact, never skips a modulated output). PLAN's envelope rule (correct, wider). | (ours) |
+
+### What the library needs (stage 2)
+
+- **`libs/dsp`:** the DSP rows (`DspDestination`, the sources' kinds and ranges) and the enums; `compile()`, `accumulate()` and the bound per kind; `constexpr` throughout, with `static_assert`s on the rows.
+- **`OscillatorSlot`:** Volume, Pan and Phase modulation inputs, as the prototype's `ModSignal`.
+  - Volume and Pan: gains computed outside the `StereoGain` while modulated, with the knobs read as global ramps (as the Mix knobs are) instead of the slot's own 10 ms ramps.
+  - Phase: a running offset that a retrigger keeps, so a retrigger lands on Phase plus the offset in force.
+  - **The step set once per sample while Phase moves**, never re-set at a call's start (the block-size bug above).
+- **`Lfo`:** nothing new for segment order. The voice renders the segment ahead, keeps a copy at each grid point, and applies gain and offset itself. The gain could move into an input of `Lfo`'s own instead of `setGain()`'s 10 ms ramp.
+- **`dsp::Voice`:**
+  - the sources (task 3);
+  - the compiled routes, recompiled at grid points;
+  - the sums per target and part;
+  - Pitch per part, per sample;
+  - the slots' modulation;
+  - the Filter Control terms from the grid sums;
+  - Mix's term per sample;
+  - `mixModulationBound()` and the Volume test from the bounds;
+  - Pan routes in `allCentred()`.
+- **Interop (M1.9):** the keys and labels, each tied to its enum value at compile time.
+- **M1.7:** rule 10's global copies, read by the global destinations on the absolute grid.
+
+### What this pushes back on
+
+- **PLAN task 3's LFO bound** ("its largest value there: its ends, or its crest if one falls inside: exact") and **part-solo-and-skipping.md's recommendation 9** ("±1 if a crest falls inside"): too small across slews. The segment rendered ahead is exact.
+- **The LFO's range**: the plan's "up to ±2" became ±1 with M6's halving. It is **±1.125** with a slew. Inventory M6 is annotated.
+- **M3's hypothesis** that Cutoff AB and Reso AB are "the same as one route to A plus one to B": under the Filter Control law decided in M1.3 task 6, AB is the Filter Control's own term, clamped with that knob, so the two differ wherever a clamp acts. Inventory M3 is annotated.
+- **Drive is not a destination** (task 1), so it is struck from task 2's open rates in PLAN.md.
+- **lfos.md (L11):** a curved row takes a new rate only at its own grid point, so per-sample Rate modulation on a sine is per segment anyway. A modulated Gain can't go through `setGain()`, whose 10 ms ramp would lag it.
+- **part-solo-and-skipping.md's mono path:** a Pan route ends it for its part, about 110 ns per voice on the init patch.
+- **filter-control.md, recommendation 8:** the modulation's read point doesn't remove the overshoot, and the peak moves ×2.8 between 44.1 and 48 kHz, so M1.8's golden renders should fix the sample rate.
+- **`MinBlepOscillator` runs only forwards.** Deep phase modulation on low notes becomes band-limited jumps (36% of the samples of a 55.6 Hz note at ±180°). Whether that is heard against Sylenth1's is a question for M1.13.
+
 ## Tests
 
-Task 1 is research and adds no code. Tasks 2–4 add the tests: each source's values against its definition and its bound against its values, each destination's units and clamp, the init patch rendering bit-identically to before, and host blocks of 1, 37 and 4096 samples giving the same output to the bit.
+Task 1 is research and adds no code. Task 2's stage 1 adds the prototypes' checks under `[modulation-model]` in the default run ([modulation_test.cpp](../../tests/dsp/modulation/modulation_test.cpp)):
+
+- the three registries compute the same sums and bounds on 200 random patches;
+- an empty slot or an amount of 0 adds an exact 0;
+- each destination is found by its key, not its label or position;
+- each size probe compiles its candidate on its own;
+- every envelope bound (range, PLAN's, by stage) holds over 12,000 random segments, and the LFO's range and exact bounds over 26,400;
+- `ModVoice` with no routes is `dsp::Voice` to the bit, at host blocks of 512 and 37;
+- a busy patch (12 routes, an LFO cycle and a self-route) gives the same output at host blocks of 1, 37 and 4096 at every rate in both LFO orders, with no allocation.
+
+The compile-time checks are `static_assert`s on the rows and on each candidate. Tasks 3–4 add the library's tests: each source's values against its definition and its bound against its values, each destination's units and clamp, the init patch rendering bit-identically to before, and bit for bit the stage-1 prototype at host blocks of 1, 37 and 4096.
 
 ## References
 

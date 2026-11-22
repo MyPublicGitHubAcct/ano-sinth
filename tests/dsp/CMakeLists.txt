@@ -12,6 +12,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/legato_benchmark.cpp
     benchmarks/lfo_benchmark.cpp
     benchmarks/mixer_benchmark.cpp
+    benchmarks/modulation_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     benchmarks/solo_benchmark.cpp
     benchmarks/tempo_sync_benchmark.cpp
@@ -45,6 +46,12 @@ add_executable(anoesis_dsp_tests
     math/pan_test.cpp
     math/pitch_test.cpp
     math/random_test.cpp
+    modulation/modulation_report.cpp
+    modulation/modulation_test.cpp
+    modulation/registry_size_functions.cpp
+    modulation/registry_size_table.cpp
+    modulation/registry_size_table_dsp.cpp
+    modulation/registry_size_types.cpp
     oscillators/antialiasing_report.cpp
     oscillators/band_limited_oscillator_test.cpp
     oscillators/band_limiting_residuals_test.cpp
