@@ -6,6 +6,34 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.4 mixer, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[mixer]"`, 100 samples per benchmark, three runs; the table gives each row's median.
+- **What is measured** ([mixer.md](../dsp/mixer.md#cpu)): the stage-1 `MixVoice` (`dsp::Voice` with a Mix gain per part) and `MixEngine` (the real `VoiceAllocator`, the Mix ramps, part buses, Main Volume, meters), in tests/dsp/voice/mixer_candidates.hpp. *Ramping*: the Mix knob retargeted every block, moving 480 of 512 samples; *LFO*: a free 40 Hz LFO of ±5 on Mix, its `sin` computed per sample in the prototype.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| `dsp::Voice`, init | 349.54 |
+| `MixVoice`, init, grid held: still / ramping / LFO | 345.03 / 344.72 / 350.25 |
+| `MixVoice`, init, grid ramped: still / ramping / LFO | 346.16 / 346.62 / 362.88 |
+| `MixVoice`, init, per sample: still / ramping / LFO | 347.51 / 348.36 / 362.66 |
+| `MixVoice`, init, part bus (the voice only) | 363.65 |
+| 16 voices, init: `VoiceAllocator<dsp::Voice>` / engine per sample / engine part bus | 5,584.49 / 5,621.00 / 5,587.95 |
+| 16 voices, worst case: the same three | 10,709.08 / 10,653.30 / 10,621.17 |
+| Main Volume (stereo), ramping / settled | 0.94 / 0.10 |
+| meters (stereo): sample peak / block peak / RMS window / RMS exponential / VU / PPM | 1.61 / 2.45 / 8.50 / 4.57 / 8.36 / 5.34 |
+| output guard (stereo) | 0.28 |
+| `MixVoice`, A1 and B1: Mix B 10 / Mix B 0 / B1 at Voices 0 | 453.02 / 460.53 / 346.88 |
+
+### Observations
+
+- **A per-voice Mix costs nothing measurable** while the knob is still or ramping (347.5–348.4 against 349.5); sixteen voices through the engine are within noise of the library, per sample or on part buses.
+- **With a 40 Hz LFO, per sample and grid ramped both cost about 4% more**, mostly the prototype's `sin` per sample, which M1.5's LFOs compute anyway.
+- **Mix B at 0 saves nothing** (460.5 against 453.0): skipping a silent part is task 5's to claim, about 110 ns per voice here.
+- **Noise:** `dsp::Voice` reads 349.5 here against 367.6 in the previous entry; the part-bus voice row ranged 345–383 over the runs.
+
+---
+
 ## 2026-11-21: M1.4 legato and portamento, as built
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[legato]"`, 100 samples per benchmark, three runs; each row's median.

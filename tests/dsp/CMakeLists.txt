@@ -10,6 +10,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/keytrack_benchmark.cpp
     benchmarks/legato_benchmark.cpp
     benchmarks/lfo_benchmark.cpp
+    benchmarks/mixer_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     benchmarks/tempo_sync_benchmark.cpp
     benchmarks/voice_allocation_benchmark.cpp
@@ -62,6 +63,7 @@ add_executable(anoesis_dsp_tests
     voice/glide_test.cpp
     voice/legato_test.cpp
     voice/legato_report.cpp
+    voice/mixer_report.cpp
     voice/voice_allocator_test.cpp
     voice/voice_report.cpp
     voice/voice_test.cpp)
