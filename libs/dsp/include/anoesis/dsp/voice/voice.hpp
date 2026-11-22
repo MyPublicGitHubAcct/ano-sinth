@@ -14,6 +14,7 @@
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
 #include <anoesis/dsp/voice/glide.hpp>
+#include <anoesis/dsp/voice/mix_law.hpp>
 #include <anoesis/dsp/voice/pitch_bend.hpp>
 #include <anoesis/dsp/voice/voice_knobs.hpp>
 
@@ -67,17 +68,28 @@
 ///   Adsr::legatoGateOn(), the phases, drift, filters and grid untouched.
 ///   The velocity ramps over a glide (the velocity source, M1.5).
 ///
+/// - Mix A and Mix B (M1.4 task 4, docs/dsp/mixer.md): each filter's output,
+///   after its part's amp envelope, is multiplied by its part's Mix gain
+///   (mix_law.hpp: linear in internal units, unity at 10, the knob plus its
+///   modulation clamped to [0, 15]), per sample, with Mix's global ramp read
+///   through the knobs at each sample; constant over a chunk while the ramp
+///   is still. A part crossing into the other filter takes that filter's
+///   part's Mix only (V3). A null Mix ramp is unity. The modulation term is 0
+///   until M1.5.
+///
 /// Rendering runs in chunks that stop at the grid (at most 32 samples): the
 /// four slots added into their part's buffer (in drift's runs of constant
-/// offset), both envelopes, each filter's input built in its own buffer,
-/// the filters in place, and each filter's output times its part's envelope
-/// added into channels 0 and 1 of the caller's block. The scratch is fixed
-/// (12 buffers of 32 samples), so nothing is allocated, prepare() included;
-/// the output does not depend on how the caller splits its blocks.
+/// offset), both envelopes, each part's Mix gains, each filter's input built
+/// in its own buffer, the filters in place, and each filter's output times
+/// its part's envelope and Mix added into channels 0 and 1 of the caller's
+/// block. The scratch is fixed (14 buffers of 32 samples), so nothing is
+/// allocated, prepare() included; the output does not depend on how the
+/// caller splits its blocks.
 ///
-/// Mix A/B, velocity's routes and the voice's output bus are the mixer's
-/// (task 4) and the modulation system's (M1.5). About 25 KB at 64 taps.
-/// Docs: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md
+/// Velocity's routes are the modulation system's (M1.5). About 25 KB at 64
+/// taps.
+/// Docs: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md,
+/// docs/dsp/mixer.md
 namespace anoesis::dsp
 {
 
@@ -675,14 +687,18 @@ private:
                                }
                            });
 
-        // 2. The amp envelopes.
+        // 2. The amp envelopes, and each sounding filter's part's Mix gains.
         for (std::size_t p = 0; p < partCount; ++p)
         {
             envelopes[p].process(std::span{envelopeBuffers[p]}.first(length));
+            if (routes[p].active)
+            {
+                fillMixGains(p, knobs, done, length);
+            }
         }
 
         // 3. Each running filter's input, in its own buffer; 4. the filter, in
-        // place; 5. its output through its part's envelope, into `out`.
+        // place; 5. its output through its part's envelope and Mix, into `out`.
         const auto left = out.channel(0);
         const auto right = out.channel(1);
         for (std::size_t f = 0; f < partCount; ++f)
@@ -695,24 +711,55 @@ private:
             buildInput(f, length);
             filters[f].process(input);
             const auto& e = envelopeBuffers[f];
+            const auto& g = mixGains[f];
             const auto y0 = input.channel(0);
             const auto y1 = input.channel(1);
             if (unityLevel)
             {
                 for (std::size_t i = 0; i < length; ++i)
                 {
-                    left[i] += e[i] * y0[i];
-                    right[i] += e[i] * y1[i];
+                    const float ge = g[i] * e[i]; // exactly e[i] at unity
+                    left[i] += ge * y0[i];
+                    right[i] += ge * y1[i];
                 }
             }
             else
             {
                 for (std::size_t i = 0; i < length; ++i)
                 {
-                    left[i] += (e[i] * y0[i]) * outputLevel;
-                    right[i] += (e[i] * y1[i]) * outputLevel;
+                    const float ge = g[i] * e[i];
+                    left[i] += (ge * y0[i]) * outputLevel;
+                    right[i] += (ge * y1[i]) * outputLevel;
                 }
             }
+        }
+    }
+
+    /// Part p's Mix gain at each sample of the chunk that starts at the
+    /// block's sample `done`: its knob ramp read at that sample (unity if
+    /// null), plus its modulation (0 until M1.5), through the law. A linear
+    /// ramp is monotonic, so the same value at both ends of the chunk is a
+    /// constant gain over it, computed once.
+    void fillMixGains(std::size_t p, const VoiceKnobs& knobs, std::size_t done, std::size_t length) noexcept
+    {
+        auto& g = mixGains[p];
+        const auto* ramp = knobs.mix[p];
+        if (ramp == nullptr)
+        {
+            std::fill_n(g.begin(), length, mixGain({.mix = mixLaw.unity}));
+            return;
+        }
+        const auto at = knobs.offset + done; // the ramps stand that many samples before this block
+        const float first = ramp->valueAfter(at);
+        const float last = ramp->valueAfter(at + length);
+        if (first <= last && first >= last) // equal, without -Wfloat-equal
+        {
+            std::fill_n(g.begin(), length, mixGain({.mix = first}));
+            return;
+        }
+        for (std::size_t i = 0; i < length; ++i)
+        {
+            g[i] = mixGain({.mix = ramp->valueAfter(at + i)});
         }
     }
 
@@ -768,6 +815,7 @@ private:
     std::array<StereoChunk, partCount> partBuffers{};
     std::array<StereoChunk, partCount> filterBuffers{};
     std::array<Chunk, partCount> envelopeBuffers{};
+    std::array<Chunk, partCount> mixGains{}; ///< each part's Mix gain over the chunk
     std::array<std::array<float*, 2>, partCount> partPointers{};
     std::array<std::array<float*, 2>, partCount> filterPointers{};
 

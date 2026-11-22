@@ -34,7 +34,11 @@
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
 #include <anoesis/dsp/oscillators/unison.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
+#include <anoesis/dsp/output/main_volume.hpp>
+#include <anoesis/dsp/output/output_guard.hpp>
+#include <anoesis/dsp/output/peak_meter.hpp>
 #include <anoesis/dsp/resampling/halfband.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>
+#include <anoesis/dsp/voice/mix_law.hpp>
 #include <anoesis/dsp/voice/voice.hpp>
 #include <anoesis/dsp/voice/voice_allocator.hpp>

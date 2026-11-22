@@ -10,7 +10,10 @@
 // - the global stages per block: Main Volume (ramping, settled), each meter
 //   on both channels, and an output guard;
 // - room for task 5 (V13): a voice with A1 and B1 at Mix B 10, at Mix B 0,
-//   and with B1 at Voices 0.
+//   and with B1 at Voices 0;
+// - as built (stage 2): dsp::Voice with its Mix ramps still and ramping, 16
+//   voices through VoiceAllocator with Mix, MainVolume, StereoPeakMeter and
+//   OutputGuard.
 //
 // Tagged [!benchmark][mixer]: run with tools/bench.sh "[mixer]" in
 // relwithdebinfo.
@@ -19,6 +22,9 @@
 #include "../voice/mixer_candidates.hpp"
 
 #include <anoesis/dsp/control/smoother.hpp>
+#include <anoesis/dsp/output/main_volume.hpp>
+#include <anoesis/dsp/output/output_guard.hpp>
+#include <anoesis/dsp/output/peak_meter.hpp>
 #include <anoesis/dsp/voice/voice.hpp>
 #include <anoesis/dsp/voice/voice_allocator.hpp>
 
@@ -27,6 +33,7 @@
 #include <catch2/benchmark/catch_benchmark.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -256,6 +263,123 @@ std::vector<float> noiseBlock()
     return x;
 }
 
+/// As built: dsp::Voice held with its Mix ramps (VoiceKnobs::mix), still or
+/// ramping all the time.
+class LibraryMixBench
+{
+public:
+    LibraryMixBench(void (*configure)(dsp::Voice<>&), bool ramping)
+        : voice(std::make_unique<dsp::Voice<>>(anoesis::test::d6::minBlepTable64(), 1)),
+          out(2, blockSize),
+          moving(ramping)
+    {
+        for (auto& r : ramps)
+        {
+            r.setRampTime(0.01f);
+            r.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+            r.setCurrentAndTarget(7.5f);
+        }
+        configure(*voice);
+        voice->prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+        voice->noteOn(45.0f, knobs());
+        for (int i = 0; i < 100; ++i)
+        {
+            run();
+        }
+    }
+    float run()
+    {
+        if (moving)
+        {
+            ramps[0].setTarget(up ? 15.0f : 5.0f);
+            up = !up;
+        }
+        out.block().clear();
+        voice->process(out.block(), knobs());
+        for (auto& r : ramps)
+        {
+            r.skip(blockSize);
+        }
+        return out.channel(0)[0];
+    }
+
+private:
+    [[nodiscard]] dsp::VoiceKnobs knobs() const noexcept
+    {
+        auto k = filterKnobs.knobs();
+        k.mix = {ramps.data(), ramps.data() + 1};
+        return k;
+    }
+    FilterKnobs filterKnobs;
+    std::array<dsp::LinearSmoother, 2> ramps{};
+    std::unique_ptr<dsp::Voice<>> voice;
+    Buffer out;
+    bool moving;
+    bool up = true;
+};
+
+/// As built: 16 voices through VoiceAllocator with Mix, then MainVolume, the
+/// meter and the guard, as M1.8 will chain them.
+class LibraryChain
+{
+public:
+    explicit LibraryChain(void (*configure)(dsp::Voice<>&))
+        : allocator(std::make_unique<dsp::VoiceAllocator<dsp::Voice<>>>(1, anoesis::test::d6::minBlepTable64())),
+          out(2, blockSize)
+    {
+        for (auto& r : ramps)
+        {
+            r.setRampTime(0.01f);
+            r.setCurrentAndTarget(7.5f);
+        }
+        const dsp::ProcessSpec spec{.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2};
+        for (auto& r : ramps)
+        {
+            r.prepare(spec);
+        }
+        volume.prepare(spec);
+        meter.prepare(spec);
+        guard.prepare(spec);
+        allocator->forEachVoice(configure);
+        allocator->prepare(spec);
+        std::vector<dsp::VoiceEvent> chord;
+        chord.reserve(16);
+        for (int k = 0; k < 16; ++k)
+        {
+            chord.push_back({.offset = 0, .kind = dsp::VoiceEventKind::noteOn, .value = 40 + k});
+        }
+        process(chord);
+        for (int i = 0; i < 100; ++i)
+        {
+            run();
+        }
+    }
+    float run()
+    {
+        process({});
+        return out.channel(0)[0];
+    }
+
+private:
+    void process(std::span<const dsp::VoiceEvent> events)
+    {
+        out.block().clear();
+        auto k = filterKnobs.knobs();
+        k.mix = {ramps.data(), ramps.data() + 1};
+        allocator->process(out.block(), events, k);
+        volume.process(out.block());
+        meter.process(out.block());
+        static_cast<void>(guard.process(out.block()));
+    }
+    FilterKnobs filterKnobs;
+    std::array<dsp::LinearSmoother, 2> ramps{};
+    std::unique_ptr<dsp::VoiceAllocator<dsp::Voice<>>> allocator;
+    dsp::MainVolume volume;
+    dsp::StereoPeakMeter meter;
+    dsp::OutputGuard guard;
+    Buffer out;
+};
+
 } // namespace
 
 TEST_CASE("Mixer: CPU", "[!benchmark][mixer]")
@@ -415,4 +539,71 @@ TEST_CASE("Mixer: CPU", "[!benchmark][mixer]")
             return noB.run();
         };
     }
+}
+
+TEST_CASE("Mixer as built: CPU", "[!benchmark][mixer]")
+{
+    LibraryMixBench still{initPatch<dsp::Voice<>>, false};
+    LibraryMixBench ramping{initPatch<dsp::Voice<>>, true};
+    BENCHMARK("mixer, built: dsp::Voice, init, Mix still x512")
+    {
+        return still.run();
+    };
+    BENCHMARK("mixer, built: dsp::Voice, init, Mix ramping x512")
+    {
+        return ramping.run();
+    };
+    LibraryChord plain{initPatch<dsp::Voice<>>};
+    LibraryChain chain{initPatch<dsp::Voice<>>};
+    BENCHMARK("mixer, built: 16 voices, VoiceAllocator<dsp::Voice>, no Mix ramps, init x512")
+    {
+        return plain.run();
+    };
+    BENCHMARK("mixer, built: 16 voices with Mix, MainVolume, StereoPeakMeter, OutputGuard, init x512")
+    {
+        return chain.run();
+    };
+
+    const auto x = noiseBlock();
+    Buffer out(2, blockSize);
+    dsp::MainVolume volume;
+    volume.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+    bool up = true;
+    BENCHMARK("mixer, built: MainVolume, ramping x512")
+    {
+        volume.setGain(up ? 1.0f : 0.5f);
+        up = !up;
+        std::ranges::copy(x, out.channel(0).begin());
+        std::ranges::copy(x, out.channel(1).begin());
+        volume.process(out.block());
+        return out.channel(0)[0];
+    };
+    BENCHMARK("mixer, built: MainVolume, settled x512")
+    {
+        std::ranges::copy(x, out.channel(0).begin());
+        std::ranges::copy(x, out.channel(1).begin());
+        volume.process(out.block());
+        return out.channel(0)[0];
+    };
+    BENCHMARK("mixer, built: copying the block (the two rows above include it) x512")
+    {
+        std::ranges::copy(x, out.channel(0).begin());
+        std::ranges::copy(x, out.channel(1).begin());
+        return out.channel(0)[0];
+    };
+    std::ranges::copy(x, out.channel(0).begin());
+    std::ranges::copy(x, out.channel(1).begin());
+    dsp::StereoPeakMeter meter;
+    meter.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+    BENCHMARK("mixer, built: StereoPeakMeter x512")
+    {
+        meter.process(out.block());
+        return meter.channel(0).reading();
+    };
+    dsp::OutputGuard guard;
+    guard.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+    BENCHMARK("mixer, built: OutputGuard x512")
+    {
+        return guard.process(out.block());
+    };
 }

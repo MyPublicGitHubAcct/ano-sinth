@@ -7,6 +7,7 @@ After its filter and amp envelope, each part of a voice is scaled by its Mix kno
 - **The candidates** prototyped here, over the real `dsp::VoiceAllocator`.
 - **What they measured:** the prototype against the library; four Mix laws and three clamps against the developer's numbers; zipper and clicks for four placements; V3's two readings; Main Volume's ramp; six meters against reference signals and the standards' ballistics; absolute levels and proof that nothing clips; block-size exactness, allocation and CPU.
 - **Recommendations** for the project owner, with the alternatives.
+- **The decision** (every recommendation, 2026-11-22) and **as built**: `mixGain` and Mix in `dsp::Voice`, `MainVolume`, `PeakMeter` and `OutputGuard`, with the tests that pin them.
 
 Read [voice-architecture.md](voice-architecture.md) (the voice whose output is mixed), [parameter-smoothing.md](parameter-smoothing.md) (the ramps), [levels-and-pitch.md](levels-and-pitch.md) (decibels) and [filter-control.md](filter-control.md#the-knob-ramps-one-global-ramp-read-at-each-voices-grid) (global ramps read by each voice) first.
 
@@ -353,7 +354,7 @@ Every placement is identical to the bit (12 of 12) with 0 allocations while proc
 
 ## Recommendations
 
-*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (X1–X12), and the measurement is what makes it the safer default.*
+*Stage 1's recommendations, for the project owner to choose from. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (X1–X12), and the measurement is what makes it the safer default. Chosen by the project owner on 2026-11-22, every one ([The decision](#the-decision), [As built](#as-built)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -380,6 +381,103 @@ Every placement is identical to the bit (12 of 12) with 0 allocations while proc
 - **O5 and V9:** the absolute chain now has numbers (init peak −3.41 dBFS at unity), and it waits on the init values (X2, X6).
 - **F8:** drive ×16 raises the output by 14 dB at the worst case. Whether Sylenth1's drive compensates is a demo comparison for the filter.
 - **`dsp::Voice`'s "Mix A/B … and the voice's output bus are the mixer's":** recommendation 3 keeps the voice's stereo output and adds the gain inside, so there is no bus.
+
+## The decision
+
+Chosen by the project owner on 2026-11-22: every recommendation (Decisions log).
+
+- **Mix's law:** linear in internal units, unity at internal 10 (6.67 shown), ×1.5 at the top. The knob plus its modulation is clamped to [0, 15] before the law.
+- **Where Mix applies:** in each voice, per sample, after the part's amp envelope. The Mix A/B knobs are global 10 ms ramps, read through `VoiceKnobs`. A part crossing into the other filter takes that filter's part's Mix only (V3).
+- **Main Volume:** a global gain on every channel at the end of the chain, ramped over 10 ms on the gain, with the block split at its events. Its knob law is the parameter table's.
+- **The meter:** a sample peak per channel after Main Volume, with a 0.5 s hold, a fall of 20 dB in 1.7 s and an over flag held 1 s. `libs/dsp` produces the values; the plugin publishes them.
+- **No clipping, and the guard:** nothing limits the output. A counted non-finite guard sits at M1.8's output, and there is none in the voice path.
+- **Levels:** the unity chain stays until the demo is measured.
+
+## As built
+
+### The law
+
+[mix_law.hpp](../../libs/dsp/include/anoesis/dsp/voice/mix_law.hpp): `MixLaw` holds the law's numbers (`knobMin` 0, `knobMax` 15, `unity` 10); `mixLaw` is the decided instance. `MixTerms` holds the knob and its modulation, in internal units. `mixUnits()` adds them and clamps the sum to the knob's range, with NaN counting as the bottom. `mixGain()` is `mixUnits / unity`, a true division, so every quarter unit is exact to one rounding and unity is exactly 1. `mixInternalPerShown` (1.5) is the knob's display factor, for the parameter table. These are pure `constexpr` functions, beside the Filter Control's.
+
+### The voice
+
+[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp):
+
+- `VoiceKnobs` gains `mix`: Mix A and Mix B's ramps in internal units, read at `offset` like the filter knobs. **A null ramp is unity**, so every caller without a mixer hears the voice as before, to the bit (tested).
+- In each chunk, after the envelopes, `fillMixGains()` writes each sounding filter's part's gain for every sample: the ramp read with `valueAfter` at that sample, through `mixGain`. A linear ramp is monotonic, so when it reads the same at both ends of the chunk, the gain is computed once.
+- At step 5, the gain is multiplied into the envelope (`g · e`, exactly `e` at unity), then into the filter's output. A crossing part is already inside the filter's output, so it takes that filter's part's Mix only.
+- The modulation term is 0 until M1.5 supplies the voice's Mix A / Mix B / Mix AB modulation.
+- One more 2 × 32-float buffer per voice (256 bytes); nothing allocates.
+
+### The output stages
+
+In `libs/dsp/include/anoesis/dsp/output/`, for M1.8's engine to chain after the effects:
+
+- **[main_volume.hpp](../../libs/dsp/include/anoesis/dsp/output/main_volume.hpp), `MainVolume`:** one gain on every channel, in place. A `LinearSmoother` ramps the gain over 10 ms from each `setGain()`, and `setGainImmediately()` jumps (for a preset load). A gain that isn't finite and at least 0 counts as 0. Settled, it is one multiply per sample; ramping, one ramp step per sample shared by the channels. The caller splits its block at Main Volume events. It satisfies `BlockProcessor`.
+- **[peak_meter.hpp](../../libs/dsp/include/anoesis/dsp/output/peak_meter.hpp), `PeakMeter` and `StereoPeakMeter`:** the decided ballistics in `PeakMeterSettings` (hold 0.5 s, fall 20/1.7 dB per second, over 1 s), converted to samples at `prepare()`, so they are seconds at any rate. It runs per sample, with `reading()` and `over()` per channel after each block. Below −200 dB the reading is 0, so the fall never goes subnormal. It is the stage-1 prototype's meter to the bit. Handing its values to the GUI is the plugin's job (M1.9, M1.11), through its own `std::atomic<float>`.
+- **[output_guard.hpp](../../libs/dsp/include/anoesis/dsp/output/output_guard.hpp), `OutputGuard`:** a non-finite sample becomes 0 and is counted, per block (`process()`'s return) and in total (`count()`). Finite samples, subnormals included, pass unchanged. It satisfies `BlockProcessor`.
+
+### Tests
+
+[mix_test.cpp](../../tests/dsp/voice/mix_test.cpp) and [output_stage_test.cpp](../../tests/dsp/output/output_stage_test.cpp), tagged `[mixer]`:
+
+- **The law:**
+  - exactly `units / 10` at every quarter unit from 0 to 15;
+  - unity at internal 10 (a `static_assert`) and at 6.667 shown;
+  - −6.02 dB at half;
+  - the clamp: the developer's silence point, a negative sum silent, the top held, NaN and −∞ silent, +∞ at the top;
+  - the law's numbers as parameters.
+- **The voice:**
+  - **bit for bit the stage-1 prototype** (`MixEngine` in its decided configuration) through `VoiceAllocator`, with `MainVolume` after it, at host blocks of 1, 37 and 4096, with 0 allocations. The setup: two patches (a resonant pad on AB, and A1 and B1 on their own filters), steals at Polyphony 4, Mix A and B automated every 300 samples (past both ends of the range), and Main Volume jumps;
+  - a null Mix ramp is the library without a mixer, to the bit;
+  - each part's Mix scales only its own filter's output, exactly (×1.5 and ×0.5 to one rounding, so after the filter);
+  - V3: a crossing B1 is untouched by Mix B and silenced by Mix A;
+  - the ramp is read at every sample: a jump at an off-grid sample follows the 10 ms ramp to one rounding, silent from 480 samples on.
+- **`MainVolume`:**
+  - the gains are a `LinearSmoother`'s over 10 ms, on three channels, landing exactly;
+  - the output is the input times the gain to the bit, at ×0.25 to ×1000 (nothing clips);
+  - the same output at blocks of 1, 37, 512 and 4096 with gain events;
+  - NaN, negative and infinite gains count as 0;
+  - the lifecycle contract, no allocation, and acting at all.
+- **`PeakMeter`:**
+  - an instant attack, a 0.5 s hold, and 20 dB in 1.7 s, within 174 samples. The tolerance is derived: 81,600 float multiplies, each rounded by 2⁻²⁴;
+  - a peak equal to the held level restarts the hold;
+  - the over flag: not at 1.0, at 1.0001, held exactly 1 s; settings of its own;
+  - the same reading and flag at blocks of 1, 37, 512 and 4096, per channel, and **the stage-1 prototype's meter to the bit**;
+  - hold and fall in seconds at 96 kHz; `reset()`; no allocation.
+- **`OutputGuard`:** NaN and ±∞ zeroed and counted, per block and in total; huge, subnormal and signed-zero samples untouched; a clean block unchanged; `reset()`; no allocation.
+
+**Red, then deliberate breaks.** Against inert headers (the law returning 1, the voice ignoring Mix, the stages doing nothing), 15 of 17 failed. Two passed:
+
+- the null-ramp test, rightly: it checks that a caller without a mixer is unchanged;
+- `MainVolume`'s lifecycle test, because an inert gain changes nothing. It was strengthened to require the gain to act.
+
+Then 24 deliberate breaks:
+
+- **the law:** no clamp at the bottom (v2's inversion), none at the top, NaN passing, ×0.1 instead of ÷10, unity at the top;
+- **the voice:** the gain held from the chunk's start, the ramp read without the knobs' offset, a null ramp silent, the other part's Mix, Mix ignored, the ramp read a sample ahead, Mix applied twice;
+- **`MainVolume`:** no ramp, negative gains, two channels only, the ramp skipped;
+- **the meter:** a strict attack, the over at full scale, the fall at 10 dB per decade, the hold counted at 48 kHz, `reset()` keeping the level;
+- **the guard:** subnormals zeroed, the count per block only, `reset()` keeping the count.
+
+All 24 are caught. One is caught at compile time, by the `static_assert`. One survived until it led to a stronger test: a strict attack, so that a peak equal to the held level doesn't restart the hold. It is caught by the new equal-peak test.
+
+### Results, as built
+
+`tools/bench.sh "[mixer]"` (the as-built rows), `relwithdebinfo`, Apple M1 Ultra (virtualised), the median of three runs, ns per sample:
+
+| Benchmark | ns per sample |
+|---|---:|
+| `dsp::Voice`, init, Mix still / ramping | 359.9 / 360.8 |
+| 16 voices, `VoiceAllocator<dsp::Voice>` without Mix ramps / with Mix, `MainVolume`, `StereoPeakMeter`, `OutputGuard` | 5,803.8 / 5,822.5 |
+| `MainVolume` (stereo), ramping / settled, each including a 0.10 ns block copy | 1.73 / 0.21 |
+| `StereoPeakMeter` | 1.66 |
+| `OutputGuard` (stereo) | 0.43 |
+
+- **Mix costs nothing measurable in the voice.** A ramping Mix is 0.3% over a still one, and the whole output chain on 16 voices is 0.3% over the voices alone, within noise. This session's `dsp::Voice` read 359.9 against stage 1's 349.5 in another session. The machine's spread between sessions is larger than that (349.5 to 367.6 for the same code).
+- **The global stages together cost about 2.3 ns per sample while Main Volume ramps, and 0.6 settled.** That is under 0.7% of one voice.
+
+`dsp::Voice` grows by 256 bytes (the Mix gains); `MainVolume` is a `LinearSmoother` (about 40 bytes), `StereoPeakMeter` two sets of a few counters, and `OutputGuard` one counter. Nothing allocates, so the RMS window's memory question (stage 1) doesn't arise.
 
 ## References
 

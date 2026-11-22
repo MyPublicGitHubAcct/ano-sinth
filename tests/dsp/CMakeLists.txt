@@ -57,12 +57,14 @@ add_executable(anoesis_dsp_tests
     oscillators/unison_report.cpp
     oscillators/unison_slot_test.cpp
     oscillators/waveform_test.cpp
+    output/output_stage_test.cpp
     resampling/oversampler_test.cpp
     support/allocation_counter.cpp
     voice/allocation_report.cpp
     voice/glide_test.cpp
     voice/legato_test.cpp
     voice/legato_report.cpp
+    voice/mix_test.cpp
     voice/mixer_report.cpp
     voice/voice_allocator_test.cpp
     voice/voice_report.cpp

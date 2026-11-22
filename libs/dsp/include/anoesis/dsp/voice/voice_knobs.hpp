@@ -11,7 +11,8 @@
 #include <cstdint>
 
 /// What a voice reads that isn't its own: the global knob ramps that feed its
-/// filters, and the pitch bend; and how a note-on moves its pitch.
+/// filters and set its parts' Mix, and the pitch bend; and how a note-on
+/// moves its pitch.
 /// Doc: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md
 namespace anoesis::dsp
 {
@@ -25,7 +26,11 @@ namespace anoesis::dsp
 ///   note-on), read ahead with LinearSmoother::valueAfter(); a null ramp
 ///   reads as 0;
 /// - the pitch bend (pitch_bend.hpp), read at absolute samples: `time` is
-///   the absolute sample of that same first sample. A null bend reads as 0.
+///   the absolute sample of that same first sample. A null bend reads as 0;
+/// - Mix A and Mix B (M1.4 task 4, mix_law.hpp), ramps in internal units
+///   (0-15) read at each sample like the filter knobs. A null Mix ramp reads
+///   as unity (internal 10), so a caller without a mixer hears the voice
+///   unscaled.
 struct VoiceKnobs
 {
     std::array<const LinearSmoother*, 2> cutoff{};    ///< Cutoff A, Cutoff B (knob units)
@@ -37,8 +42,9 @@ struct VoiceKnobs
     /// the voice is given: 0 when the voice gets the whole host block, and
     /// the piece's start when an allocator renders it in pieces.
     std::size_t offset = 0;
-    const PitchBend* bend = nullptr; ///< the instance's bend; null: none
-    std::uint64_t time = 0;          ///< the absolute sample of the block's first sample
+    const PitchBend* bend = nullptr;            ///< the instance's bend; null: none
+    std::uint64_t time = 0;                     ///< the absolute sample of the block's first sample
+    std::array<const LinearSmoother*, 2> mix{}; ///< Mix A, Mix B (internal units); null: unity
 
     /// The same knobs for a block starting `samples` later.
     [[nodiscard]] constexpr VoiceKnobs advanced(std::size_t samples) const noexcept

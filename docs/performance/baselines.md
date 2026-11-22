@@ -6,6 +6,28 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.4 mixer, as built (Mix in `dsp::Voice`, `MainVolume`, `PeakMeter`, `OutputGuard`)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). The "Mixer as built: CPU" benchmarks (`[mixer]`), 100 samples per benchmark, three runs; the table gives each row's median.
+- **What is measured** ([mixer.md](../dsp/mixer.md#results-as-built)): `dsp::Voice` with its Mix ramps (`VoiceKnobs::mix`) still and retargeted every block; 16 voices through `VoiceAllocator` without Mix ramps and with Mix, `MainVolume`, `StereoPeakMeter` and `OutputGuard` after them; each output stage on a stereo block.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| `dsp::Voice`, init, Mix still / ramping | 359.88 / 360.82 |
+| 16 voices, init: `VoiceAllocator<dsp::Voice>` without Mix ramps / with Mix and the output chain | 5,803.77 / 5,822.50 |
+| `MainVolume`, ramping / settled (each including the block copy below) | 1.73 / 0.21 |
+| copying the stereo block | 0.10 |
+| `StereoPeakMeter` | 1.66 |
+| `OutputGuard` (stereo) | 0.43 |
+
+### Observations
+
+- **Mix costs nothing measurable:** ramping 0.3% over still per voice; 16 voices with the whole output chain 0.3% over the voices alone.
+- **The output stages together are 2.3 ns per sample while Main Volume ramps, 0.6 settled**, under 0.7% of one voice.
+- **Noise:** `dsp::Voice` reads 359.9 here against 349.5 in the stage-1 entry (another session); the spread between sessions for the same code is 349.5 to 367.6.
+
+---
+
 ## 2026-11-22: M1.4 mixer, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[mixer]"`, 100 samples per benchmark, three runs; the table gives each row's median.

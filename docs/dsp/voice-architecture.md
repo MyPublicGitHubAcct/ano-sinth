@@ -318,7 +318,7 @@ Two things were settled in the build:
 What it leaves to later tasks:
 - the per-voice modulation terms of the Filter Control (Cutoff X / AB, Reso X / AB), until M1.5 supplies them;
 - the note's glide, bend, and master tune (task 3; built 2026-11-21, [legato-portamento.md](legato-portamento.md#as-built));
-- Mix and the output bus (task 4);
+- Mix and the output bus (task 4; built 2026-11-22, [mixer.md](mixer.md#as-built): each filter's output times its part's envelope and its part's Mix, per sample, into the voice's stereo output; no bus);
 - skipping filters on silence, and the mono path (task 5);
 - voice allocation (task 2). What a retrigger of a sounding voice does, `stop()`, and `isActive()` are decided and built ([voice-allocation.md](voice-allocation.md#as-built-the-voices-part)).
 
