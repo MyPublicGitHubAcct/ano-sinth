@@ -58,6 +58,7 @@ add_executable(anoesis_dsp_tests
     resampling/oversampler_test.cpp
     support/allocation_counter.cpp
     voice/allocation_report.cpp
+    voice/voice_allocator_test.cpp
     voice/voice_report.cpp
     voice/voice_test.cpp)
 

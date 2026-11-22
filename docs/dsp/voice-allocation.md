@@ -7,7 +7,7 @@ A polyphonic synth has a fixed number of voices. Each note-on needs one, and whe
 - the candidate allocators prototyped here, driving `dsp::Voice`;
 - what they measured: the click at a steal for each way of ending the stolen note, a key played again, freeing rules, busy voices over time, the readout against the manual's screenshot, the policies under a 32-note strum and a held bass under a melody, Polyphony changes, block sizes and allocation, and CPU;
 - the recommendations for the project owner, with the alternatives;
-- the project owner's decision on the three changes to the voice (all approved), and `dsp::Voice` as changed, with the tests that pin it. The allocator's own recommendations (1a–5, 7) await a decision.
+- the project owner's decisions: first the three changes to the voice, then every allocator recommendation; `dsp::Voice` as changed and `VoiceAllocator` as built, with the tests that pin them.
 
 Read [voice-architecture.md](voice-architecture.md) (the voice that is allocated), [envelopes.md](envelopes.md) (when an envelope ends, and a retrigger from the current level), and [oscillator-phase.md](oscillator-phase.md) (what Retrig does to a sounding oscillator) first.
 
@@ -317,7 +317,7 @@ A sequence with steals, releases and a Polyphony change: the resonant pad free-r
 
 ## Recommendations
 
-*Stage 1's recommendations, as written. The project owner approved the three changes to the voice the same day (6, `Voice::stop()` from 7, and 3c, refined in the build so a crossing part's envelope counts only through the filter's part's): [The decision](#the-decision-the-voices-part), [As built](#as-built-the-voices-part). The rest await a decision.*
+*Stage 1's recommendations, as written. The project owner approved the three changes to the voice the same day (6, `Voice::stop()` from 7, and 3c, refined in the build so a crossing part's envelope counts only through the filter's part's): [The decision](#the-decision-the-voices-part), [As built](#as-built-the-voices-part). Then every other recommendation: [The decision: the allocator](#the-decision-the-allocator), [As built](#as-built-the-allocator).*
 
 | # | Question | Recommendation | Why | Alternatives |
 |---|---|---|---|---|
@@ -354,7 +354,7 @@ A sequence with steals, releases and a Polyphony change: the resonant pad free-r
 
 ## The decision: the voice's part
 
-Chosen by the project owner on 2026-11-21: the three changes to `dsp::Voice` that the recommendations need (Decisions log). The allocator's own recommendations (1a, 1b's choice of a retrigger, 2, 3a–3b, 4, 5 and 7's pool) are not yet decided.
+Chosen by the project owner on 2026-11-21: the three changes to `dsp::Voice` that the recommendations need (Decisions log). The allocator's own recommendations were chosen next ([below](#the-decision-the-allocator)).
 
 - **A note-on on a sounding voice keeps the filters' state and the voice's grid** (recommendation 6). The grid counts from the note-on from silence. The new note's keytrack reaches the filters at the next grid point. Routing changes pending at that note-on apply there too, as during any note.
 - **`Voice::stop()`** silences a finished voice (its slots and drift stop, its envelopes go idle) without restarting its random sequences, so its next note starts from silence (recommendation 7).
@@ -400,6 +400,105 @@ The `[voice-allocation-report]` now drives the voice as changed. Every stage-1 t
   - So keeping the filters removes the click wherever a filter rings, and lets through the one an instant attack makes on a carried-over signal. The manual calls an attack of 0 a click on purpose. That column is the own-voice alternative (2), which isn't the recommendation.
 
 **CPU** (the same session, `relwithdebinfo`): `dsp::Voice` alone 359.52 / 235.37 / 685.31 ns per sample (init, filter B at `--`, worst case); 16 voices through the allocator 5,808.52 (init) and 11,245.88 (worst case); a steal per block 6,252.36 (cut) and 6,215.78 (retrigger). All are within 1% of stage 1's: `isActive()`'s extra checks are 4 slot reads per filter, every 32 samples per voice.
+
+## The decision: the allocator
+
+Chosen by the project owner on 2026-11-21, after the voice's part: every remaining recommendation (Decisions log).
+
+- **Which voice a steal takes (1a):** the oldest released note (key up), else the oldest. Ties go by note-on order.
+- **How a stolen note ends (1b):** a retrigger in place: the voice's `noteOn` on the sounding voice, which keeps its filters and grid.
+- **A key played again (2):** a new voice; the old release overlaps, so the same key can sound twice.
+- **Freeing (3a, 3b):** E10 stands, a voice is free when `isActive()` turns false (exactly 0, only what can be heard). E11 stands: a held note sustaining at 0 stays busy, and task 5 may skip rendering it.
+- **Polyphony lowered (4):** sounding notes play on, and only new notes obey. Polyphony 0 ignores new notes. Note-offs reach every voice.
+- **The readout (5):** per part, active and audible; the maximum is the manual's.
+- **The structure (7):** a fixed pool of 16 voices and no spares. Each block is split at its events, and every voice is rendered exactly up to each. Freeing is checked at events and at each voice's own 32-sample points from its latest note-on. Seeds come from the instance's seed and the voice's index.
+
+## As built: the allocator
+
+[voice_allocator.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice_allocator.hpp): `VoiceAllocator<V, MaxVoices = 16>`, `VoiceEvent` (`noteOn`, `noteOff`, `polyphony` at a sample offset), the `AllocatableVoice` concept, and `voiceSeed()`.
+
+- **What it holds:**
+  - the voices, constructed in place as `V{args..., voiceSeed(seed, i)}`, so `VoiceAllocator<Voice<>> a{seed, table}` builds 16 `dsp::Voice`s (about 400 KB, to be created off the audio thread);
+  - a record per voice: busy, key down, key, note-on order, samples since its last check point;
+  - the limit and two counters (steals, notes ignored at Polyphony 0).
+- **What it needs from a voice (`AllocatableVoice`):**
+  - the lifecycle (`prepare`, `reset`, `noteOn`, `noteOff`, `stop`, `process`, `isActive`);
+  - the readout's two counts;
+  - `Knobs` with `advanced(n)`.
+
+  `dsp::Voice` has all of these now. `VoiceFilterKnobs` gained `offset` and `advanced(n)`: the ramps stand `offset` samples before the block the voice is given, and are read at `offset + ahead`, which `LinearSmoother::valueAfter` gives bit for bit as `skip()` would. The voice gained `activeOscillatorVoices()` (the unison voices of each part whose amp envelope is active and which something hears) and `oscillatorVoicesPerNote()` (every oscillator's voices).
+- **`process(out, events, knobs)`:**
+  1. Walk the events in offset order (an offset past the block counts as its end).
+  2. At each event, first free every busy voice that has finished (`isActive()` false: `stop()`, record cleared), then act on it:
+     - **a note-on** at Polyphony 0 is ignored. Below the limit it takes the first free voice; otherwise it steals the victim. Either way the voice gets `noteOn(key, knobs.advanced(offset))`, which retriggers a stolen voice in place;
+     - **a note-off** releases every busy voice on that key whose key is down;
+     - **a Polyphony event** sets the limit, clamped to [0, 16], and touches no voice.
+  3. Between events, render each busy voice in pieces that stop at its check points (every 32 samples from its latest note-on), each with `knobs.advanced(pieceStart)`. At a check point where the voice has finished, free it and render it no more.
+- **The readout:**
+  - `activeNotes()` counts the busy voices.
+  - `activeVoices()` sums their `activeOscillatorVoices()`.
+  - `maximumVoices()` is voice 0's `oscillatorVoicesPerNote()` × Polyphony, since every voice plays the same patch.
+
+  The plugin publishes them from the audio thread after each block for the UI (M1.9, M1.11).
+- **What it leaves to later tasks:**
+  - Mono Legato, portamento, pitch bend, the hold pedal (task 3, which needs the hooks listed above);
+  - velocity (M1.5);
+  - the arpeggiator's notes (M1.6);
+  - Mix and the output bus (task 4).
+
+### Tests
+
+[voice_allocator_test.cpp](../../tests/dsp/voice/voice_allocator_test.cpp) has 9 test cases; [voice_test.cpp](../../tests/dsp/voice/voice_test.cpp) has 2 more, for the voice's additions.
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| Matches the stage-1 prototype | `dsp::Voice`s through `VoiceAllocator` against the prototype `Allocator` configured as decided: the resonant pad free-running with drift on, a held key, 16 melody notes with repeats, Polyphony 4 → 2 → 6, a cutoff step mid-sequence; host blocks 1/37/4096; at least 4 steals | bit for bit (the same voices, seeds, decisions and samples); 0 allocations from `prepare()` on |
+| The steal order | on a stub voice at Polyphony 3: all held → the oldest; one released → it; two released → the older; stolen voices retriggered in place (a note-on on an active voice), never stopped | exact |
+| A repeated key | key 60 on, off, on: two busy voices, the second from silence; the next note-off releases only the held one | exact |
+| Freeing | at the voice's 32-sample point (a stub out of release in the piece before it, busy until 128, free after); counted from the latest note-on (a retrigger at 10 moves the next check point from 32 to 42); at an event before it acts (a note-on at Polyphony 1 takes the freed voice from silence, no steal); freed voices stopped and not rendered | exact |
+| Polyphony | lowered from 8 to 2 with 4 held: all play on, a new note replaces one; 0 ignores a note-on and the maximum reads 0; note-offs reach every voice; values clamped to [0, 16] | exact |
+| Note-ons at their sample | the stub's knobs offset at its note-on equals the event's, and it is rendered from there; an offset past the block is handled at its end | exact |
+| Seeds | voice i's seed is `voiceSeed(seed, i)`, all 16 distinct | exact |
+| The readout | `dsp::Voice`: A1 8, A2 4, B1 8, B2 8; nine held, four released, read 0.5 s later at Polyphony 12: 204 of 336 (the manual's screenshot) | exact |
+| `reset()` | after steals and an ignored note: no notes, both counters 0, the next note on voice 0 | exact |
+| Knobs advanced (voice) | the second half of each block given as `advanced(256)` on unmoved ramps equals ramps moved by 256, through a cutoff and resonance ramp | bit for bit |
+| The readout's counts (voice) | 28 per note, 0 before a note, 28 held, 16 once part A's release ends, 0 once part B is unheard; an oscillator at Voices 0 adds nothing | exact |
+
+Red against an inert allocator and inert voice additions: 10 of the 11 new test cases failed (37 assertions). The seed test passed, because the constructor and `voiceSeed` were already real. Then 16 deliberate breaks of the allocator:
+
+- **The first pass caught 13.** They covered:
+  - ignoring released notes, or stealing the newest;
+  - reusing a repeated key's voice;
+  - not freeing at events, or at check points;
+  - freeing without `stop()`;
+  - playing at Polyphony 0;
+  - note-offs only within the limit;
+  - unadvanced knobs at note-ons, or in pieces;
+  - cutting voices when Polyphony is lowered;
+  - the maximum from busy notes;
+  - a `stop()` at each steal.
+- **3 survived**, each because nothing exercised it:
+  - check points counted from the first note-on instead of the latest (both are deterministic, so no output test sees it);
+  - `reset()` keeping the steal counter (the test had no steals);
+  - an event past the block's end being dropped.
+
+  Each led to a stronger test, and then all 16 were caught.
+
+### Results, as built
+
+**CPU** (`tools/bench.sh "[voice-allocation]"` and `"[voice]"`, `relwithdebinfo`, the same session):
+
+| Benchmark | ns per sample | share of a core |
+|---|---:|---:|
+| `VoiceAllocator`, 16 `dsp::Voice`s held, init patch | 5,754.02 (359.6 per voice; one voice alone 356.25) | 27.6% |
+| `VoiceAllocator`, 16 voices held, worst case | 11,213.07 (700.8 per voice; one alone 683.42) | 53.8% |
+| `VoiceAllocator`, a steal every block, init patch | 6,192.34 | 29.7% |
+| `VoiceAllocator`, 64 note events per block (32 steals) on voices that do nothing | 5.22 (2.67 µs per block) | |
+| `VoiceAllocator`, no events, voices that do nothing | 0.60 (0.31 µs per block) | |
+| the prototype `Allocator`, the same rows | 5,776.86 / 11,235.25 / 6,199.47 / 21.27 / 2.09 | |
+
+- The allocator's bookkeeping is **about 37 ns per note event** ((2,671 − 308) ns / 64), a quarter of the prototype's 157: a pool of 16 rather than 32, and no policy switches.
+- Sixteen voices through it cost sixteen times one voice, within noise (+1% to +2.5% on these runs).
 
 ## References
 

@@ -37,3 +37,4 @@
 #include <anoesis/dsp/resampling/halfband.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>
 #include <anoesis/dsp/voice/voice.hpp>
+#include <anoesis/dsp/voice/voice_allocator.hpp>

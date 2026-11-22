@@ -1078,6 +1078,98 @@ TEST_CASE("Voice: isActive() counts only the envelopes that can be heard", "[voi
     CHECK(v.envelope(0).isGateOn());
 }
 
+TEST_CASE("Voice: knobs advanced into a block read the ramps that many samples on", "[voice]")
+{
+    // An allocator renders a voice in pieces inside a host block, with the
+    // knobs positioned at the block's start: knobs.advanced(n) must read
+    // what ramps moved on by n would. A cutoff and a resonance ramping (both
+    // knobs step at 1000), the second half of each 512-sample block given as
+    // advanced knobs on unmoved ramps, against ramps moved to it.
+    const Knobs knobs{
+        .cutoff = [](std::size_t at) { return at < 1000 ? 5.0f : 2.0f; },
+        .resonance = [](std::size_t at) { return at < 1000 ? 0.0f : 5.0f; },
+    };
+    const auto render = [&knobs](bool advanced)
+    {
+        Voice v{d6::minBlepTable64(), 3};
+        worstOscillators(v);
+        route(v, {.a = FilterInput::both, .b = FilterInput::own, .drive = 2.0f});
+        v.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 2});
+        KnobRamps a{knobs, rate};
+        KnobRamps b{knobs, rate};
+        Buffer out{2, 4096};
+        v.noteOn(45.0f, knobsOf(a, b));
+        for (std::size_t start = 0; start < 4096; start += 512)
+        {
+            // The knobs' step reaches the ramps at the next block start (1024).
+            if (a.eventAt(start))
+            {
+                a.applyEvents(start);
+                b.applyEvents(start);
+            }
+            v.process(out.block().subBlock(start, 256), knobsOf(a, b));
+            if (advanced)
+            {
+                v.process(out.block().subBlock(start + 256, 256), knobsOf(a, b).advanced(256));
+                a.advance(512);
+                b.advance(512);
+            }
+            else
+            {
+                a.advance(256);
+                b.advance(256);
+                v.process(out.block().subBlock(start + 256, 256), knobsOf(a, b));
+                a.advance(256);
+                b.advance(256);
+            }
+        }
+        return out;
+    };
+    const auto viaOffset = render(true);
+    CHECK(sameBits(viaOffset, render(false)));
+    CHECK_FALSE(allZero(viaOffset.channel(0)));
+    CHECK(knobsOf(KnobRamps{knobs, rate}, KnobRamps{knobs, rate}).advanced(5).advanced(7).offset == 12);
+}
+
+TEST_CASE("Voice: the Voices readout's counts", "[voice]")
+{
+    // The manual's readout: the maximum is every oscillator's voices per
+    // note (x Polyphony, the allocator's); the active count (decided
+    // 2026-11-21) is, per note, the voices of each part whose amp envelope
+    // is active and which something hears.
+    const Knobs knobs;
+    const KnobRamps ramps{knobs, rate};
+    const auto k = knobsOf(ramps, ramps);
+    Voice v{d6::minBlepTable64()};
+    saws(v, {});
+    const std::array<int, 4> voices{8, 4, 8, 8};
+    for (std::size_t s = 0; s < 4; ++s)
+    {
+        v.slot(s).setVoices(voices[s]);
+    }
+    v.envelope(0).setRelease(0.01f);
+    v.envelope(1).setRelease(1.0f);
+    v.prepare({.sampleRate = rate, .maxBlockSize = 512, .numChannels = 2});
+    CHECK(v.oscillatorVoicesPerNote() == 28);
+    CHECK(v.activeOscillatorVoices() == 0); // before any note
+    v.noteOn(45.0f, k);
+    Buffer out{2, 512};
+    v.process(out.block(), k);
+    CHECK(v.activeOscillatorVoices() == 28);
+    v.noteOff();
+    for (int i = 0; i < 4; ++i)
+    {
+        v.process(out.block(), k);
+    }
+    CHECK(v.activeOscillatorVoices() == 16); // part A's 10 ms release is over
+    v.setFilterInput(1, FilterInput::none);  // part B unheard from the next grid point
+    v.process(out.block(), k);
+    CHECK(v.activeOscillatorVoices() == 0);
+    // An oscillator at Voices 0 adds nothing to the maximum.
+    v.slot(1).setVoices(0);
+    CHECK(v.oscillatorVoicesPerNote() == 24);
+}
+
 TEST_CASE("Voice: the lifecycle", "[voice]")
 {
     Voice v{d6::minBlepTable64(), 1234};

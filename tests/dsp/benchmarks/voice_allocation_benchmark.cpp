@@ -11,11 +11,18 @@
 // - a steal every block on 16 voices of the init patch: a cut, a retrigger
 //   in place, a 5 ms fade on a spare voice, a 5 ms fade before the new note.
 //
+// - the library VoiceAllocator (stage 2) over dsp::Voice: 16 voices held at
+//   the init patch and the worst case, a steal per block, and its own cost
+//   per note event on a voice that does nothing.
+//
 // Tagged [!benchmark][voice-allocation]: run with
 // tools/bench.sh "[voice-allocation]" in relwithdebinfo.
 
 #include "../oscillators/oscillator_support.hpp"
 #include "../voice/allocation_candidates.hpp"
+
+#include <anoesis/dsp/voice/voice.hpp>
+#include <anoesis/dsp/voice/voice_allocator.hpp>
 
 #include <anoesis/test/buffer.hpp>
 
@@ -24,8 +31,10 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -168,6 +177,172 @@ Policy withEnd(StealEnd end)
     return p;
 }
 
+// --- The library allocator ----------------------------------------------------------------
+
+/// A voice that does nothing: active from its note-on until stopped, for
+/// the allocator's own cost.
+class NullVoice
+{
+public:
+    struct Knobs
+    {
+        std::size_t offset = 0;
+        [[nodiscard]] Knobs advanced(std::size_t samples) const noexcept
+        {
+            return {.offset = offset + samples};
+        }
+    };
+
+    explicit NullVoice(std::uint64_t /*seed*/) noexcept {}
+    void prepare(const dsp::ProcessSpec& /*spec*/) noexcept {}
+    void reset() noexcept
+    {
+        active = false;
+    }
+    void noteOn(float /*note*/, const Knobs& /*knobs*/) noexcept
+    {
+        active = true;
+    }
+    void noteOff() noexcept {}
+    void stop() noexcept
+    {
+        active = false;
+    }
+    void process(const dsp::AudioBlock& /*out*/, const Knobs& /*knobs*/) noexcept {}
+    [[nodiscard]] bool isActive() const noexcept
+    {
+        return active;
+    }
+    [[nodiscard]] std::size_t activeOscillatorVoices() const noexcept
+    {
+        return active ? 1 : 0;
+    }
+    [[nodiscard]] static std::size_t oscillatorVoicesPerNote() noexcept
+    {
+        return 1;
+    }
+
+private:
+    bool active = false;
+};
+
+/// The library allocator with 16 notes held, as Bench.
+template <typename V>
+class LibraryBench
+{
+public:
+    template <typename... Args>
+    LibraryBench(void (*configure)(V&), std::vector<dsp::VoiceEvent> perBlock, const Args&... args)
+        : rampsA(Knobs(), rate),
+          rampsB(Knobs(), rate),
+          allocator(std::make_unique<dsp::VoiceAllocator<V>>(0, args...)),
+          events(std::move(perBlock)),
+          out(2, blockSize)
+    {
+        if (configure != nullptr)
+        {
+            allocator->forEachVoice(configure);
+        }
+        allocator->prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+        std::vector<dsp::VoiceEvent> chord;
+        chord.reserve(16);
+        for (int k = 0; k < 16; ++k)
+        {
+            chord.push_back({.offset = 0, .kind = dsp::VoiceEventKind::noteOn, .value = 40 + k});
+        }
+        process(chord);
+        for (int i = 0; i < 100; ++i)
+        {
+            process({});
+        }
+    }
+
+    float run()
+    {
+        process(events);
+        return out.channel(0)[0];
+    }
+
+private:
+    [[nodiscard]] V::Knobs knobs() const
+    {
+        if constexpr (std::is_same_v<typename V::Knobs, dsp::VoiceFilterKnobs>)
+        {
+            return {
+                .cutoff = {&rampsA.cutoff, &rampsB.cutoff},
+                .resonance = {&rampsA.resonance, &rampsB.resonance},
+                .controlCutoff = &rampsA.controlCutoff,
+                .controlResonance = &rampsA.controlResonance,
+            };
+        }
+        else
+        {
+            return {};
+        }
+    }
+
+    void process(std::span<const dsp::VoiceEvent> blockEvents)
+    {
+        out.block().clear();
+        allocator->process(out.block(), blockEvents, knobs());
+        rampsA.advance(blockSize);
+        rampsB.advance(blockSize);
+    }
+
+    KnobRamps rampsA;
+    KnobRamps rampsB;
+    std::unique_ptr<dsp::VoiceAllocator<V>> allocator;
+    std::vector<dsp::VoiceEvent> events;
+    Buffer out;
+};
+
+using LibraryVoice = dsp::Voice<dsp::minBlepTaps>;
+
+void libraryInit(LibraryVoice& v)
+{
+    for (std::size_t s = 0; s < 4; ++s)
+    {
+        v.slot(s).setWaveform(dsp::Waveform::saw);
+        v.slot(s).setVoices(s == 0 ? 1 : 0);
+    }
+}
+
+void libraryWorst(LibraryVoice& v)
+{
+    for (std::size_t s = 0; s < 4; ++s)
+    {
+        auto& slot = v.slot(s);
+        slot.setWaveform(dsp::Waveform::saw);
+        slot.setVoices(8);
+        slot.setDetune(0.548f);
+        slot.setStereo(1.0f);
+        slot.setRetrigger(false);
+        slot.setTuning({.octaves = 0, .semitones = s < 2 ? 0 : 7, .fine = 0.0f});
+    }
+    for (std::size_t p = 0; p < 2; ++p)
+    {
+        auto& e = v.envelope(p);
+        e.setAttack(0.005f);
+        e.setDecay(0.3f);
+        e.setSustain(0.7f);
+        e.setRelease(0.2f);
+        v.setFilterInput(p, dsp::FilterInput::both);
+        v.setFilterDrive(p, 4.0f);
+    }
+}
+
+std::vector<dsp::VoiceEvent> libraryStorm()
+{
+    std::vector<dsp::VoiceEvent> e;
+    for (std::size_t i = 0; i < 32; ++i)
+    {
+        const int key = 60 + static_cast<int>(i);
+        e.push_back({.offset = i * 16, .kind = dsp::VoiceEventKind::noteOn, .value = key});
+        e.push_back({.offset = (i * 16) + 8, .kind = dsp::VoiceEventKind::noteOff, .value = key});
+    }
+    return e;
+}
+
 } // namespace
 
 TEST_CASE("Voice allocation: CPU", "[!benchmark][voice-allocation]")
@@ -213,5 +388,33 @@ TEST_CASE("Voice allocation: CPU", "[!benchmark][voice-allocation]")
     BENCHMARK("allocation: a steal per block, 5 ms fade then the note, init patch x512")
     {
         return delayed.run();
+    };
+
+    LibraryBench<LibraryVoice> libInit{libraryInit, {}, anoesis::test::d6::minBlepTable64()};
+    BENCHMARK("allocator (library): 16 voices held, init patch x512")
+    {
+        return libInit.run();
+    };
+    LibraryBench<LibraryVoice> libWorst{libraryWorst, {}, anoesis::test::d6::minBlepTable64()};
+    BENCHMARK("allocator (library): 16 voices held, worst case x512")
+    {
+        return libWorst.run();
+    };
+    LibraryBench<LibraryVoice> libSteal{libraryInit,
+                                        {{.offset = 101, .kind = dsp::VoiceEventKind::noteOn, .value = 80}},
+                                        anoesis::test::d6::minBlepTable64()};
+    BENCHMARK("allocator (library): a steal per block, init patch x512")
+    {
+        return libSteal.run();
+    };
+    LibraryBench<NullVoice> libStorm{nullptr, libraryStorm()};
+    BENCHMARK("allocator (library): 64 note events (32 steals) on null voices x512")
+    {
+        return libStorm.run();
+    };
+    LibraryBench<NullVoice> libQuiet{nullptr, {}};
+    BENCHMARK("allocator (library): no events on null voices x512")
+    {
+        return libQuiet.run();
     };
 }

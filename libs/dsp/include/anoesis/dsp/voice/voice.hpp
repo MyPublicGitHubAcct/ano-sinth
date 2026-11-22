@@ -80,9 +80,10 @@ enum class FilterInput : std::uint8_t
 };
 
 /// The global knobs that feed a voice's filters through the Filter Control
-/// (filter_control.hpp): the parameter layer's ramps, each positioned at the
-/// first sample of the block the voice processes next (or of its note-on),
-/// read ahead with LinearSmoother::valueAfter(). A null ramp reads as 0.
+/// (filter_control.hpp): the parameter layer's ramps, each positioned
+/// `offset` samples before the first sample of the block the voice
+/// processes next (or of its note-on), read ahead with
+/// LinearSmoother::valueAfter(). A null ramp reads as 0.
 struct VoiceFilterKnobs
 {
     std::array<const LinearSmoother*, 2> cutoff{};    ///< Cutoff A, Cutoff B (knob units)
@@ -90,6 +91,18 @@ struct VoiceFilterKnobs
     const LinearSmoother* controlCutoff = nullptr;    ///< the Filter Control's Cutoff
     const LinearSmoother* controlResonance = nullptr; ///< the Filter Control's Resonance
     float keytrack = 0.0f;                            ///< the Keytrack knob, 0-10
+    /// Samples from where the ramps stand to the first sample of the block
+    /// the voice is given: 0 when the voice gets the whole host block, and
+    /// the piece's start when an allocator renders it in pieces.
+    std::size_t offset = 0;
+
+    /// The same knobs for a block starting `samples` later.
+    [[nodiscard]] constexpr VoiceFilterKnobs advanced(std::size_t samples) const noexcept
+    {
+        VoiceFilterKnobs k = *this;
+        k.offset += samples;
+        return k;
+    }
 };
 
 template <std::size_t Taps = minBlepTaps>
@@ -97,6 +110,7 @@ class Voice
 {
 public:
     using Slot = OscillatorSlot<Taps>;
+    using Knobs = VoiceFilterKnobs;
     static constexpr std::size_t partCount = 2;
     static constexpr std::size_t slotsPerPart = 2;
     static constexpr std::size_t slotCount = partCount * slotsPerPart;
@@ -329,6 +343,32 @@ public:
         return false;
     }
 
+    /// The Voices readout's active count for this voice (manual p. 11;
+    /// decided 2026-11-21, docs/dsp/voice-allocation.md): the unison voices
+    /// of each part whose amp envelope is active and which something hears
+    /// (its filter has an input, or its oscillators cross into the other
+    /// filter). 0 before the first note-on.
+    [[nodiscard]] std::size_t activeOscillatorVoices() const noexcept
+    {
+        std::size_t n = 0;
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            if (heard[p] && envelopes[p].isActive())
+            {
+                n += partVoices(p);
+            }
+        }
+        return n;
+    }
+
+    /// Every oscillator's unison voices: the manual's voices per note, which
+    /// times Polyphony is the readout's maximum. An oscillator at Voices 0
+    /// adds nothing.
+    [[nodiscard]] std::size_t oscillatorVoicesPerNote() const noexcept
+    {
+        return partVoices(0) + partVoices(1);
+    }
+
     /// Adds the voice into channels 0 and 1 of `out` (two channels needed),
     /// with the knobs positioned at its first sample.
     void process(const AudioBlock& out, const VoiceFilterKnobs& knobs) noexcept
@@ -358,6 +398,11 @@ private:
         bool active = false; ///< the filter has an input (not "--")
         bool both = false;   ///< AB
     };
+
+    [[nodiscard]] std::size_t partVoices(std::size_t p) const noexcept
+    {
+        return slots[p * slotsPerPart].voices() + slots[(p * slotsPerPart) + 1].voices();
+    }
 
     /// Whether part p has an oscillator voice on, or one still fading out.
     [[nodiscard]] bool partSounds(std::size_t p) const noexcept
@@ -422,6 +467,7 @@ private:
 
     void feedFilter(std::size_t f, const VoiceFilterKnobs& knobs, std::size_t ahead, float keytrack) noexcept
     {
+        ahead += knobs.offset; // the ramps stand that many samples before this block
         const float octaves = filterCutoffOctaves({
             .cutoff = read(knobs.cutoff[f], ahead),
             .controlCutoff = read(knobs.controlCutoff, ahead),

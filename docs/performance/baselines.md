@@ -6,6 +6,27 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 voice allocation, as built (`VoiceAllocator`)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-allocation]"` then `tools/bench.sh "[voice]"`, 100 samples per benchmark, one run.
+- **What changed** ([voice-allocation.md](../dsp/voice-allocation.md#as-built-the-allocator)): new `dsp::VoiceAllocator` (voice_allocator.hpp), the decided allocator: a pool of 16, the oldest released note stolen first, a retrigger in place, freeing at events and each voice's 32-sample points. `VoiceFilterKnobs` gained an offset; `dsp::Voice` gained the readout's counts. The `[voice-allocation]` benchmarks add five library rows; the prototype's rows stay for the alternatives. The per-sample figures are for all 16 voices.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| allocator (library): 16 voices held, init patch | 5,754.02 (27.6% of a core; 359.6 per voice) |
+| allocator (library): 16 voices held, worst case | 11,213.07 (53.8%; 700.8 per voice) |
+| allocator (library): a steal per block, init patch | 6,192.34 |
+| allocator (library): 64 note events (32 steals) per block on null voices / no events | 5.22 / 0.60 |
+| allocation (prototype): 16 held init / worst / steal (retrigger) / events / no events | 5,776.86 / 11,235.25 / 6,199.47 / 21.27 / 2.09 |
+| voice: built, init patch / filter B at `--` / worst case (one voice) | 356.25 / 233.99 / 683.42 |
+
+### Observations
+
+- **About 37 ns per note event** ((2,671 − 308) ns / 64 events per block), against the prototype's 157: a 16-voice pool and no policy switches. Without events, 0.3 µs per block of bookkeeping.
+- **The voices are the cost**: 16 through the allocator cost 16 × one voice within noise (359.6 and 700.8 per voice against 356.25 and 683.42 alone, +1% and +2.5%). The library and the prototype allocator are within 0.4% of each other on every voice row.
+
+---
+
 ## 2026-11-21: M1.4 voice: a note-on on a sounding voice, stop(), isActive()
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-allocation]"` then `tools/bench.sh "[voice]"`, 100 samples per benchmark, one run.
