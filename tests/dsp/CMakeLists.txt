@@ -8,6 +8,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/filter_control_benchmark.cpp
     benchmarks/filter_stability_benchmark.cpp
     benchmarks/keytrack_benchmark.cpp
+    benchmarks/legato_benchmark.cpp
     benchmarks/lfo_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     benchmarks/tempo_sync_benchmark.cpp
@@ -58,6 +59,7 @@ add_executable(anoesis_dsp_tests
     resampling/oversampler_test.cpp
     support/allocation_counter.cpp
     voice/allocation_report.cpp
+    voice/legato_report.cpp
     voice/voice_allocator_test.cpp
     voice/voice_report.cpp
     voice/voice_test.cpp)

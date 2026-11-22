@@ -6,6 +6,30 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-21: M1.4 legato and portamento, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[legato]"`, 100 samples per benchmark, three runs; the table gives each row's median.
+- **What is measured** ([legato-portamento.md](../dsp/legato-portamento.md#cpu)): the stage-1 `PitchedVoice` (`dsp::Voice` with a pitch input) and `Engine` (the decided allocator with a mono mode, the pedal and the glide's bookkeeping), in tests/dsp/voice/legato_candidates.hpp. One voice per row. *Gliding* is three octaves a second, so the pitch changes every sample; *the wheel* is a bend message every 96 samples with a 240-sample ramp.
+
+| Benchmark (ns / sample) | this commit |
+|---|---:|
+| `dsp::Voice`, init / worst case | 367.64 / 746.87 |
+| `PitchedVoice`, init, constant pitch: grid held / grid ramped / per sample | 366.19 / 371.16 / 374.55 |
+| `PitchedVoice`, init, gliding: grid held / grid ramped / per sample | 381.96 / 383.20 / 386.11 |
+| `PitchedVoice`, init, the wheel: grid held / grid ramped / per sample | 367.07 / 373.29 / 375.50 |
+| `PitchedVoice`, worst case, gliding: grid held / grid ramped / per sample | 796.98 / 843.08 / 843.83 |
+| Mono Legato, init: no events / 64 legato notes / 64 with a glide / 64 pedal toggles per block | 363.52 / 386.77 / 385.08 / 378.95 |
+| poly, 64 note events per block on voices with no oscillators: `Engine` / `VoiceAllocator<dsp::Voice>` (one run) | 158.33 / 153.60 |
+
+### Observations
+
+- **The pitch input costs nothing at a constant pitch** on the held path (366.19 against 367.64); the per-sample path costs 1.9% more there, so the voice should switch to it only while the pitch moves (the two are identical to the bit at a constant pitch).
+- **A moving pitch per sample costs 5% (init) to 13% (worst case)**, against 4% and 7% held per grid point; ramped per grid point costs what per sample does. The cost is the slot's note conversion per sample and the 32 unison voices' frequency sets.
+- **Per event:** a legato note about 180 ns, a pedal toggle about 120 ns (mostly splitting the render); a poly note-on from silence 1.27 µs against the library's 1.23, so about 38 ns of glide and pedal bookkeeping.
+- **Noise:** one row read +130% and another +40% in one run of five, neither reproduced; hence medians.
+
+---
+
 ## 2026-11-21: M1.4 voice allocation, as built (`VoiceAllocator`)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-allocation]"` then `tools/bench.sh "[voice]"`, 100 samples per benchmark, one run.
