@@ -307,6 +307,11 @@ Part solo and the skipping of unused parts (V13) are next. With Mix a per-voice 
 - **Skipping** can test, per voice and per grid segment, whether a part's Mix (the knob plus that voice's modulation) is 0 for the whole segment. The prototype doesn't skip: A1 and B1 cost 453 ns per sample at Mix B 10 and 460 at Mix B 0, against 347 with B1 at Voices 0. So Mix 0 is the saving task 5 can claim, about 110 ns per voice here.
 - **A part bus** would make solo a global gain, but skipping would then need the same per-voice test, and the bus would still lose per-voice modulation.
 
+Task 5's stage 1 measured these ([part-solo-and-skipping.md](part-solo-and-skipping.md)):
+- Solo as the other part's gain ramped over 10 ms clicks at −52.7 dB, against −24.0 for a step and −15.0 for a routing change.
+- At Mix 0 or under Solo, the saving is part B's filter and slot, 233 ns per voice (473 → 240), not the 110 estimated here, which was measured with B1 off. It comes only if the fed filter is skipped too, with a difference after the part returns (−64 to −70 dB over 50 ms, −39 to −44 resonant).
+- The skip test is a bound per factor over each 32-sample segment: Mix's ramp at its larger end plus its modulation's bound.
+
 ### Real-time terms
 
 A 2 s sequence: the pad at Polyphony 4 with steals, Mix A and B automated every 300 samples at odd offsets, and two Main Volume jumps, rendered at host blocks of 1, 37 and 4096:

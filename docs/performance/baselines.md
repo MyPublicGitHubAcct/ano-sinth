@@ -6,6 +6,34 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.4 part solo and skipping, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[solo]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.3–4.8%, one row 8.5%).
+- **What is measured** ([part-solo-and-skipping.md](../dsp/part-solo-and-skipping.md#cpu)): 16 voices held (keys 40–55) through `VoiceAllocator`, as built (`dsp::Voice`) and as the stage-1 `SkipVoice` in tests/dsp/voice/solo_candidates.hpp with each skipping candidate: *atRest* (a filter at rest on exact zeros not solved), *freeze* (also a part whose output gain is 0, its filter's state kept), *slots* (oscillators no running filter takes, or at Volume 0, skipped with their phases advanced), *mono* (the mono path). *Two parts*: A1 and B1 saws on their own filters, centred.
+
+| Benchmark: 16 voices (ns / sample) | this commit |
+|---|---:|
+| init: `dsp::Voice` / prototype, nothing skipped | 5,762.34 / 5,796.45 |
+| init: atRest / mono only / atRest + slots + mono | 3,831.60 / 3,025.23 / 2,012.64 |
+| filter B `--`: `dsp::Voice` / atRest + slots + mono | 3,807.23 / 1,988.14 |
+| two parts, Mix B 0: `dsp::Voice` / nothing skipped / atRest + slots | 7,574.75 / 7,532.97 / 7,527.19 |
+| two parts, Mix B 0: freeze + slots / freeze + slots + mono | 3,839.98 / 2,007.46 |
+| two parts, B soloed out: gain, nothing skipped / gain, freeze + slots / routing | 7,516.02 / 3,827.40 / 3,793.54 |
+| two parts sounding: `dsp::Voice` / freeze + slots + mono | 7,569.00 / 3,941.86 |
+| every oscillator at Voices 0: `dsp::Voice` / atRest | 0.11 / 0.11 |
+| worst, centred: `dsp::Voice` / mono only / freeze + slots + mono | 10,259.06 / 6,088.75 / 6,065.74 |
+| worst, spread (nothing to skip): `dsp::Voice` / nothing skipped / freeze + slots + mono | 10,139.92 / 10,134.20 / 10,105.16 |
+
+### Observations
+
+- **A filter at rest on zeros, skipped exactly, takes a third off the init patch** (360 → 240 ns per voice); with the mono path, 126.
+- **Mix B at 0 or Solo saves nothing unless the fed filter is skipped too** (freeze: 473 → 240 ns per voice); Solo as a gain plus freeze costs what routing does.
+- **The mono path saves 47.5% (init) and 40.6% (worst, centred)**, as M1.4 task 1 measured.
+- **The test costs nothing measurable** where nothing can be skipped (worst, spread: −0.3%); the prototype with nothing switched on is within 0.6% of `dsp::Voice`.
+- **16 notes with every oscillator at Voices 0 cost nothing**: the allocator frees each voice at its first check (`isActive()` false from the note-on).
+
+---
+
 ## 2026-11-22: M1.4 mixer, as built (Mix in `dsp::Voice`, `MainVolume`, `PeakMeter`, `OutputGuard`)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). The "Mixer as built: CPU" benchmarks (`[mixer]`), 100 samples per benchmark, three runs; the table gives each row's median.
