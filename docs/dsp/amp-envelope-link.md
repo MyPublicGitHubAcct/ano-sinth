@@ -1,12 +1,12 @@
 # The AmpEnv A/B link
 
-Sylenth1 v3.053 (25 March 2019) "Added option to link AmpEnv A and B parameters." Nothing official says what the link does. This page covers M1.4 task 6, stage 1:
+Sylenth1 v3.053 (25 March 2019) "Added option to link AmpEnv A and B parameters." Nothing official says what the link does. This page covers M1.4 task 6: stage 1, and the decision that closes it.
 
 - **Theory:** a parameter link against a signal link; what each means for a voice that runs two envelopes; how a link can turn on and off under a sounding note; and which of a voice's readings (the output, a crossing part, the skip test, `isActive()`) have to follow it.
 - **Sylenth1:** what is known. One changelog line, one user's feature request three months before it, and the developer's reply to that request.
 - **The candidates:** a parameter link on `dsp::Voice` unchanged, the same with one envelope run for both parts, and a signal link. Each turns on and off mid-note in several ways. All were prototyped on a copy of the real voice over the real `dsp::VoiceAllocator`.
 - **What they measured:** identity with `dsp::Voice`, the clicks of every transition in five musical cases, the skip test and `isActive()` read right and wrong, the real-time terms, and CPU.
-- **Recommendations** for the project owner, and where each piece belongs. Most of the feature isn't DSP.
+- **Recommendations** for the project owner, and where each piece belongs. Most of the feature isn't DSP. **The decision** (every recommendation, 2026-11-22): a parameter link with no change to the voice, the rest moved to M1.9, M1.10, M1.11 and M1.5.
 
 Read [envelopes.md](envelopes.md) (the `Adsr`: constant rate, sustain ramped over 10 ms), [voice-architecture.md](voice-architecture.md) (two envelopes per voice, and a crossing part going through both) and [part-solo-and-skipping.md](part-solo-and-skipping.md) (the skip test and the requirement it left on this task) first.
 
@@ -156,7 +156,7 @@ Every candidate is within noise of `dsp::Voice`. One envelope costs 0.52 ns per 
 
 ## Recommendations
 
-*Stage 1's recommendations. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (AL1–AL10). Awaiting the project owner's decision.*
+*Stage 1's recommendations, as written. Where only the demo can settle a question, the recommendation is the working hypothesis in the inventory (AL1–AL10). Chosen by the project owner on 2026-11-22, every one ([The decision](#the-decision)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -184,6 +184,29 @@ Every candidate is within noise of `dsp::Voice`. One envelope costs 0.52 ns per 
 - **The inventory's AmpEnv link row** said "High. Built with the voice (M1.4)". High was right only for the feature's existence. Its behaviour is medium (a parameter link) to unknown (everything else), and under the recommendation it isn't built in the voice at all.
 - **E8** (time changes apply at once, sustain ramps 10 ms) now carries the link's switch too. If the demo shows that an automated envelope knob behaves otherwise, the link follows.
 - **The developer's 2018 routing** confirms V2 from a second direction: a crossing part goes through both envelopes, so B's envelope "doubles" its decay unless both are set alike.
+
+## The decision
+
+Chosen by the project owner on 2026-11-22: every recommendation (PLAN.md, Decisions log).
+
+- **A parameter link.** While it is on, the two amp envelopes' eight knobs hold equal values. `dsp::Voice` runs both envelopes, unchanged.
+- **M1.4 task 6 closes with no change to `libs/dsp`.** Each part's own envelope is the one that applies, so task 5's skip test, `isActive()` and the Voices readout are right as built. That meets task 5's requirement; the stage-1 report runs `dsp::Voice` under the link and is the evidence. No code changed, so no test was added.
+- **A mid-note switch applies at once.** The running envelopes take the new settings as they take automation: constant rate, the sustain ramped over 10 ms (E8).
+- **Turning it on:** the part shown (Part select) keeps its values and the other part's four knobs take them. Afterwards an edit to either part's envelope sets both.
+- **Turning it off:** both parts keep their values, and edits stop mirroring.
+- **The switch** is a preset parameter, on/off, not host-automatable, with no default CC.
+- **Every edit path mirrors:** the GUI, host automation, the default CCs 76–83 and learned CCs. An edit to either part's knob writes both parameters, and the host is told about both (inside one gesture for a GUI drag). M1.9 checks that recording automation doesn't loop on the mirrored parameter.
+- **Presets, Randomize, Copy to Part, locking:** a preset loads as stored, with part A's values winning if a file has the link on and A ≠ B; Randomize draws A's envelope once and mirrors it; Copy to Part copies the envelope and the link then keeps the copy in step; a lock acts on preset loads, the link on edits, and a locked switch keeps the link's state.
+- **Modulation:** not carried by the link. AmpEnv A and B as misc sources are each part's own generator.
+
+Where it went (PLAN.md):
+
+- **M1.9:** a new task, "AmpEnv A/B link (v3.053)", beside parameter and part locking: the switch, the mirroring and the host notification.
+- **M1.10:** storing the switch; loads, Randomize and Copy to Part with the link on.
+- **M1.11:** the button by the amp envelopes; the other part's knobs moving with the edited part's.
+- **M1.5:** AL8 and AL9, with the destination list.
+
+The demo settles AL1–AL10 in M1.13. If it shows a signal link, the voice needs the 10 ms crossfade and the readings measured here: `envelopeSilent()`, `isActive()` and the readout reading the envelope that applies.
 
 ## References
 
