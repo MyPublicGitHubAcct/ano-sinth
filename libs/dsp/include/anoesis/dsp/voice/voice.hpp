@@ -77,19 +77,58 @@
 ///   part's Mix only (V3). A null Mix ramp is unity. The modulation term is 0
 ///   until M1.5.
 ///
+/// - Solo, and skipping what can't be heard (M1.4 task 5, docs/dsp/
+///   part-solo-and-skipping.md):
+///   - Solo's gains (VoiceKnobs::solo, from PartSolo) are multiplied into
+///     each part's Mix gain per sample, after its filter: the other part's
+///     filter output is silenced, and a part crossing into the selected
+///     part's filter still sounds through it. A null one is 1.
+///   - At each grid point, for the whole coming segment, each part's output
+///     gain is tested with an upper bound per factor: its amp envelope (idle,
+///     or held at a sustain of exactly 0), Mix's ramp at its larger end plus
+///     the bound on Mix's modulation (mixModulationBound(), 0 until M1.5),
+///     and Solo's ramp at its larger end. A process() call mid-segment
+///     re-tests only a part whose gain is 0, over the rest of the segment,
+///     which can only end its skip; so a skip starts only at the voice's
+///     grid points, and the output doesn't depend on the caller's blocks.
+///   - Exact skips: a filter at rest whose input can't be non-zero isn't
+///     solved (LadderFilter::skip(): its grid and ramps advance, and it is
+///     still fed); an output stage whose gain is 0 isn't run; a crossing
+///     part whose envelope can't be above 0 isn't added into the other
+///     filter. Each is the same to the bit as running it.
+///   - A part whose gain is 0 while its filter is fed has the filter
+///     skipped too, its state frozen for its return (where it then differs
+///     from a filter that ran, by -64 to -70 dB over 50 ms on a plain saw,
+///     -39 to -44 dB resonant).
+///   - A slot is rendered only for a filter that takes it (one that runs, or
+///     a bypassed one that is heard); otherwise, or when it is silent, it is
+///     skipped (OscillatorSlot::skip(), its phase advanced) when no gain
+///     ramp in it moves. Its skip, too, starts only at a grid point.
+///   - The mono path: at a note-on from silence, if every sounding slot is
+///     centred (OscillatorSlot::isCentred(); Noise never is), the filters'
+///     inputs, the filters and the output stage run on channel 0 alone, the
+///     output written to both channels with the stereo path's own
+///     expression (so a compiler that fuses it into a multiply-add does so
+///     on both paths). At the first chunk where a slot isn't centred, each
+///     filter's channel 1 is set from channel 0 (LadderFilter::
+///     copyChannel()) and the voice is stereo until its next note-on from
+///     silence. The same to the bit as the stereo path.
+///   isActive() and the allocator's view are unchanged.
+///
 /// Rendering runs in chunks that stop at the grid (at most 32 samples): the
-/// four slots added into their part's buffer (in drift's runs of constant
-/// offset), both envelopes, each part's Mix gains, each filter's input built
-/// in its own buffer, the filters in place, and each filter's output times
-/// its part's envelope and Mix added into channels 0 and 1 of the caller's
-/// block. The scratch is fixed (14 buffers of 32 samples), so nothing is
-/// allocated, prepare() included; the output does not depend on how the
-/// caller splits its blocks.
+/// plan for the chunk (what runs, what is skipped); the four slots added
+/// into their part's buffer (in drift's runs of constant offset); both
+/// envelopes, each heard part's Mix and Solo gains, each filter's input
+/// built in its own buffer, the filters in place, and each filter's output
+/// times its part's envelope and gains added into channels 0 and 1 of the
+/// caller's block. The scratch is fixed (14 buffers of 32 samples), so
+/// nothing is allocated, prepare() included; the output does not depend on
+/// how the caller splits its blocks.
 ///
 /// Velocity's routes are the modulation system's (M1.5). About 25 KB at 64
 /// taps.
 /// Docs: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md,
-/// docs/dsp/mixer.md
+/// docs/dsp/mixer.md, docs/dsp/part-solo-and-skipping.md
 namespace anoesis::dsp
 {
 
@@ -205,6 +244,15 @@ public:
         return inputLevel;
     }
 
+    /// Whether the voice is on its mono path (channel 0 only, copied to
+    /// both), for measurement: taken at a note-on from silence when every
+    /// sounding slot is centred, left for good within the note at the first
+    /// chunk where one isn't.
+    [[nodiscard]] bool isMono() const noexcept
+    {
+        return mono;
+    }
+
     /// Stereo throughout; nothing is allocated.
     void prepare(const ProcessSpec& spec) noexcept
     {
@@ -254,6 +302,9 @@ public:
         glide.jump(referenceNote);
         velocityRamp.jump(1.0f);
         played = false;
+        mono = false;
+        segmentSilent = {};
+        slotSkipping = {};
     }
 
     /// A note-on before the next process() call, with the knobs positioned at
@@ -266,7 +317,8 @@ public:
     ///
     /// - From silence (isActive() false): pending routing applies, and each
     ///   filter is fed for this sample and reset(), so the voice's grid
-    ///   starts here.
+    ///   starts here; the voice takes the mono path if every sounding slot is
+    ///   centred.
     /// - On a sounding voice (a steal, or a retrigger in place): the filters
     ///   keep their state and the voice keeps its grid, counted from the
     ///   note-on from silence; the new note's keytrack reaches the filters at
@@ -308,6 +360,9 @@ public:
             f.reset();
         }
         gridPosition = 0;
+        segmentSilent = {};
+        slotSkipping = {};
+        mono = allCentred();
     }
 
     /// A legato note (Mono Legato, M1.4 task 3): the pitch jumps or glides to
@@ -480,6 +535,15 @@ private:
         bool both = false;   ///< AB
     };
 
+    /// What one chunk runs.
+    struct Plan
+    {
+        std::array<bool, partCount> output{};   ///< the filter's output is added: its gain can be above 0
+        std::array<bool, partCount> skip{};     ///< the filter isn't solved (LadderFilter::skip())
+        std::array<bool, partCount> render{};   ///< the part's slots are rendered (else skipped, where exact)
+        std::array<bool, partCount> crossing{}; ///< the part is added into the other filter's input (AB)
+    };
+
     void startPitch(float note, const NoteStart& start) noexcept
     {
         if (start.glide)
@@ -530,6 +594,26 @@ private:
             }
         }
         return false;
+    }
+
+    /// Whether part p's slots can add anything this chunk.
+    [[nodiscard]] bool partProduces(std::size_t p) const noexcept
+    {
+        for (std::size_t s = 0; s < slotsPerPart; ++s)
+        {
+            const auto& slot = slots[(p * slotsPerPart) + s];
+            if (slot.soundingVoices() > 0 && !slot.isSilent())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// Every sounding slot's left channel is its right, to the bit.
+    [[nodiscard]] bool allCentred() const noexcept
+    {
+        return std::ranges::all_of(slots, [](const Slot& s) { return s.soundingVoices() == 0 || s.isCentred(); });
     }
 
     void updateRoutes() noexcept
@@ -618,20 +702,154 @@ private:
         }
     }
 
-    [[nodiscard]] AudioBlock block(StereoChunk& chunk, std::array<float*, 2>& pointers, std::size_t length) noexcept
+    [[nodiscard]] AudioBlock block(StereoChunk& chunk, std::array<float*, 2>& pointers, std::size_t length,
+                                   std::size_t channels = 2) noexcept
     {
         pointers = {chunk[0].data(), chunk[1].data()};
-        return {pointers.data(), 2, length};
+        return {pointers.data(), channels, length};
+    }
+
+    // --- The skip test (docs/dsp/part-solo-and-skipping.md) ----------------------------------
+
+    /// Part p's amp envelope can't be above 0 for the rest of this
+    /// process() call: idle, or held at a sustain of exactly 0 (a gate, or
+    /// setSustain(), only acts between calls). With AmpEnv A/B link (M1.4
+    /// task 6), this must read the envelope that applies to the part, as
+    /// isActive() must.
+    [[nodiscard]] bool envelopeSilent(std::size_t p) const noexcept
+    {
+        const auto& e = envelopes[p];
+        const bool zeroHold = e.stage() == AdsrStage::sustain && e.level() <= 0.0f && e.sustainLevel() <= 0.0f;
+        return !e.isActive() || zeroHold;
+    }
+
+    /// An upper bound on the modulation of part p's Mix, in internal units,
+    /// over the `length` samples from the block's sample `done`: the seam
+    /// M1.5 fills. Each modulation route to Mix X adds one term, its amount
+    /// times its source's bound over those samples (an LFO's largest value
+    /// there, a mod envelope's 0 when idle or held at 0, otherwise the
+    /// source's range); the test below doesn't change. 0 until then: Mix has
+    /// no modulation.
+    [[nodiscard]] static float mixModulationBound(std::size_t /*part*/, const VoiceKnobs& /*knobs*/,
+                                                  std::size_t /*done*/, std::size_t /*length*/) noexcept
+    {
+        return 0.0f;
+    }
+
+    /// Part p's Mix, knob plus modulation, can't be above the law's 0 over
+    /// the `length` samples from the block's sample `done`: the ramp is
+    /// linear, so its larger end bounds it.
+    [[nodiscard]] static bool mixSilent(std::size_t p, const VoiceKnobs& knobs, std::size_t done,
+                                        std::size_t length) noexcept
+    {
+        const auto* ramp = knobs.mix[p];
+        const auto at = knobs.offset + done;
+        const float knob =
+            ramp != nullptr ? std::max(ramp->valueAfter(at), ramp->valueAfter(at + length - 1)) : mixLaw.unity;
+        return knob + mixModulationBound(p, knobs, done, length) <= mixLaw.knobMin;
+    }
+
+    /// Part p's Solo gain is 0 over those samples (a null one is 1).
+    [[nodiscard]] static bool soloSilent(std::size_t p, const VoiceKnobs& knobs, std::size_t done,
+                                         std::size_t length) noexcept
+    {
+        const auto* ramp = knobs.solo[p];
+        if (ramp == nullptr)
+        {
+            return false;
+        }
+        const auto at = knobs.offset + done;
+        return std::max(ramp->valueAfter(at), ramp->valueAfter(at + length - 1)) <= 0.0f;
+    }
+
+    /// Part p's output gain (envelope x Mix x Solo) can't be above 0 over
+    /// those samples: one factor's upper bound is 0.
+    [[nodiscard]] bool gainSilent(std::size_t p, const VoiceKnobs& knobs, std::size_t done,
+                                  std::size_t length) const noexcept
+    {
+        return envelopeSilent(p) || mixSilent(p, knobs, done, length) || soloSilent(p, knobs, done, length);
+    }
+
+    /// What the chunk starting at the block's sample `done` runs.
+    [[nodiscard]] Plan planChunk(const VoiceKnobs& knobs, std::size_t done) noexcept
+    {
+        // The gain's test, per segment: at a grid point for the whole coming
+        // segment; mid-segment (a call starting there, at an event or where
+        // the caller's block ended) only for a part whose gain is 0, over the
+        // rest of the segment. Without an event that bound can't be above
+        // the whole segment's, so only an event ends a skip there, and none
+        // starts.
+        const std::size_t rest = gridSamples - gridPosition;
+        std::array<bool, partCount> produces{};
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            produces[p] = partProduces(p);
+            if (gridPosition == 0 || segmentSilent[p])
+            {
+                segmentSilent[p] = gainSilent(p, knobs, done, rest);
+            }
+        }
+        Plan plan;
+        for (std::size_t q = 0; q < partCount; ++q)
+        {
+            // Part q into the other filter, only while it can add anything.
+            plan.crossing[q] = routes[1 - q].both && produces[q] && !envelopeSilent(q);
+        }
+        for (std::size_t f = 0; f < partCount; ++f)
+        {
+            if (!routes[f].active)
+            {
+                continue;
+            }
+            plan.output[f] = !segmentSilent[f];
+            if (!filters[f].isBypassed())
+            {
+                const bool inputSilent = !produces[f] && !plan.crossing[1 - f];
+                plan.skip[f] = segmentSilent[f] || (inputSilent && filters[f].isAtRest());
+            }
+        }
+        // The slots: rendered for a filter that takes them, one that runs or
+        // a bypassed one that is heard (their own, or the other on AB).
+        const auto takes = [&](std::size_t f)
+        {
+            return routes[f].active && !plan.skip[f] && (!filters[f].isBypassed() || plan.output[f]);
+        };
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            plan.render[p] = takes(p) || (plan.crossing[p] && takes(1 - p));
+        }
+        return plan;
+    }
+
+    /// The mono path is left at the first chunk where a slot isn't centred:
+    /// channel 1 of each filter takes channel 0's state, which it would have
+    /// had.
+    void leaveMonoIfMoved() noexcept
+    {
+        if (mono && !allCentred())
+        {
+            for (auto& f : filters)
+            {
+                f.copyChannel(0, 1);
+            }
+            mono = false;
+        }
     }
 
     void renderChunk(const AudioBlock& out, const VoiceKnobs& knobs, std::size_t done) noexcept
     {
         const auto length = out.numSamples();
+        leaveMonoIfMoved();
+        const std::size_t channels = mono ? 1 : 2;
+        const Plan plan = planChunk(knobs, done);
 
         // 1. The oscillators of each heard part, added into its buffer at the
         // pitch plus drift, in runs of constant drift. While the pitch moves
         // (a glide, a bend's ramp) the slots take it every sample; otherwise
         // once, which is the same to the bit at a constant pitch and cheaper.
+        // A slot no filter takes, or a silent one, is skipped where that is
+        // exact (no gain ramp moving in it); one that can't be is rendered
+        // into its part's buffer, which nothing reads this chunk.
         const bool moving =
             glide.isGliding() || (knobs.bend != nullptr && !knobs.bend->isSteadyFrom(knobs.time + done));
         const float steadyPitch = pitchAt(knobs, done, 0);
@@ -646,11 +864,26 @@ private:
         for (std::size_t p = 0; p < partCount; ++p)
         {
             parts[p] = block(partBuffers[p], partPointers[p], length);
-            if (heard[p])
+            if (heard[p] && plan.render[p])
             {
                 parts[p].clear();
             }
         }
+        // A slot's skip, like a filter's, starts only at a grid point: where it
+        // starts decides what its phase's jump leaves in flight at the
+        // return, so it mustn't depend on where the caller's block ended.
+        // Mid-segment it can only end.
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            for (std::size_t s = 0; s < slotsPerPart; ++s)
+            {
+                const auto index = (p * slotsPerPart) + s;
+                const auto& slot = slots[index];
+                const bool skippable = (!plan.render[p] || slot.isSilent()) && slot.canSkip();
+                slotSkipping[index] = skippable && (gridPosition == 0 || slotSkipping[index]);
+            }
+        }
+        std::array<bool, partCount> cleared{}; // an untaken part's buffer, cleared for a slot that can't skip
         pitchDrift.process(length,
                            [&](std::size_t start, std::size_t run, float offset) noexcept
                            {
@@ -675,6 +908,23 @@ private:
                                        {
                                            continue;
                                        }
+                                       if (slotSkipping[(p * slotsPerPart) + s])
+                                       {
+                                           if (moving)
+                                           {
+                                               slot.skip(std::span<const float>{notes}.first(run));
+                                           }
+                                           else
+                                           {
+                                               slot.skip(run, steadyPitch + offset);
+                                           }
+                                           continue;
+                                       }
+                                       if (!plan.render[p] && !cleared[p])
+                                       {
+                                           parts[p].clear();
+                                           cleared[p] = true;
+                                       }
                                        if (moving)
                                        {
                                            slot.process(piece, std::span<const float>{notes}.first(run));
@@ -687,18 +937,21 @@ private:
                                }
                            });
 
-        // 2. The amp envelopes, and each sounding filter's part's Mix gains.
+        // 2. The amp envelopes (always), and each heard filter's part's Mix
+        // and Solo gains.
         for (std::size_t p = 0; p < partCount; ++p)
         {
             envelopes[p].process(std::span{envelopeBuffers[p]}.first(length));
-            if (routes[p].active)
+            if (routes[p].active && plan.output[p])
             {
                 fillMixGains(p, knobs, done, length);
             }
         }
 
-        // 3. Each running filter's input, in its own buffer; 4. the filter, in
-        // place; 5. its output through its part's envelope and Mix, into `out`.
+        // 3. Each filter that runs gets its input, in its own buffer; 4. the
+        // filter, in place; 5. its output through its part's envelope, Mix and
+        // Solo, into `out`. A skipped filter's grid and ramps advance; a
+        // filter whose gain is 0 adds nothing.
         const auto left = out.channel(0);
         const auto right = out.channel(1);
         for (std::size_t f = 0; f < partCount; ++f)
@@ -707,13 +960,26 @@ private:
             {
                 continue;
             }
-            const auto input = block(filterBuffers[f], filterPointers[f], length);
-            buildInput(f, length);
+            if (plan.skip[f])
+            {
+                filters[f].skip(length);
+                continue;
+            }
+            if (!plan.output[f])
+            {
+                continue; // bypassed, and its gain is 0
+            }
+            const auto input = block(filterBuffers[f], filterPointers[f], length, channels);
+            buildInput(f, length, channels, plan.crossing[1 - f]);
             filters[f].process(input);
             const auto& e = envelopeBuffers[f];
             const auto& g = mixGains[f];
+            // On the mono path both channels take channel 0, through the
+            // stereo path's own expression: a compiler that contracts it into
+            // a fused multiply-add (Apple Clang does) then does so on both
+            // paths, and they stay the same to the bit.
             const auto y0 = input.channel(0);
-            const auto y1 = input.channel(1);
+            const auto y1 = channels == 2 ? input.channel(1) : y0;
             if (unityLevel)
             {
                 for (std::size_t i = 0; i < length; ++i)
@@ -737,19 +1003,46 @@ private:
 
     /// Part p's Mix gain at each sample of the chunk that starts at the
     /// block's sample `done`: its knob ramp read at that sample (unity if
-    /// null), plus its modulation (0 until M1.5), through the law. A linear
-    /// ramp is monotonic, so the same value at both ends of the chunk is a
-    /// constant gain over it, computed once.
+    /// null), plus its modulation (0 until M1.5), through the law; then
+    /// times its Solo gain there (none if null). A linear ramp is monotonic,
+    /// so the same value at both ends of the chunk is a constant over it,
+    /// computed once (and a constant Solo of exactly 1 changes nothing).
     void fillMixGains(std::size_t p, const VoiceKnobs& knobs, std::size_t done, std::size_t length) noexcept
     {
         auto& g = mixGains[p];
-        const auto* ramp = knobs.mix[p];
+        const auto at = knobs.offset + done; // the ramps stand that many samples before this block
+        fillKnobGains(g, knobs.mix[p], at, length);
+        const auto* solo = knobs.solo[p];
+        if (solo == nullptr)
+        {
+            return;
+        }
+        const float first = solo->valueAfter(at);
+        const float last = solo->valueAfter(at + length);
+        if (first <= last && first >= last) // equal, without -Wfloat-equal
+        {
+            if (first < 1.0f || first > 1.0f)
+            {
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    g[i] *= first;
+                }
+            }
+            return;
+        }
+        for (std::size_t i = 0; i < length; ++i)
+        {
+            g[i] *= solo->valueAfter(at + i);
+        }
+    }
+
+    static void fillKnobGains(Chunk& g, const LinearSmoother* ramp, std::size_t at, std::size_t length) noexcept
+    {
         if (ramp == nullptr)
         {
             std::fill_n(g.begin(), length, mixGain({.mix = mixLaw.unity}));
             return;
         }
-        const auto at = knobs.offset + done; // the ramps stand that many samples before this block
         const float first = ramp->valueAfter(at);
         const float last = ramp->valueAfter(at + length);
         if (first <= last && first >= last) // equal, without -Wfloat-equal
@@ -763,23 +1056,25 @@ private:
         }
     }
 
-    /// own (x g), or for AB own + the other part through its envelope (x g).
-    void buildInput(std::size_t f, std::size_t length) noexcept
+    /// own (x g), or for AB own + the other part through its envelope (x g),
+    /// on `channels` channels (1 on the mono path). `crossing` false leaves
+    /// the other part out: its envelope or its slots can't add anything.
+    void buildInput(std::size_t f, std::size_t length, std::size_t channels, bool crossing) noexcept
     {
         const std::size_t other = 1 - f;
         const auto& envelopeOther = envelopeBuffers[other];
-        for (std::size_t c = 0; c < 2; ++c)
+        for (std::size_t c = 0; c < channels; ++c)
         {
             const auto& own = partBuffers[f][c];
-            const auto& crossing = partBuffers[other][c];
+            const auto& crossingPart = partBuffers[other][c];
             auto& dst = filterBuffers[f][c];
-            if (routes[f].both)
+            if (routes[f].both && crossing)
             {
                 for (std::size_t i = 0; i < length; ++i)
                 {
                     // Its own statement, so the product is rounded before the
                     // sum on every compiler (no fused multiply-add).
-                    const float enveloped = envelopeOther[i] * crossing[i];
+                    const float enveloped = envelopeOther[i] * crossingPart[i];
                     dst[i] = own[i] + enveloped;
                 }
             }
@@ -829,6 +1124,9 @@ private:
     float masterTuneOffset = 0.0f; ///< masterTuneSemitones(masterTuneHz): 0 at 440
     bool played = false;
     std::size_t gridPosition = 0;
+    bool mono = false;                           ///< on the mono path (channel 0 only)
+    std::array<bool, partCount> segmentSilent{}; ///< each part's gain is 0 over this segment
+    std::array<bool, slotCount> slotSkipping{};  ///< each slot is being skipped
 };
 
 } // namespace anoesis::dsp

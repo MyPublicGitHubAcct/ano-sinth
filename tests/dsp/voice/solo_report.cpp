@@ -17,7 +17,10 @@
 //   Mix B), conservative and tight;
 // - the mono path: exact against stereo, taken and left where it should be;
 // - the real-time terms: the same output at host blocks of 1, 37 and 4096,
-//   no allocation while processing.
+//   no allocation while processing;
+// - as built (stage 2): the library (dsp::Voice with dsp::PartSolo, through
+//   solo_library_engine.hpp) against the prototype in its decided
+//   configuration, on every sequence above the library can play.
 //
 // Hidden from the default run; run it in an optimised build:
 //
@@ -27,6 +30,7 @@
 // CPU: the "[solo]" benchmarks (tools/bench.sh "[solo]").
 
 #include "solo_candidates.hpp"
+#include "solo_library_engine.hpp"
 
 #include "../filters/filter_control_support.hpp"
 #include "../oscillators/oscillator_support.hpp"
@@ -1271,6 +1275,193 @@ void printRealTime()
     std::cout << "\n" << same << " of " << total << " identical to the bit at every host block.\n";
 }
 
+// --- As built (stage 2) -------------------------------------------------------------------
+
+/// The library as built, on the same setup and events as render().
+Render renderAsBuilt(const Setup& s, std::span<const EngineEvent> events)
+{
+    auto engine = std::make_unique<LibrarySoloEngine>(table());
+    engine->voices().forEachVoice([&](LibrarySoloEngine::Voice& v) { apply(v, s.patch); });
+    engine->voices().setPolyphony(s.polyphony);
+    engine->filterKnobs().set(s.patch.cutoff, s.patch.resonance);
+    engine->setMix(0, s.mixKnobs[0]);
+    engine->setMix(1, s.mixKnobs[1]);
+    engine->prepare({.sampleRate = rate, .maxBlockSize = s.hostBlock, .numChannels = 2});
+    engine->setSolo(s.solo, s.selected);
+    const auto blocks = perBlock(events, s.length, s.hostBlock);
+    Render r;
+    r.out = Buffer{2, s.length};
+    const auto out = r.out.block();
+    {
+        const AllocationCounter counter;
+        for (std::size_t b = 0; b < blocks.size(); ++b)
+        {
+            const auto start = b * s.hostBlock;
+            engine->process(out.subBlock(start, std::min(s.hostBlock, s.length - start)), blocks[b]);
+        }
+        r.allocations = counter.count();
+    }
+    return r;
+}
+
+void printAsBuilt()
+{
+    std::cout << "\n## As built: the library against the prototype as decided\n\n"
+                 "dsp::Voice with dsp::PartSolo's ramps through VoiceAllocator (solo_library_engine.hpp) against\n"
+                 "SkipVoice in the decided configuration (freeze, slots with the phase advanced, per segment, the\n"
+                 "mono path, Solo a 10 ms gain on the filter output), on every sequence above that the library can\n"
+                 "play: not the LFO and pluck stand-ins for M1.5, instant Solo or Solo by routing.\n\n";
+    struct Group
+    {
+        std::string name;
+        std::vector<std::pair<Setup, std::vector<EngineEvent>>> renders;
+    };
+    std::vector<Group> groups;
+    const auto decided = [](Setup s)
+    {
+        s.context = decidedContext();
+        return s;
+    };
+
+    Group identity{.name = "the identity sequence: 6 patches, host blocks 512 and 37", .renders = {}};
+    for (const auto* patch : {&initPatch, &initNone, &twoParts, &crossing, &pad, &worst})
+    {
+        for (const std::size_t block : {512U, 37U})
+        {
+            identity.renders.emplace_back(
+                decided({.patch = *patch, .polyphony = 4, .length = 60000, .hostBlock = block}), identitySequence());
+        }
+    }
+    groups.push_back(identity);
+
+    Group cases{.name = "skipping: each case (11), host blocks 512", .renders = {}};
+    for (const auto& c : skipCases())
+    {
+        cases.renders.emplace_back(decided(c.setup), c.events);
+    }
+    groups.push_back(cases);
+
+    Group phase{.name = "an oscillator through a skip: Retrig off and on", .renders = {}};
+    {
+        const auto back = samples(0.5) + 7;
+        for (const bool retrig : {false, true})
+        {
+            Patch p = twoParts;
+            p.bypass = {true, true};
+            p.volume = {1.0f, 1.0f, 0.0f, 1.0f};
+            p.retrigger = retrig;
+            phase.renders.emplace_back(decided({.patch = p}), sorted({noteOn(0, 45), volumeEvent(back, 2, 1.0f)}));
+        }
+    }
+    groups.push_back(phase);
+
+    Group timing{.name = "when the test is made: (1) Mix B 0 -> 10", .renders = {}};
+    timing.renders.emplace_back(
+        decided({.patch = twoParts, .mixKnobs = {10.0f, 0.0f}, .length = samples(2.0)}),
+        sorted({noteOn(0, 45), noteOn(0, 52), noteOn(0, 57), mixEvent(samples(0.5) + 7, 1, 10.0f)}));
+    groups.push_back(timing);
+
+    Group readings{
+        .name = "Solo's readings: crossing, Solo A and B from the start; own filters, Solo A",
+        .renders = {},
+    };
+    for (const std::size_t selected : {0U, 1U})
+    {
+        readings.renders.emplace_back(decided({.patch = crossing, .solo = true, .selected = selected}),
+                                      sorted({noteOn(0, 45)}));
+    }
+    readings.renders.emplace_back(decided({.patch = twoParts, .solo = true, .selected = 0}), sorted({noteOn(0, 45)}));
+    groups.push_back(readings);
+
+    Group clicks{.name = "Solo's clicks: on, Part select, off, on in a release", .renders = {}};
+    clicks.renders.emplace_back(decided({.patch = quietSines, .length = samples(2.6)}),
+                                sorted({
+                                    noteOn(0, 57),
+                                    soloEvent(samples(0.5) + 7, true),
+                                    selectEvent(samples(1.0) + 13, 1),
+                                    soloEvent(samples(1.5) + 3, false),
+                                    noteOff(samples(2.0), 57),
+                                    selectEvent(samples(2.1), 0),
+                                    soloEvent(samples(2.2) + 11, true),
+                                }));
+    groups.push_back(clicks);
+
+    Group mono{.name = "the mono path: 6 patches, 2 sequences, host blocks 1, 37 and 4096", .renders = {}};
+    {
+        const auto chord = sorted({noteOn(0, 45), noteOn(0, 52), noteOn(0, 57), noteOn(0, 60)});
+        auto moved = identitySequence();
+        moved.push_back(panEvent(samples(0.2) + 5, 0, 0.3f));
+        moved = sorted(moved);
+        for (const auto* patch : {&initPatch, &worstCentred, &worst, &pad, &padSpread, &noisePatch})
+        {
+            for (std::size_t q = 0; q < 2; ++q)
+            {
+                for (const std::size_t block : {1U, 37U, 4096U})
+                {
+                    mono.renders.emplace_back(decided({
+                                                  .patch = *patch,
+                                                  .polyphony = q == 0 ? 16U : 4U,
+                                                  .length = q == 0 ? samples(0.5) : 60000U,
+                                                  .hostBlock = block,
+                                              }),
+                                              q == 0 ? chord : moved);
+                }
+            }
+        }
+    }
+    groups.push_back(mono);
+
+    Group realTime{.name = "real-time terms: host blocks 1, 37 and 4096", .renders = {}};
+    {
+        auto events = identitySequence();
+        for (int k = 0; k < 8; ++k)
+        {
+            events.push_back(noteOn(0, 70 + k));
+        }
+        for (const auto& e : std::vector<EngineEvent>{
+                 mixEvent(samples(0.3) + 3, 1, 0.0f),
+                 mixEvent(samples(0.6) + 5, 1, 10.0f),
+                 soloEvent(samples(0.7) + 9, true),
+                 selectEvent(samples(0.8) + 1, 1),
+                 soloEvent(samples(0.9) + 7, false),
+                 volumeEvent(samples(1.0) + 3, 2, 0.0f),
+                 volumeEvent(samples(1.1) + 11, 2, 1.0f),
+                 panEvent(samples(1.2) + 2, 0, 0.2f),
+             })
+        {
+            events.push_back(e);
+        }
+        events = sorted(events);
+        for (const std::size_t block : {1U, 37U, 4096U})
+        {
+            realTime.renders.emplace_back(decided({.patch = twoParts, .length = samples(1.3), .hostBlock = block}),
+                                          events);
+        }
+    }
+    groups.push_back(realTime);
+
+    row({"Sequences", "Renders", "Identical", "Allocations"});
+    row({"---", "---:", "---:", "---:"});
+    int same = 0;
+    int total = 0;
+    for (const auto& g : groups)
+    {
+        int ok = 0;
+        std::size_t allocations = 0;
+        for (const auto& [setup, events] : g.renders)
+        {
+            const auto library = renderAsBuilt(setup, events);
+            const auto prototype = render(setup, events);
+            ok += sameBits(library.out, prototype.out) ? 1 : 0;
+            allocations += library.allocations;
+        }
+        same += ok;
+        total += static_cast<int>(g.renders.size());
+        row({g.name, std::to_string(g.renders.size()), std::to_string(ok), std::to_string(allocations)});
+    }
+    std::cout << "\n" << same << " of " << total << " identical to the bit.\n";
+}
+
 } // namespace
 
 TEST_CASE("Part solo and skipping: the candidates, measured", "[.][solo-report]")
@@ -1285,5 +1476,6 @@ TEST_CASE("Part solo and skipping: the candidates, measured", "[.][solo-report]"
     printBounds();
     printMono();
     printRealTime();
+    printAsBuilt();
     SUCCEED();
 }

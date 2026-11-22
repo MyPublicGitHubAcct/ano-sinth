@@ -39,11 +39,13 @@ namespace anoesis::dsp
 inline constexpr float keytrackReferenceNote = 9.0f;
 
 /// The cutoff offset in octaves for a voice at `pitch` (a fractional note),
-/// with `amount` = Keytrack / 10: amount x (pitch - reference) / 12.
+/// with `amount` = Keytrack / 10: amount x (pitch - reference) / 12. (The
+/// parameter isn't named referenceNote, which would shadow math/pitch.hpp's
+/// dsp::referenceNote wherever that is included first.)
 [[nodiscard]] constexpr float keytrackOctaves(float pitch, float amount,
-                                              float referenceNote = keytrackReferenceNote) noexcept
+                                              float reference = keytrackReferenceNote) noexcept
 {
-    return amount * ((pitch - referenceNote) / 12.0f);
+    return amount * ((pitch - reference) / 12.0f);
 }
 
 /// The keytrack modulation source for a voice at `pitch`: (pitch - 9) / 120,

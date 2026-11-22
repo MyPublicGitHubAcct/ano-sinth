@@ -53,6 +53,11 @@
 ///   lowpasses falls as 1/(1 + k), as an analog ladder's does.
 /// - Bypass returns the input untouched at no cost; leaving bypass starts
 ///   the filter from rest (reset()).
+/// - For a voice that skips what can't be heard (M1.4 task 5, docs/dsp/
+///   part-solo-and-skipping.md): skip() advances the grid and the ramps
+///   without solving, which on a filter at rest fed zeros is process() to
+///   the bit; copyChannel() sets one channel's state from the other's, to
+///   leave a mono path.
 ///
 /// Up to two channels (a stereo voice), filtered independently with shared
 /// controls. The DSP takes physical units (Hz, the loop gain k, a linear
@@ -257,6 +262,46 @@ public:
             gridPosition = (gridPosition + length) % gridSamples;
             done += length;
         }
+    }
+
+    /// `numSamples` samples without solving (docs/dsp/part-solo-and-
+    /// skipping.md): the grid advances, taking the controls and modulations
+    /// at its grid points as process() would, and the per-sample ramps
+    /// (resonance, drive, the response's crossfade) move on, but the state is
+    /// left as it was and nothing is written. On a filter at rest
+    /// (isAtRest()) whose input would be zeros, that is process() to the bit:
+    /// silence in, silence out, the state still at rest. Otherwise the state
+    /// is frozen, for a voice that skips a filter it can't hear. Nothing
+    /// while bypassed, as process().
+    void skip(std::size_t numSamples) noexcept
+    {
+        if (bypassed)
+        {
+            return;
+        }
+        std::size_t done = 0;
+        while (done < numSamples)
+        {
+            if (gridPosition == 0)
+            {
+                beginSegment();
+            }
+            const auto length = std::min(numSamples - done, gridSamples - gridPosition);
+            resonance.skip(length);
+            drive.skip(length);
+            tapFade.skip(length);
+            gridPosition = (gridPosition + length) % gridSamples;
+            done += length;
+        }
+    }
+
+    /// Channel `to`'s state set from channel `from`'s (indices past the last
+    /// channel are the last). A voice leaving its mono path, where only
+    /// channel 0 has run, sets channel 1 from it: the two were equal until
+    /// then (docs/dsp/voice-architecture.md, question 4).
+    void copyChannel(std::size_t from, std::size_t to) noexcept
+    {
+        channels[std::min(to, maxChannels - 1)] = channels[std::min(from, maxChannels - 1)];
     }
 
 private:

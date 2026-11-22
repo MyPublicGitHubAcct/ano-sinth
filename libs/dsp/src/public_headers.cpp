@@ -40,5 +40,6 @@
 #include <anoesis/dsp/resampling/halfband.hpp>
 #include <anoesis/dsp/resampling/oversampler.hpp>
 #include <anoesis/dsp/voice/mix_law.hpp>
+#include <anoesis/dsp/voice/part_solo.hpp>
 #include <anoesis/dsp/voice/voice.hpp>
 #include <anoesis/dsp/voice/voice_allocator.hpp>

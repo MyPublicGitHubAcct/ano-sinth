@@ -312,6 +312,8 @@ Task 5's stage 1 measured these ([part-solo-and-skipping.md](part-solo-and-skipp
 - At Mix 0 or under Solo, the saving is part B's filter and slot, 233 ns per voice (473 → 240), not the 110 estimated here, which was measured with B1 off. It comes only if the fed filter is skipped too, with a difference after the part returns (−64 to −70 dB over 50 ms, −39 to −44 resonant).
 - The skip test is a bound per factor over each 32-sample segment: Mix's ramp at its larger end plus its modulation's bound.
 
+Built in task 5's stage 2 (2026-11-22, [as built](part-solo-and-skipping.md#as-built)): Solo's gains (`PartSolo`, through `VoiceKnobs::solo`) are multiplied into each part's Mix gain per sample, and a part whose Mix bound is 0 over a segment has its output stage skipped and its fed filter frozen. So at Mix 0 the voice is no longer this page's prototype to the bit after the part returns; [mix_test.cpp](../../tests/dsp/voice/mix_test.cpp) now keeps Mix above 0, and Mix at and below 0 is tested against task 5's prototype.
+
 ### Real-time terms
 
 A 2 s sequence: the pad at Polyphony 4 with steals, Mix A and B automated every 300 samples at odd offsets, and two Main Volume jumps, rendered at host blocks of 1, 37 and 4096:
@@ -433,7 +435,7 @@ In `libs/dsp/include/anoesis/dsp/output/`, for M1.8's engine to chain after the 
   - the clamp: the developer's silence point, a negative sum silent, the top held, NaN and −∞ silent, +∞ at the top;
   - the law's numbers as parameters.
 - **The voice:**
-  - **bit for bit the stage-1 prototype** (`MixEngine` in its decided configuration) through `VoiceAllocator`, with `MainVolume` after it, at host blocks of 1, 37 and 4096, with 0 allocations. The setup: two patches (a resonant pad on AB, and A1 and B1 on their own filters), steals at Polyphony 4, Mix A and B automated every 300 samples (past both ends of the range), and Main Volume jumps;
+  - **bit for bit the stage-1 prototype** (`MixEngine` in its decided configuration) through `VoiceAllocator`, with `MainVolume` after it, at host blocks of 1, 37 and 4096, with 0 allocations. The setup: two patches (a resonant pad on AB, and A1 and B1 on their own filters), steals at Polyphony 4, Mix A and B automated every 300 samples (past both ends of the range; since task 5, past the top only, as above), and Main Volume jumps;
   - a null Mix ramp is the library without a mixer, to the bit;
   - each part's Mix scales only its own filter's output, exactly (×1.5 and ×0.5 to one rounding, so after the filter);
   - V3: a crossing B1 is untouched by Mix B and silenced by Mix A;

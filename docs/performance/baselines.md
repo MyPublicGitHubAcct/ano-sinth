@@ -6,6 +6,33 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.4 part solo and skipping, as built (`dsp::Voice`'s plan, the mono path, `PartSolo`)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[solo]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.4–5.2%; one prototype row 26.9%, from one slow run).
+- **What is measured** ([part-solo-and-skipping.md](../dsp/part-solo-and-skipping.md#results-as-built)): the same 16 held voices as the stage-1 entry below, now through `dsp::Voice` as built (the per-segment plan, the frozen skip, the mono path; Solo's gains from `PartSolo`), beside the stage-1 prototype's rows re-run in the same session.
+
+| Benchmark: 16 voices (ns / sample) | as built | before stage 2 (stage-1 entry) |
+|---|---:|---:|
+| init | 1,958.07 | 5,762.34 |
+| filter B `--` | 1,948.36 | 3,807.23 |
+| two parts, Mix B 0 | 1,960.66 | 7,574.75 |
+| two parts, B soloed out (`PartSolo`) | 1,973.01 | 7,516.02 (gain, nothing skipped) |
+| two parts sounding | 3,831.56 | 7,569.00 |
+| every oscillator at Voices 0 | 0.11 | 0.11 |
+| worst, centred | 6,139.00 | 10,259.06 |
+| worst, spread (nothing to skip) | 9,906.74 | 10,139.92 |
+
+The prototype's rows this session: init nothing skipped 5,684.86, atRest 3,740.68, mono only 2,946.60, atRest + slots + mono 1,989.88; filter B `--` atRest + slots + mono 1,946.73; Mix B 0 nothing skipped 7,670.68, atRest + slots 7,379.26, freeze + slots 3,765.68, freeze + slots + mono 2,001.97; B soloed out, gain nothing skipped 7,375.04, gain freeze + slots 3,820.39, routing 3,768.61; two parts sounding freeze + slots + mono 3,882.68; worst centred mono only 6,063.48, freeze + slots + mono 6,021.35; worst spread nothing skipped 10,037.01, freeze + slots + mono 10,085.61.
+
+### Observations
+
+- **As built costs what the decided prototype does**, within noise in every row.
+- **The init patch is a third of what it was** (360 → 122 ns per voice), and a part at Mix 0 or soloed out costs nothing beyond it: 16 voices of two parts with B silenced cost 1,961–1,973 against 7,375–7,575.
+- **Where nothing can be skipped, the plan costs nothing measurable** (worst, spread: 9,906.7 as built, 10,037.0 for the prototype with nothing skipped).
+- **The exact skip of a filter at rest is only visible here:** with it removed (a deliberate break), the init patch read 3,036.72 (+55%), while every output test still passed, as it must.
+
+---
+
 ## 2026-11-22: M1.4 part solo and skipping, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[solo]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.3–4.8%, one row 8.5%).

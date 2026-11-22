@@ -4,8 +4,10 @@
 // through the real VoiceAllocator, for each case (V12, V13): the init patch,
 // filter B on "--", Mix B at 0, B soloed out, every oscillator at Voices 0,
 // the worst case centred (the mono path) and spread (nothing to skip), and
-// two parts sounding centred. Each as built (dsp::Voice), as the prototype
-// with nothing skipped, and with each candidate.
+// two parts sounding centred. Each as built (dsp::Voice, which since stage 2
+// skips as decided and takes Solo's gains from dsp::PartSolo), as the
+// prototype with nothing skipped, and with each candidate. The stage-1
+// entry in docs/performance/baselines.md has dsp::Voice before stage 2.
 //
 // Tagged [!benchmark][solo]: run with tools/bench.sh "[solo]" in
 // relwithdebinfo.
@@ -14,6 +16,7 @@
 #include "../voice/solo_candidates.hpp"
 
 #include <anoesis/dsp/control/smoother.hpp>
+#include <anoesis/dsp/voice/part_solo.hpp>
 #include <anoesis/dsp/voice/voice.hpp>
 #include <anoesis/dsp/voice/voice_allocator.hpp>
 
@@ -96,11 +99,12 @@ std::vector<dsp::VoiceEvent> chord()
     return c;
 }
 
-/// 16 voices of dsp::Voice, with Mix ramps.
+/// 16 voices of dsp::Voice, with Mix ramps and Solo's (A selected, on or
+/// off).
 class LibraryChord
 {
 public:
-    LibraryChord(Shape shape, float mixB)
+    LibraryChord(Shape shape, float mixB, bool soloA = false)
         : allocator(std::make_unique<dsp::VoiceAllocator<dsp::Voice<>>>(1, anoesis::test::d6::minBlepTable64())),
           out(2, blockSize)
     {
@@ -111,6 +115,8 @@ public:
         }
         ramps[0].setCurrentAndTarget(10.0f);
         ramps[1].setCurrentAndTarget(mixB);
+        solo.prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
+        solo.setImmediately(soloA, 0);
         allocator->forEachVoice([&](dsp::Voice<>& v) { configure(v, shape); });
         allocator->prepare({.sampleRate = rate, .maxBlockSize = blockSize, .numChannels = 2});
         const auto notes = chord();
@@ -133,10 +139,12 @@ private:
     {
         auto k = filters.knobs();
         k.mix = {ramps.data(), ramps.data() + 1};
+        k.solo = solo.gains();
         return k;
     }
     FilterKnobs filters;
     std::array<dsp::LinearSmoother, 2> ramps{};
+    dsp::PartSolo solo;
     std::unique_ptr<dsp::VoiceAllocator<dsp::Voice<>>> allocator;
     Buffer out;
 };
@@ -211,7 +219,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
     };
     const std::vector<Row> rows{
         {
-            .name = "init: dsp::Voice",
+            .name = "init: as built (dsp::Voice)",
             .shape = Shape::init,
             .mixB = 10.0f,
             .soloA = false,
@@ -250,7 +258,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = monoOnly,
         },
         {
-            .name = "filter B --: dsp::Voice",
+            .name = "filter B --: as built (dsp::Voice)",
             .shape = Shape::initNone,
             .mixB = 10.0f,
             .soloA = false,
@@ -265,7 +273,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = atRestSlotsMono,
         },
         {
-            .name = "Mix B 0: dsp::Voice",
+            .name = "Mix B 0: as built (dsp::Voice)",
             .shape = Shape::twoParts,
             .mixB = 0.0f,
             .soloA = false,
@@ -304,6 +312,13 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = freezeSlotsMono,
         },
         {
+            .name = "B soloed out: as built (dsp::Voice, PartSolo)",
+            .shape = Shape::twoParts,
+            .mixB = 10.0f,
+            .soloA = true,
+            .library = true,
+        },
+        {
             .name = "B soloed out: gain, nothing skipped",
             .shape = Shape::twoParts,
             .mixB = 10.0f,
@@ -328,7 +343,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = routing,
         },
         {
-            .name = "two parts sounding: dsp::Voice",
+            .name = "two parts sounding: as built (dsp::Voice)",
             .shape = Shape::twoParts,
             .mixB = 10.0f,
             .soloA = false,
@@ -343,7 +358,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = freezeSlotsMono,
         },
         {
-            .name = "Voices 0 everywhere: dsp::Voice",
+            .name = "Voices 0 everywhere: as built (dsp::Voice)",
             .shape = Shape::silent,
             .mixB = 10.0f,
             .soloA = false,
@@ -358,7 +373,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = atRest,
         },
         {
-            .name = "worst centred: dsp::Voice",
+            .name = "worst centred: as built (dsp::Voice)",
             .shape = Shape::worstCentred,
             .mixB = 10.0f,
             .soloA = false,
@@ -381,7 +396,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
             .candidate = freezeSlotsMono,
         },
         {
-            .name = "worst spread: dsp::Voice",
+            .name = "worst spread: as built (dsp::Voice)",
             .shape = Shape::worstSpread,
             .mixB = 10.0f,
             .soloA = false,
@@ -408,7 +423,7 @@ TEST_CASE("Part solo and skipping: CPU, 16 voices", "[!benchmark][solo]")
     {
         if (r.library)
         {
-            LibraryChord bench{r.shape, r.mixB};
+            LibraryChord bench{r.shape, r.mixB, r.soloA};
             BENCHMARK("solo: 16 voices, " + r.name + " x512")
             {
                 return bench.run();

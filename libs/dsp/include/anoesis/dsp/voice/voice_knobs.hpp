@@ -13,7 +13,8 @@
 /// What a voice reads that isn't its own: the global knob ramps that feed its
 /// filters and set its parts' Mix, and the pitch bend; and how a note-on
 /// moves its pitch.
-/// Doc: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md
+/// Doc: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md,
+/// docs/dsp/mixer.md, docs/dsp/part-solo-and-skipping.md
 namespace anoesis::dsp
 {
 
@@ -30,7 +31,10 @@ namespace anoesis::dsp
 /// - Mix A and Mix B (M1.4 task 4, mix_law.hpp), ramps in internal units
 ///   (0-15) read at each sample like the filter knobs. A null Mix ramp reads
 ///   as unity (internal 10), so a caller without a mixer hears the voice
-///   unscaled.
+///   unscaled;
+/// - Solo's two gains (M1.4 task 5, part_solo.hpp), 0-1, read like Mix and
+///   multiplied into its gain. A null one reads as 1, so a caller without
+///   Solo hears the voice as before, to the bit.
 struct VoiceKnobs
 {
     std::array<const LinearSmoother*, 2> cutoff{};    ///< Cutoff A, Cutoff B (knob units)
@@ -45,6 +49,9 @@ struct VoiceKnobs
     const PitchBend* bend = nullptr;            ///< the instance's bend; null: none
     std::uint64_t time = 0;                     ///< the absolute sample of the block's first sample
     std::array<const LinearSmoother*, 2> mix{}; ///< Mix A, Mix B (internal units); null: unity
+    /// Solo's gains for parts A and B (0-1; PartSolo, part_solo.hpp), read
+    /// like Mix and multiplied into its gain. Null reads as 1: no Solo.
+    std::array<const LinearSmoother*, 2> solo{};
 
     /// The same knobs for a block starting `samples` later.
     [[nodiscard]] constexpr VoiceKnobs advanced(std::size_t samples) const noexcept

@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -73,12 +74,20 @@ namespace anoesis::dsp
 /// voice starting from silence draws its own random phase. Phase is degrees
 /// here and fixed point in the oscillator.
 ///
+/// For a voice that skips what can't be heard (M1.4 task 5, docs/dsp/
+/// part-solo-and-skipping.md): isSilent() (process() would add exact
+/// zeros), isCentred() (left is right to the bit), canSkip() (no gain ramp
+/// moves), and skip(), which renders nothing but adds up each oscillator's
+/// phase steps; at the next process(), noteOn() or setVoices(), each one
+/// jumps there with MinBlepOscillator::jumpTo(), band-limited, so a
+/// free-running phase carries on unheard.
+///
 /// Satisfies Preparable. No allocation: fixed capacity for 8 voices, the
 /// table is shared, and the mono signal goes through a small buffer on the
 /// stack. About 5 KB at 64 taps.
 ///
 /// Docs: docs/dsp/oscillator-controls.md, docs/dsp/oscillator-phase.md,
-/// docs/dsp/oscillator-unison.md
+/// docs/dsp/oscillator-unison.md, docs/dsp/part-solo-and-skipping.md
 template <std::size_t Taps>
 class OscillatorSlot
 {
@@ -150,6 +159,8 @@ public:
         }
         noteHeld = false;
         running = false;
+        pending = {};
+        skipped = false;
     }
 
     /// A note-on, between two process() calls (a voice splits its block at
@@ -168,6 +179,7 @@ public:
     ///   oscillator has been running unheard, so its phase is arbitrary).
     void noteOn(float since = 0.0f) noexcept
     {
+        resume(); // a retrigger jumps from where the phase would be
         noteHeld = true;
         for (std::size_t v = 0; v < count; ++v)
         {
@@ -188,6 +200,7 @@ public:
         {
             return;
         }
+        resume();
         count = newCount;
         for (std::size_t v = 0; v < maxUnisonVoices; ++v)
         {
@@ -385,6 +398,7 @@ public:
     /// channels 0 and 1 of `out`.
     void process(const AudioBlock& out, float note) noexcept
     {
+        resume();
         const float centre = frequencyFor(note);
         for (std::size_t v = 0; v < maxUnisonVoices; ++v)
         {
@@ -400,8 +414,133 @@ public:
     /// shorter of `notes` and the block.
     void process(const AudioBlock& out, std::span<const float> notes) noexcept
     {
+        resume();
         const auto numSamples = std::min(out.numSamples(), notes.size());
         render(out, numSamples, notes.first(numSamples));
+    }
+
+    /// Whether process() would add exact zeros: every voice it renders has
+    /// its gains settled at exactly 0 (Volume 0, or none sounding), or, for
+    /// Noise, the noise mix has.
+    [[nodiscard]] bool isSilent() const noexcept
+    {
+        if (noiseSelected)
+        {
+            return noiseSettledAtZero();
+        }
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (states[v] == VoiceState::off || (states[v] == VoiceState::fading && !gains[v].isSmoothing()))
+            {
+                continue;
+            }
+            const auto g = gains[v].targetGains();
+            if (gains[v].isSmoothing() || !isZero(g.left) || !isZero(g.right))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Whether the left channel it adds is its right, to the bit, for as long
+    /// as no control changes: every voice it renders has its gains, now and
+    /// at their target, equal left and right (pan and stereo spread at the
+    /// centre). Never for Noise, which mixes two independent draws into the
+    /// two channels.
+    [[nodiscard]] bool isCentred() const noexcept
+    {
+        const auto same = [](float a, float b)
+        {
+            return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+        };
+        if (noiseSelected)
+        {
+            const float a = mixRamps[0].currentValue();
+            const float c = mixRamps[1].currentValue();
+            const float b = mixRamps[2].currentValue();
+            return !mixRamps[0].isSmoothing() && !mixRamps[1].isSmoothing() && !mixRamps[2].isSmoothing() &&
+                   same(a, c) && same(c, b);
+        }
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (states[v] == VoiceState::off)
+            {
+                continue;
+            }
+            const auto now = gains[v].currentGains();
+            const auto target = gains[v].targetGains();
+            if (!same(now.left, now.right) || !same(target.left, target.right))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Whether skip() keeps the slot exact: no ramp it renders with moves,
+    /// since skip() doesn't advance them: the voices' gains (one fading out
+    /// included) or, for Noise, the noise mix's. (The noise mix follows every
+    /// Volume and Pan change but only Noise advances it, so a saw slot
+    /// doesn't wait on it.)
+    [[nodiscard]] bool canSkip() const noexcept
+    {
+        if (noiseSelected)
+        {
+            return !mixRamps[0].isSmoothing() && !mixRamps[1].isSmoothing() && !mixRamps[2].isSmoothing();
+        }
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (states[v] != VoiceState::off && gains[v].isSmoothing())
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// `numSamples` samples at `note` without rendering (call it only when
+    /// canSkip()): each running oscillator's phase step is added up (2^32 per
+    /// cycle, so the sum is exact in uint32), a voice that has faded out is
+    /// dropped as process() drops it, and the noise draws its numbers. At
+    /// the next process(), noteOn() or setVoices(), each oscillator jumps to
+    /// the phase it would have had: the output differs from rendering only
+    /// by the band-limiting residual of the last Taps samples, for Taps
+    /// samples.
+    void skip(std::size_t numSamples, float note) noexcept
+    {
+        const float centre = frequencyFor(note);
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (!dropIfFaded(v))
+            {
+                oscillators[v].setFrequency(centre * ratios[v]);
+                pending[v] += static_cast<std::uint32_t>(numSamples) * oscillators[v].phaseIncrement();
+            }
+        }
+        skipNoise(numSamples);
+        skipped = skipped || numSamples > 0;
+        running = running || numSamples > 0;
+    }
+
+    /// As above, with a note per sample (`notes[i]` for sample i).
+    void skip(std::span<const float> notes) noexcept
+    {
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (dropIfFaded(v))
+            {
+                continue;
+            }
+            for (const float note : notes)
+            {
+                oscillators[v].setFrequency(frequencyFor(note) * ratios[v]);
+                pending[v] += oscillators[v].phaseIncrement();
+            }
+        }
+        skipNoise(notes.size());
+        skipped = skipped || !notes.empty();
+        running = running || !notes.empty();
     }
 
 private:
@@ -600,6 +739,57 @@ private:
         }
     }
 
+    [[nodiscard]] bool noiseSettledAtZero() const noexcept
+    {
+        return !mixRamps[0].isSmoothing() && !mixRamps[1].isSmoothing() && !mixRamps[2].isSmoothing() &&
+               isZero(mixRamps[0].targetValue()) && isZero(mixRamps[1].targetValue()) &&
+               isZero(mixRamps[2].targetValue());
+    }
+
+    /// As renderVoices() drops a voice that has faded out; true if it is off.
+    bool dropIfFaded(std::size_t v) noexcept
+    {
+        if (states[v] == VoiceState::fading && !gains[v].isSmoothing())
+        {
+            states[v] = VoiceState::off;
+            oscillators[v].reset();
+            pending[v] = 0;
+        }
+        return states[v] == VoiceState::off;
+    }
+
+    /// The noise's draws for a skip, as renderNoise() would make them (none
+    /// once the mix has settled at zero).
+    void skipNoise(std::size_t numSamples) noexcept
+    {
+        if (!noiseSelected || noiseSettledAtZero())
+        {
+            return;
+        }
+        for (std::size_t i = 0; i < 2 * numSamples; ++i)
+        {
+            static_cast<void>(noise.next());
+        }
+    }
+
+    /// After a skip: each oscillator jumps to the phase it would have had.
+    void resume() noexcept
+    {
+        if (!skipped)
+        {
+            return;
+        }
+        skipped = false;
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (states[v] != VoiceState::off && pending[v] != 0)
+            {
+                oscillators[v].jumpTo(oscillators[v].nextPhase() + pending[v]);
+            }
+            pending[v] = 0;
+        }
+    }
+
     [[nodiscard]] static bool isZero(float x) noexcept
     {
         return x >= 0.0f && x <= 0.0f; // == 0 without -Wfloat-equal
@@ -623,8 +813,10 @@ private:
     bool inverted = false;
     bool retrigger = true;
     bool noiseSelected = false;
-    bool noteHeld = false; // a note-on since the last stop()
-    bool running = false;  // output rendered since the last stop()
+    bool noteHeld = false;                                // a note-on since the last stop()
+    bool running = false;                                 // output rendered since the last stop()
+    std::array<std::uint32_t, maxUnisonVoices> pending{}; // phase steps skipped, not yet jumped to
+    bool skipped = false;                                 // skip() since the last jump
 };
 
 } // namespace anoesis::dsp

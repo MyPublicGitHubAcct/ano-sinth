@@ -461,17 +461,27 @@ public:
         return true;
     }
 
-    /// Whether skip() keeps the slot exact: no gain or noise-mix ramp moves.
+    /// Whether skip() keeps the slot exact: no ramp the slot renders with
+    /// moves (the voices' gains, or for Noise the noise mix's). (Stage 1
+    /// checked the noise mix's ramps on every slot, and only the current
+    /// voices' gains: a Volume or Pan change while a saw sounded, which
+    /// retargets the noise mix that only Noise advances, kept it from ever
+    /// being skipped again, and a voice fading out didn't count. Stage 2
+    /// found and fixed both.)
     [[nodiscard]] bool canSkip() const noexcept
     {
+        if (noiseSelected)
+        {
+            return !mixRamps[0].isSmoothing() && !mixRamps[1].isSmoothing() && !mixRamps[2].isSmoothing();
+        }
         for (std::size_t v = 0; v < maxUnisonVoices; ++v)
         {
-            if (states[v] == VoiceState::on && gains[v].isSmoothing())
+            if (states[v] != VoiceState::off && gains[v].isSmoothing())
             {
                 return false;
             }
         }
-        return !mixRamps[0].isSmoothing() && !mixRamps[1].isSmoothing() && !mixRamps[2].isSmoothing();
+        return true;
     }
 
     /// The phase is advanced through a skip (true, the default) or frozen.

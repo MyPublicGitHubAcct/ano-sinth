@@ -354,7 +354,10 @@ double energy(const Buffer& b)
 }
 
 /// Steals at Polyphony 4, releases, Mix A and B automated every 300 samples
-/// at odd offsets (including jumps past the knob's range), and Main Volume
+/// at odd offsets (including jumps past the top of the knob's range; not to
+/// 0 or below, where M1.4 task 5 skips the part and freezes its filter,
+/// which this stage-1 prototype doesn't: solo_test.cpp covers Mix there,
+/// against task 5's prototype), and Main Volume
 /// jumps.
 std::vector<EngineEvent> busySequence()
 {
@@ -366,7 +369,7 @@ std::vector<EngineEvent> busySequence()
     };
     for (std::size_t k = 1; k < 300; ++k)
     {
-        e.push_back(mixEvent((k * 300) + 7, k % 2, static_cast<float>((k * 7) % 19) - 2.0f));
+        e.push_back(mixEvent((k * 300) + 7, k % 2, static_cast<float>((k * 7) % 19) + 0.5f)); // 0.5 to 18.5
     }
     std::ranges::stable_sort(e, {}, &EngineEvent::offset);
     return e;

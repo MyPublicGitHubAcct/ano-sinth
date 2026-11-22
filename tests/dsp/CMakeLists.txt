@@ -33,6 +33,7 @@ add_executable(anoesis_dsp_tests
     filters/filter_control_test.cpp
     filters/filter_report.cpp
     filters/filter_stability_report.cpp
+    filters/keytrack_include_order_test.cpp
     filters/keytrack_report.cpp
     filters/keytrack_test.cpp
     filters/ladder_filter_test.cpp
@@ -68,6 +69,7 @@ add_executable(anoesis_dsp_tests
     voice/mix_test.cpp
     voice/mixer_report.cpp
     voice/solo_report.cpp
+    voice/solo_test.cpp
     voice/voice_allocator_test.cpp
     voice/voice_report.cpp
     voice/voice_test.cpp)

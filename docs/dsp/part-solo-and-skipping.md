@@ -1,12 +1,13 @@
 # Part solo, and skipping what can't be heard
 
-Solo plays only the part the interface shows. Separately, the voice should not compute what nobody can hear: Sylenth1 "will also automatically turn off any parts that are not used, to save extra CPU time" (manual p. 6). This page covers M1.4 task 5, stage 1:
+Solo plays only the part the interface shows. Separately, the voice should not compute what nobody can hear: Sylenth1 "will also automatically turn off any parts that are not used, to save extra CPU time" (manual p. 6). This page covers M1.4 task 5, stage 1 and the build (stage 2):
 
 - **Theory:** solo as a gain or as a routing change; skipping as proving silence with an upper bound; what has to stay exact through a skip (a filter's state, an oscillator's phase, the ramps); when the proof is made, and why that decides whether the output depends on the host's block size; the mono path; and a bound that modulation can join later.
 - **Sylenth1:** what is known about Solo and the skipping. The manual gives Solo in two sentences, a tutorial says Solo follows Part select, another says Solo taps the filter's output, and the developer says a part with no oscillators has its filter "off".
 - **The candidates:** prototyped on copies of the real filter, slot and voice, over the real `dsp::VoiceAllocator`.
 - **What they measured:** the prototype against the library; Solo's two readings and its clicks; every V13 case under each skip candidate, exact or by how much; an oscillator's phase through a skip; when the test is made; bounds on modulation; the mono path; the real-time terms; CPU.
 - **Recommendations** for the project owner, one per question, with the alternatives, and **the decision** (every recommendation, 2026-11-22).
+- **As built** (stage 2): the library's API, the tests and their tolerances, red and the deliberate breaks, three flaws the build found in the prototype, and the results.
 
 Read [voice-architecture.md](voice-architecture.md) (the voice, its routing, its 32-sample grid, and question 4's mono path), [mixer.md](mixer.md) (Mix per voice per sample, and "Room for tasks 5 and 6"), [voice-allocation.md](voice-allocation.md) (`isActive()`, E11, a retrigger in place keeping the filters) and [filters.md](filters.md) (the filter's grid and ramps) first.
 
@@ -387,6 +388,135 @@ Chosen by the project owner on 2026-11-22: every recommendation (Decisions log).
 - **When:** per segment, at each of the voice's 32-sample grid points for the coming segment; a call mid-segment can only end a skip. No hysteresis.
 - **The bound:** an upper bound per factor over the segment (the amp envelope, Mix's ramp at its larger end plus its modulation routes' bounds, Solo's ramp). Each M1.5 source supplies its bound over a segment.
 - **The mono path** as decided in task 1, its output stage writing the stereo path's expression on each channel.
+
+## As built
+
+Stage 2 (2026-11-22) built the decision in `libs/dsp`, test-first, against the stage-1 prototype in its decided configuration.
+
+- **[ladder_filter.hpp](../../libs/dsp/include/anoesis/dsp/filters/ladder_filter.hpp), `LadderFilter`:**
+  - `skip(n)`: n samples with no solve and nothing written. The grid advances, calling `beginSegment()` at each grid point, so the cutoff and resonance modulations the voice fed are taken exactly where `process()` would take them. The per-sample ramps (resonance, drive, the response's crossfade) skip n. The state is left as it was. On a filter at rest fed zeros, that is `process()` to the bit. Nothing while bypassed, as `process()`.
+  - `copyChannel(from, to)`: one channel's state set from another's (indices past the last are the last), to leave the mono path.
+  - Not `clearState()`: only the rejected alternative (cleared at the return) needed it.
+- **[oscillator_slot.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/oscillator_slot.hpp), `OscillatorSlot`:**
+  - `isSilent()`: every voice it renders has its gains settled at exactly 0 (Volume 0, or nothing sounding), or, for Noise, the noise mix has.
+  - `isCentred()`: every voice it renders has its gains, now and at their target, equal left and right to the bit. Never for Noise.
+  - `canSkip()`: no ramp it renders with moves: the voices' gains, a voice fading out included, or for Noise the noise mix's.
+  - `skip(n, note)` and `skip(notes)`: each running oscillator's phase steps added up in `uint32` (2³² per cycle, so the sum is exact), a voice that has faded out dropped as `process()` drops it, and the noise's draws made.
+  - At the next `process()`, `noteOn()` or `setVoices()`, each oscillator jumps to the phase it would have had with `MinBlepOscillator::jumpTo()`, band-limited. `stop()` forgets a pending skip.
+- **[part_solo.hpp](../../libs/dsp/include/anoesis/dsp/voice/part_solo.hpp), `PartSolo`:** Solo's two gains, for M1.8's engine to hold.
+  - Two `LinearSmoother`s over 10 ms. Their targets come from Solo and the selected part: 1 for every part with Solo off, else 1 for the selected part and 0 for the other.
+  - `setSolo(on)` and `selectPart(p)` ramp. Part select under Solo crosses both gains; with Solo off it changes no gain and is remembered. A part past the last counts as the last.
+  - `setImmediately(on, part)` jumps, for a session restored soloed. `prepare()` finishes the ramps.
+  - `gains()` is `VoiceKnobs::solo`. `skip(n)` moves both ramps past what the caller rendered, as the Mix knobs are moved. The caller splits its block at Solo and Part select events.
+- **[voice_knobs.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice_knobs.hpp):** `VoiceKnobs::solo`, two `const LinearSmoother*` read at `offset` like Mix. **A null one is 1**, so every caller without Solo is unchanged to the bit (tested).
+- **[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp), `dsp::Voice`:**
+  - **The plan, per chunk** (`planChunk()`). At a grid point, each part's output gain is tested over the whole coming segment (`gainSilent()`), as an upper bound per factor:
+    - the amp envelope: idle, or held in sustain at exactly 0 with a sustain of 0 (`envelopeSilent()`);
+    - Mix: the ramp's larger end plus `mixModulationBound()` at or below the law's 0 (`mixSilent()`);
+    - Solo: the ramp's larger end at 0 (`soloSilent()`).
+    
+    A chunk that starts mid-segment (a `process()` call starting there) re-tests only a part whose gain is 0, over the rest of the segment, so it can only end that skip.
+  - **What the plan skips:**
+    - a filter whose part's gain is 0 (frozen), or at rest with no possible input: no sounding non-silent slot in its part, and nothing crossing in (exact);
+    - the output stage of a filter whose gain is 0 (exact);
+    - a crossing part whose envelope can't be above 0, not added into the other filter (exact).
+    
+    A skipped filter is still fed at its grid points, and both envelopes always run.
+  - **The slots.** A part's slots are rendered for a filter that takes them: its own, or the other filter when the part crosses into it, where the filter runs, or is bypassed and heard. Otherwise, or when a slot is silent, a slot is skipped if `canSkip()`. Like a filter's, a slot's skip starts only at a grid point and can only end mid-segment: where it starts decides what its phase's jump leaves in flight at the return. One that isn't skipped while no filter takes it is rendered into its part's buffer, which nothing reads that chunk.
+  - **Solo's gains** are multiplied into each part's Mix gain per sample, after the law. A constant Solo of exactly 1 is skipped; that multiply would change nothing.
+  - **The mono path.** At a note-on from silence, `mono` is set if every sounding slot `isCentred()`. On it, the filters' inputs, the filters and the output stage run on channel 0. The output stage writes both channels with the stereo path's own expression, with `y1` the same span as `y0`. At the first chunk where a slot isn't centred, `copyChannel(0, 1)` on both filters, and the voice is stereo until its next note-on from silence. `isMono()` reports it, for measurement.
+  - **The seam for M1.5:** `mixModulationBound(part, knobs, done, length)` returns an upper bound on the modulation of that part's Mix over those samples. It returns 0 until M1.5. Each modulation route to Mix X is one more term in it. The test that uses it doesn't change.
+  - **Unchanged:** `isActive()`, `activeOscillatorVoices()`, the allocator, and the filter input level (the mono path writes `(ge · y0) · outputLevel` on both channels, as the stereo path does).
+- **[keytrack.hpp](../../libs/dsp/include/anoesis/dsp/filters/keytrack.hpp):** `keytrackOctaves()`'s third parameter is `reference`. As `referenceNote`, it shadowed `dsp::referenceNote` (`-Wshadow`, an error here) in any file that included `math/pitch.hpp` first. [keytrack_include_order_test.cpp](../../tests/dsp/filters/keytrack_include_order_test.cpp) includes them in that order. It failed to compile before the rename. The prototype's include-order workaround is gone.
+
+### Found in the build
+
+The build found three flaws in the stage-1 prototype. All three are fixed in the prototype, so it is still the reference. The stage-1 report then reproduces to the printed digit, except one cell of a rejected candidate (the third item):
+
+- **A part on AB was dropped when its own filter didn't take it.** The prototype rendered part p's slots for the other filter when the *other* part crossed into it (`crossing[other]`), where it meant part p crossing (`crossing[p]`). Two cases were affected:
+  - filter B on `--` with part B on filter A's AB (the pad);
+  - part B soloed out while it crosses into filter A.
+  
+  In both, B's slots were skipped and filter A got zeros for them. That contradicts the decision: Solo A still plays B1 through filter A. Stage 1 never compared that configuration against a render without skipping. Its mono table rendered the pad with the same skipping on both sides, so it never showed. The test "Solo silences the other part's filter output; a part crossing into the selected filter still sounds" fails on it (break 23 below).
+- **`canSkip()` waited on the noise mix's ramps on every slot.** A Volume or Pan change retargets those ramps, but only a Noise slot advances them. So a saw slot changed while it sounded could never be skipped again before the next `stop()`. That only lost skips, never changed the output. `canSkip()` also ignored a voice fading out, whose gain ramp `skip()` wouldn't advance. Both are fixed: a slot checks the ramps it renders with. The slot test found the first, and break 12 below the second.
+- **A slot's skip could start anywhere in a segment.** The prototype decided each slot's skip per drift run inside a chunk, so a slot whose gain settled at 0 mid-segment started its skip where the next chunk began, which follows the host's blocks. The skip is exact while it lasts, but the band-limiting residual the jump leaves at the return depends on where the skip began. Stage 1's flawed `canSkip()` hid this: a saw changed while sounding was never skipped. Once that was fixed, the report's real-time table fell to 4 of 32 at host blocks 1 and 37. Now a slot's skip starts only at a grid point, under every timing, and can only end mid-segment. The table is back to stage 1's figures, except "clear + slots + mono, per chunk": 0 of 4 then, 2 of 4 now. Per chunk still depends on the host's blocks, through the filter's skip. The per-segment test caught it once B1's Volume went to 0 and back in it (break 37).
+
+A related reading, from the "as it was" test: the allocator counts its check points per record and resets them at a steal, so after a steal they no longer fall on the voice's own grid. A voice whose envelopes have just gone idle can reach its own grid point, and be planned as silent with its slots skipped, before the allocator frees it. The noise generator carries on across `stop()`. So a `skip()` that didn't make the noise's draws would change that voice's next note (break 7).
+
+Task 4's stage-2 test ([mix_test.cpp](../../tests/dsp/voice/mix_test.cpp)) drove Mix to −2…0 in its busy sequence. At Mix 0 the voice now freezes the part's fed filter, as decided, which task 4's prototype doesn't, so that sequence now stays at 0.5 and above (still past the top). Mix at and below 0 is covered here, against task 5's prototype: the busy sequence below takes Mix B to −3.
+
+### Tests
+
+[solo_test.cpp](../../tests/dsp/voice/solo_test.cpp), tagged `[part-solo]`, has 19 test cases, and [keytrack_include_order_test.cpp](../../tests/dsp/filters/keytrack_include_order_test.cpp) has one more. They use [solo_library_engine.hpp](../../tests/dsp/voice/solo_library_engine.hpp), which holds `LibrarySoloEngine` (the prototype's `SoloEngine` with `dsp::Voice` and `PartSolo` in place of the prototype) and the prototype's decided switches.
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| The voice against the prototype | `VoiceAllocator<dsp::Voice>` with `PartSolo` against `SoloEngine` as decided, at host blocks of 1, 37 and 4096, over 11 scenarios. A busy sequence (steals at Polyphony 4, Mix B to −3 and back, Solo on, Part select, Solo off, B1's Volume to 0 and back, a Pan move that leaves the mono path) on the init patch, two parts, crossing, pad, Noise, and the worst case centred and spread. Mix B 0 from the note-on and back on the resonant patch. Solo A from the note-on, Part select, Solo off on the crossing patch. An envelope held at sustain 0, then a retrigger in place, on own filters and crossing | bit for bit; 0 allocations from `prepare()` on |
+| As it was | with `VoiceKnobs::solo` null, against the prototype with nothing switched on (`dsp::Voice` before stage 2) on six patches with Mix moving, at host blocks of 37 and 4096 | bit for bit: only exact skips and the mono path apply |
+| A null Solo ramp is 1 | Solo's ramps at 1 against none, three patches | bit for bit |
+| Each exact skip | against the prototype with nothing skipped: the init patch, B1 at Volume 0, every oscillator at Voices 0, a crossing part held at sustain 0, Mix B 0 throughout, B soloed out throughout, A soloed out on the crossing patch | bit for bit |
+| The frozen skip | identical up to the return. After it, the difference's RMS over 50 ms and its last differing sample against stage 1's: Mix B dipping to 0 (−64.0 dB, 208 samples), resonant (−39.4, 1,622), Solo off (−68.4, 207), a retrigger after a sustain-0 hold (−36.6, 76), B1 back from Volume 0 (−82.4, 122). And one measured here: both filters bypassed, B soloed out, then Solo off (−78.9 dB, 63 samples: only the slot's phase jump, for the kernel's length) | ±1 dB and ±25% of the samples. The figures are deterministic on one compiler; another's contraction moves the rounding by an ulp, which moves these by hundredths of a dB and the last sub-ulp sample by a few. Two-sided, so a skip that didn't happen (far below) fails as well as a state that came back wrong (far above) |
+| `LadderFilter::skip()` at rest | at splits of 1, 5, 31, 32, 33, 100 and 700 samples, with every ramp moving (cutoff, its modulation, resonance and its modulation, drive, the response), against `process()` on zeros; then both filter the same signal | bit for bit, both at rest |
+| `skip()` keeps the state | skipped by whole segments with the ramps settled, against not skipped at all; and against a filter that solved the zeros | bit for bit; differs |
+| `copyChannel()` | after it, equal inputs give equal outputs; an index past the last clamps | bit for bit |
+| The slot's phase | after `skip(n)` of 1, 63, 64, 1,000 and 480,000 samples on 8 unison voices, `nextPhase()` against rendering n. Then the outputs from sample 64 on (the kernel's length) | exact; bit for bit after 64 samples |
+| A note per sample | `skip(notes)` through a glide, against rendering it; the jump at `setVoices()` too | exact |
+| Noise | the draws after `skip()` at Volume 1 and 0, against rendering | bit for bit |
+| `isSilent()`, `isCentred()`, `canSkip()` | silent only when settled at 0 (a 10 ms ramp: not at 479 samples, at 480); Voices 0 faded out; Noise at Volume 0; centred at Pan 0 and Stereo 0, inverted, one voice at Stereo 1; not while the gains move back to the centre; never for Noise; `canSkip()` false while a gain or a fading voice's gain moves | exact |
+| `PartSolo` | each gain against a 10 ms `LinearSmoother` at every sample: Solo on; Part select mid-ramp, both crossing from where they are; Solo off. Part select with Solo off. The clamp. `setImmediately()`. `prepare()` | exact (0 ULP) |
+| Solo in the voice | bypassed sines; Solo on, Part select before B's gain reaches 0, Solo off before A's does. The output against each part's own render times its ramp, at every sample | 3 roundings of a sum under 0.4 (7.2e-8): one per product and one for the sum |
+| What Solo silences | crossing patch: Solo A is Mix B at 0, to the bit, and still has B1 in it (it differs from B1 at Voices 0, and is louder). Solo B is Mix A at 0 | bit for bit |
+| Per segment | Mix B's ramp landing mid-segment, Solo on, Part select, Solo off, B1's Volume to 0 and back, on three patches. Host blocks of 1, 2, 3, 7, 31, 33, 37 and 64 against 4096. Sensitivity check: the prototype deciding per chunk differs at 37 | bit for bit |
+| A call mid-segment ends a skip | Solo off 7 samples into a segment: B is heard from the next sample, not at the next grid point | the first difference within 3 samples |
+| An envelope held at 0 | on `dsp::Voice` directly: env B held at sustain 0, then Sustain raised to 0.7 mid-segment. B is heard from there (the level ramps up from 0 in the sustain stage) | the first difference within 3 samples; louder by 1.5× after |
+| The mono path | the init patch, the worst case centred and a pad on filter A, at filter input levels 1 and 2.5, host blocks of 37 and 4096, with a Pan move mid-note. The reference never takes the mono path: B1 panned at 0.3 on a part nothing hears. Also a note-on on the sounding voice (Polyphony 1) after the Pan has come back to the centre, where the filters' two channels no longer hold the same state. Taken on centred patches with left equal to right; not on spread or Noise; left at a Pan move and not taken again when the Pan comes back | bit for bit |
+| `keytrack.hpp` after `pitch.hpp` | it compiles; the third argument is the reference | exact |
+
+**Red first**, against inert headers with the decided interface (`skip()` and `copyChannel()` doing nothing, the slot never silent, centred or skippable, `PartSolo` ramps that never move, the voice ignoring `VoiceKnobs::solo`): 14 of the 18 test cases written then failed, and the include-order file didn't compile. (The envelope test, the 19th, came later, from the breaks.) Four passed:
+
+- "as it was" and "a null Solo ramp is 1", rightly: both are non-regression tests, true of the old voice by design;
+- "per segment", rightly: a voice that skips nothing doesn't depend on the host's blocks either. Its sensitivity check (the per-chunk prototype differs) is what keeps it from being vacuous;
+- "`skip()` keeps the state", because an inert `skip()` does keep it. It was strengthened to require that the continuation differs from a filter that solved the skipped zeros, so a `skip()` that solves (or clears) fails it.
+
+Then 38 deliberate breaks of the new code, each a one-line change, with every test case in `[part-solo]` run against it ([solo_test.cpp](../../tests/dsp/voice/solo_test.cpp)):
+
+- **The filter:** `skip()` not advancing the ramps, not taking its grid points, or clearing the state; `copyChannel()` the wrong way.
+- **The slot:** the phase frozen through a skip; `skip(notes)` holding the first note's pitch; the noise's draws not made; no jump at `noteOn()`; a jump to the skipped steps alone; `isSilent()` true on a ramp to 0; `isCentred()` reading only the targets; Noise centred; `canSkip()` ignoring a fading voice (stage 1's).
+- **The voice:** the test per chunk; a skip never ended mid-segment; a slot's skip starting mid-segment; an envelope silent at level 0 in any stage, or in sustain whatever its sustain; Mix's bound from the ramp's first end; Solo's from its last; Solo not multiplied in, read a sample ahead, or a constant one applied only when it is 1; a part's slots rendered for the other part's crossing (stage 1's); a crossing part added at envelope 0, or dropped while it sounds; the mono path re-entered at a note-on on a sounding voice, left without `copyChannel()`, or its output a product rounded once; no freeze; no exact skip of a filter at rest; the output stage run at gain 0; slots never skipped; a silent slot rendered.
+- **`PartSolo`:** Part select under Solo ignored; `setImmediately()` ramping; 20 ms ramps; the selected part unclamped.
+
+The first pass ran the other 37 and caught 32. (Break 37, a slot's skip starting mid-segment, was added after the third flaw above.) Two didn't compile under `-Werror` (an unused argument): they were rewritten, and then caught. Three survived:
+
+- **An envelope at level 0 in sustain counted as silent whatever its sustain.** No test raised Sustain while a part was held at 0, and with this break that part never comes back. The new envelope test catches it.
+- **The mono path re-entered at a note-on on a sounding voice.** No test stole a voice after its Pan came back to the centre. The mono test's steal sequence catches it.
+- **The output stage run at gain 0.** Alone that is exact. But it also counts a bypassed, soloed-out filter as heard, so its slots are rendered rather than skipped, and the phase jumps at the return disappear. No case had a bypassed part come back. The bypassed case in the frozen-skip test catches it: the difference falls to nothing.
+
+With those, 37 of the 38 are caught by the tests. The one left is **no exact skip of a filter at rest**. It must survive any output test: the skip is the same to the bit as running the filter. The `[solo]` benchmark catches it instead: with it the init patch costs 3,036.7 ns per sample for 16 voices, against 1,958.1 as built (+55%), filter B solving silence again.
+
+### Results, as built
+
+- **Bit for bit the stage-1 prototype as decided:** 33 of 33 in the tests (11 scenarios at three block sizes), and 69 of 69 in the report's new "As built" section. That section replays every sequence of the report that the library can play: the identity sequence, the 11 skip cases, the phase through a skip, the timing sequence, Solo's readings and clicks, the mono sequences at blocks 1/37/4096, and the real-time sequence. 0 allocations.
+- **The stage-1 report reproduces to the printed digit**, apart from the real-time cell above (clear + slots + mono per chunk: 2 of 4 against 0 of 4). That includes the prototype against the library with nothing switched on (12 of 12: the library's exact skips and mono path change nothing there) and every skip-case figure (the frozen returns at −64.0, −39.4, −68.4 and −36.6 dB).
+- **The earlier tests pass**, apart from task 4's busy sequence, which now keeps Mix above 0 (above).
+
+**CPU** (`tools/bench.sh "[solo]"`, `relwithdebinfo`, Apple M1 Ultra (virtualised), the median of three runs, spread 0.4–5.2%; one prototype row 26.9% from one slow run). 16 voices held (keys 40–55), ns per sample for all 16:
+
+| Case | `dsp::Voice` before stage 2 (stage 1's entry) | as built | per voice | change | the prototype as decided, this session |
+|---|---:|---:|---:|---:|---:|
+| init | 5,762.3 | **1,958.1** | 122.4 | −66.0% | 1,989.9 (atRest + slots + mono) |
+| filter B `--` | 3,807.2 | **1,948.4** | 121.8 | −48.8% | 1,946.7 |
+| Mix B 0 (two parts) | 7,574.8 | **1,960.7** | 122.5 | −74.1% | 2,002.0 |
+| B soloed out (two parts) | 7,375.0 (Solo as a gain alone, this session) | **1,973.0** | 123.3 | −73.2% | 3,820.4 (no mono) |
+| two parts sounding, centred | 7,569.0 | **3,831.6** | 239.5 | −49.4% | 3,882.7 |
+| worst, centred | 10,259.1 | **6,139.0** | 383.7 | −40.2% | 6,021.4 |
+| worst, spread (nothing to skip) | 10,139.9; the prototype with nothing skipped 10,037.0 this session | **9,906.7** | 619.2 | within noise | 10,085.6 |
+| every oscillator at Voices 0 | 0.1 | 0.1 | | (freed at once) | 0.1 |
+
+- **As built is the decided prototype's cost**, within noise in every row.
+- **The init patch costs a third of what it did** (360 → 122 ns per voice): filter B's exact skip and the mono path. A part at Mix 0, or soloed out, now costs nothing beyond the init patch (the voice is centred, so the mono path applies too).
+- **Where nothing can be skipped, the plan costs nothing measurable** (worst, spread: as built 9,906.7 against 10,037.0 for the prototype with nothing skipped).
+
+**Memory:** `dsp::Voice` gains a few flags (the mono path, a gain test and a skip flag per part and per slot). Each `OscillatorSlot` gains 8 pending phase sums (32 bytes). `PartSolo` is two smoothers.
 
 ## References
 

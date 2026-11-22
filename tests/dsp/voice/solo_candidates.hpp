@@ -51,11 +51,6 @@
 
 #pragma once
 
-// keytrack.hpp before anything that includes math/pitch.hpp: its parameter
-// `referenceNote` shadows dsp::referenceNote (-Wshadow) when pitch.hpp comes
-// first (a latent warning in the library, recorded for stage 2).
-#include <anoesis/dsp/filters/keytrack.hpp>
-
 #include "skip_ladder_filter.hpp"
 #include "skip_oscillator_slot.hpp"
 
@@ -64,6 +59,7 @@
 #include <anoesis/dsp/core/audio_block.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
 #include <anoesis/dsp/filters/filter_control.hpp>
+#include <anoesis/dsp/filters/keytrack.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
 #include <anoesis/dsp/voice/glide.hpp>
@@ -373,6 +369,7 @@ public:
         skippedForGain = {};
         silentRun = {};
         segmentSilent = {};
+        slotSkipping = {};
         counters = {};
     }
 
@@ -413,6 +410,7 @@ public:
         skippedForGain = {};
         silentRun = {};
         segmentSilent = {};
+        slotSkipping = {};
         gridPosition = 0;
         mono = context->mono && allCentred();
     }
@@ -853,13 +851,17 @@ private:
             plan.skip[f] = skipFilter;
         }
         // The slots: rendered for a running filter (or a bypassed one that is
-        // heard), skipped otherwise (when allowed), as built when not.
+        // heard), skipped otherwise (when allowed), as built when not. Part p
+        // is taken by the other filter when it crosses into it: crossing[p].
+        // (Stage 1 read crossing[other] here, so a part on AB whose own
+        // filter didn't take it, filter B on "--" or soloed out, was skipped
+        // and the other filter got zeros for it; stage 2 found and fixed it.)
         for (std::size_t p = 0; p < partCount; ++p)
         {
             const std::size_t other = 1 - p;
             const bool ownTakes = routes[p].active && (plan.run[p] || (filters[p].isBypassed() && plan.output[p]));
             const bool otherTakes =
-                plan.crossing[other] && (plan.run[other] || (filters[other].isBypassed() && plan.output[other]));
+                plan.crossing[p] && (plan.run[other] || (filters[other].isBypassed() && plan.output[other]));
             plan.render[p] = context->skipOscillators ? (ownTakes || otherTakes) : heard[p];
         }
         return plan;
@@ -910,6 +912,22 @@ private:
                 parts[q].clear();
             }
         }
+        // A slot's skip starts only at a grid point, under every timing, and
+        // mid-segment can only end. (Stage 1 decided it per drift run within
+        // the chunk; that only showed once stage 2 let a saw be skipped after
+        // a Volume change while it sounded, when the skip's start, and so
+        // the residual its phase's jump leaves at the return, followed the
+        // host's blocks.)
+        for (std::size_t q = 0; q < partCount; ++q)
+        {
+            for (std::size_t s = 0; s < slotsPerPart; ++s)
+            {
+                const auto index = (q * slotsPerPart) + s;
+                const auto& slot = slots[index];
+                const bool skippable = context->skipOscillators && (!p.render[q] || slot.isSilent()) && slot.canSkip();
+                slotSkipping[index] = skippable && (gridPosition == 0 || slotSkipping[index]);
+            }
+        }
         pitchDrift.process(length,
                            [&](std::size_t start, std::size_t run, float offset) noexcept
                            {
@@ -935,9 +953,7 @@ private:
                                            continue;
                                        }
                                        counters.slotSamples += run;
-                                       const bool skipSlot = context->skipOscillators &&
-                                                             (!p.render[q] || slot.isSilent()) && slot.canSkip();
-                                       if (skipSlot)
+                                       if (slotSkipping[(q * slotsPerPart) + s])
                                        {
                                            counters.slotSkipped += run;
                                            if (moving)
@@ -1201,6 +1217,7 @@ private:
     std::array<bool, partCount> segmentSilent{};
     std::array<bool, partCount> noteOnSilent{};
     std::array<bool, partCount> rendered{};
+    std::array<bool, slotCount> slotSkipping{};
     SkipStats counters;
 };
 
