@@ -16,6 +16,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/modulation_routes_benchmark.cpp
     benchmarks/oscillator_benchmark.cpp
     benchmarks/solo_benchmark.cpp
+    benchmarks/source_benchmark.cpp
     benchmarks/tempo_sync_benchmark.cpp
     benchmarks/voice_allocation_benchmark.cpp
     benchmarks/voice_benchmark.cpp
@@ -56,6 +57,8 @@ add_executable(anoesis_dsp_tests
     modulation/registry_test.cpp
     modulation/route_compiler_test.cpp
     modulation/routing_test.cpp
+    modulation/source_candidates_test.cpp
+    modulation/source_report.cpp
     modulation/source_bound_test.cpp
     oscillators/antialiasing_report.cpp
     oscillators/band_limited_oscillator_test.cpp

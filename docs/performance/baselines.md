@@ -6,6 +6,33 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.5 the sources, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[sources]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.8–6.6%; one run of "16 routes, buffered, moving" in an earlier set was 672 ns from a host stall and isn't used).
+- **What is measured** ([modulation-sources.md](../dsp/modulation-sources.md#what-they-measured)): one voice held at the init patch (A1 one saw, A3, past the attacks), `dsp::Voice` and the stage-1 `SourceVoice` (tests/dsp/modulation/source_candidates.hpp). 4 routes: Mod Env 1 → Pitch A, LFO 1 → Mix A, Velocity → Mix A, ModWheel → Pitch A. 16 routes: every slot, every source, into Pitch, Mix, Cutoff and LFO 2 Gain. *Moving*: the wheel and pressure get a new value every block (a 5 ms ramp).
+
+| Benchmark: one voice (ns / sample) | value |
+|---|---:|
+| `dsp::Voice`, init | 128.7 |
+| `dsp::Voice`, init, filter B on `--` | 128.2 |
+| `SourceVoice`, no routes, sources run only while used | 128.7 |
+| `SourceVoice`, no routes, every source always (sustains, sine and triangle LFOs) | 131.0 |
+| `SourceVoice`, no routes, envelopes in a 10 s attack, Lorenz LFOs: used only / always | 128.2 / 132.2 |
+| 4 routes: buffered / inline / folded | 145.3 / 158.7 / 140.6 |
+| 16 routes: buffered / inline / folded | 177.3 / 197.8 / 162.2 |
+| 4 routes, controllers moving: buffered / inline / folded | 144.7 / 157.2 / 141.7 |
+| 16 routes, controllers moving: buffered / inline / folded | 178.9 / 197.8 / 167.4 |
+| 4 routes, folded, every source always | 140.1 |
+| filter B on `--`, its amp envelope always run / run only as a source | 125.9 / 128.0 |
+
+### Observations
+
+- **No routes costs nothing**: 128.7 against `dsp::Voice`'s 128.7. Running both mod envelopes and both LFOs anyway costs 2.3–4.0 ns per voice (1.8–3.1%).
+- **Folded is the cheapest delivery**: +11.9 ns per voice for 4 routes and +33.5 for 16, against buffered's +16.6 / +48.6 and inline's +30.0 / +69.1.
+- **An unheard part's amp envelope** costs nothing measurable to keep running.
+
+---
+
 ## 2026-11-22: M1.5 the modulation model, as built
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[modulation]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.6–6%, except accumulate with 4 routes, 18% from one fast run).
