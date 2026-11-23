@@ -6,7 +6,7 @@ Modulation moves a control over time without anyone turning its knob. A source (
 - **Sylenth1** (task 1): what is known about its sources, destinations and amounts, and what that means for the build.
 - **The model** (task 2): the candidates for the registries, the routing, each destination's rate, the order through cycles, a per-voice source on a global destination, and each source's bound; what they measured; the recommendations; and the project owner's decision (every recommendation, 2026-11-22).
 
-Task 2's stage 2 built the model in `libs/dsp` ([as built](#as-built-the-model)). Task 3, the sources, has its own page: [modulation-sources.md](modulation-sources.md) (stage 1: the evidence, the candidates measured, and the recommendations). Tasks 4–5 will add theirs.
+Task 2's stage 2 built the model in `libs/dsp` ([as built](#as-built-the-model)). Task 3, the sources, has its own page: [modulation-sources.md](modulation-sources.md). So does task 4, the per-voice destinations: [modulation-destinations.md](modulation-destinations.md) (stage 1: the evidence, the candidates measured, and the recommendations). Task 5 will add its own.
 
 Read [lfos.md](lfos.md) and [envelopes.md](envelopes.md) (the sources), [keytracking.md](keytracking.md) (the keytrack source), [filter-control.md](filter-control.md) (the first destination built with modulation inputs, and the clamp), [mixer.md](mixer.md) (Mix, a destination applied per sample), and [part-solo-and-skipping.md](part-solo-and-skipping.md) (why each source must bound its value) first.
 

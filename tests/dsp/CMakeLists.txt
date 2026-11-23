@@ -2,6 +2,7 @@
 add_executable(anoesis_dsp_tests
     library_test.cpp
     benchmarks/amp_link_benchmark.cpp
+    benchmarks/destination_benchmark.cpp
     benchmarks/foundations_benchmark.cpp
     benchmarks/drift_benchmark.cpp
     benchmarks/envelope_benchmark.cpp
@@ -50,6 +51,8 @@ add_executable(anoesis_dsp_tests
     math/pitch_test.cpp
     math/random_test.cpp
     modulation/controller_ramp_test.cpp
+    modulation/destination_candidates_test.cpp
+    modulation/destination_report.cpp
     modulation/modulation_report.cpp
     modulation/modulation_test.cpp
     modulation/registry_size_functions.cpp

@@ -6,6 +6,35 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-23: M1.5 the destinations, stage 1 (prototypes)
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[destinations]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 1.0–5.3%).
+- **What is measured** ([modulation-destinations.md](../dsp/modulation-destinations.md#cpu)): one voice held at the init patch (A1 one saw, A3, past the attacks), `dsp::Voice` and the stage-1 `DestVoice` (tests/dsp/modulation/destination_voice.hpp), the knobs from the slot's own ramps unless stated. 4 routes into a destination: Mod Env 1, LFO 1, Velocity, ModWheel. 16: every slot, every source. *Every destination*: two routes each to Volume, Pan and Phase, and Pitch, Mix, Cutoff, Reso and the LFOs. *A change at every grid point*: slot 0's amount set anew every 32 samples. 16 voices: question 4's pluck patch (B1 at Volume 0 lifted by Mod Env 1, decay 50 ms, sustain 0), 16 notes held past the plucks.
+
+| Benchmark: one voice (ns / sample) | value |
+|---|---:|
+| `dsp::Voice`, no routes | 128.9 |
+| `DestVoice`, no routes | 131.4 |
+| Volume A: 4 / 16 routes | 143.3 / 153.8 |
+| Phase A: 4 / 16 routes | 138.1 / 146.1 |
+| Pan A: 4 / 16 routes | 250.9 / 254.8 |
+| Volume A, 4 routes, knobs (a) targets / (b) the slot's ramps / (c) global ramps | 143.5 / 144.7 / 145.6 |
+| 16 routes, every destination | 259.8 |
+| 16 routes, a change at every grid point: step / crossfade 10 ms | 268.5 / 282.8 |
+| 16 routes, no change, crossfade 10 ms | 259.2 |
+| Noise: no routes / Volume A, 4 routes, ignored / mixed | 272.1 / 272.2 / 283.5 |
+| 4 × 8 unison: no routes / Volume AB, 4 routes / Pan AB, 4 routes | 655.8 / 741.0 / 720.4 |
+| 16 voices, pluck patch: skip never / from the routes' bound | 3,235.1 / 2,083.6 |
+
+### Observations
+
+- **Volume and Phase are cheap** (+12–22 and +7–15 ns per voice); **Pan costs leaving the mono path** (about 120 ns), as in task 2.
+- **A 10 ms crossfade of the routes costs nothing while nothing changes**, and +14.3 ns per voice (+5.3%) while one always runs.
+- **The Volume skip test from the routes' bound saves 36%** on 16 voices of the pluck patch.
+- **The prototype with no routes is +2.5 ns over `dsp::Voice`** (its knob and presence ramps advanced on the unmodulated path). Stage 2 advances them lazily.
+
+---
+
 ## 2026-11-23: M1.5 the sources, as built
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-sources]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.3–4.4%).
