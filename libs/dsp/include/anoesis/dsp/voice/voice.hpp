@@ -19,6 +19,7 @@
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
+#include <anoesis/dsp/oscillators/slot_modulation.hpp>
 #include <anoesis/dsp/voice/glide.hpp>
 #include <anoesis/dsp/voice/mix_law.hpp>
 #include <anoesis/dsp/voice/pitch_bend.hpp>
@@ -165,8 +166,28 @@
 ///     its parts, the glide's ends plus the bend's) feeds
 ///     mixModulationBound().
 ///   With no routes nothing runs and nothing is summed, so the init patch is
-///   the voice as it was, to the bit. Volume, Pan and Phase routes compile
-///   and are ignored until M1.5 task 4.
+///   the voice as it was, to the bit.
+///
+/// - The per-voice destinations (M1.5 task 4, docs/dsp/
+///   modulation-destinations.md):
+///   - Volume and Phase join Pitch and Mix in the folded per-sample sums; Pan
+///     is ramped on the grid, from the previous grid point's sum to this
+///     one's. Each slot of a part takes them through its SlotModulation
+///     (OscillatorSlot: its own knob ramps, Volume and Pan clamped to
+///     [0, 10], Phase wrapping), and a part with none of them takes the
+///     slots' plain calls, so the init patch costs what it did.
+///   - Any change of the routes at a grid point (an amount, a destination, a
+///     source) crossfades every sum from the old routes' to the new ones'
+///     over routeCrossfadeSegments() segments (10 ms), per sample for Pitch,
+///     Mix, Volume and Phase and at each grid point for the rest; the old
+///     routes' sources run until it ends, a further change waits for its
+///     end, and each bound is the larger of the two. A note-on from silence
+///     compiles at once.
+///   - A note from silence starts each slot at Phase plus its part's Phase
+///     sum there (the slots' note-on comes after the sources'); a slot with
+///     no voice sounding still follows its Phase sum (trackPhase()).
+///   - The skip test takes each part's Volume bound (modulationBound()); a
+///     Pan route takes its part off the mono path.
 ///
 /// Rendering runs in chunks that stop at the grid (at most 32 samples): the
 /// plan for the chunk (what runs, what is skipped); both amp envelopes, the
@@ -348,6 +369,7 @@ public:
             l.prepare(spec);
         }
         pitchDrift.prepare(spec);
+        fadeSegments = modulation::routeCrossfadeSegments(spec.sampleRate);
         glide.prepare(spec.sampleRate);
         velocityRamp.prepare(spec.sampleRate);
         reset();
@@ -396,6 +418,10 @@ public:
         lfoLast = {};
         segmentBegun = false;
         keyHeld = false;
+        fading = false;
+        fadeIndex = 0;
+        panBefore = {};
+        panNow = {};
     }
 
     /// A note-on before the next process() call, with the knobs positioned at
@@ -433,10 +459,6 @@ public:
             velocityRamp.jump(start.velocity);
         }
         played = true;
-        for (auto& s : slots)
-        {
-            s.noteOn();
-        }
         pitchDrift.noteOn();
         for (auto& e : envelopes)
         {
@@ -444,6 +466,17 @@ public:
         }
         keyHeld = true;
         sourcesNoteOn(knobs, sounding);
+        // The slots after the sources (nothing either computes depends on
+        // the other), so that a note from silence starts at Phase plus the
+        // Phase sum as it stands at the note-on.
+        if (!sounding)
+        {
+            phaseOffsetsAtNoteOn(knobs);
+        }
+        for (auto& s : slots)
+        {
+            s.noteOn();
+        }
         if (sounding)
         {
             return;
@@ -706,12 +739,87 @@ private:
     }
     [[nodiscard]] bool routesTo(Target t, std::size_t part) const noexcept
     {
-        return compiled().routesTo(t, part);
+        return compiled().routesTo(t, part) || (fading && fadeFrom.routesTo(t, part));
     }
-    /// A mod envelope or an LFO runs only while a route reads it.
+    /// A mod envelope or an LFO runs only while a route reads it (during a
+    /// crossfade, the old routes' too).
     [[nodiscard]] bool wanted(Source s) const noexcept
     {
-        return compiled().uses(s);
+        return compiled().uses(s) || (fading && fadeFrom.uses(s));
+    }
+    /// No route, old or new: nothing runs and nothing is summed.
+    [[nodiscard]] bool noRoutes() const noexcept
+    {
+        return compiled().empty() && !fading;
+    }
+
+    /// At a grid point (M1.5 task 4): a change of the patch starts a
+    /// crossfade from the routes in force over fadeSegments segments; while
+    /// one runs, the patch waits. At a note-on from silence it compiles at
+    /// once.
+    void updateRoutesAt(const SourceContext& context, bool atNoteOn) noexcept
+    {
+        if (fading)
+        {
+            ++fadeIndex;
+            if (fadeIndex < fadeSegments)
+            {
+                return;
+            }
+            fading = false;
+        }
+        const auto before = compiled();
+        const bool changed = compiler.update(patchOf(context));
+        if (changed && !atNoteOn)
+        {
+            fadeFrom = before;
+            fading = true;
+            fadeIndex = 0;
+        }
+    }
+
+    /// The crossfade's weight on the new routes at the segment's sample
+    /// `position` (1 when none runs): it reaches 1 on its last sample.
+    [[nodiscard]] float fadeWeight(std::size_t position) const noexcept
+    {
+        if (!fading)
+        {
+            return 1.0f;
+        }
+        const auto n = static_cast<float>(fadeSegments * gridSamples);
+        return static_cast<float>((fadeIndex * gridSamples) + position + 1) / n;
+    }
+
+    /// Each sum from the old routes' value to the new ones' by weight w,
+    /// each product in a statement of its own.
+    static void blend(modulation::Sums& sums, const modulation::Sums& old, float w) noexcept
+    {
+        for (std::size_t t = 0; t < modulation::targetCount; ++t)
+        {
+            for (std::size_t p = 0; p < partCount; ++p)
+            {
+                const float d = sums.values[t][p] - old.values[t][p];
+                const float dw = d * w;
+                sums.values[t][p] = old.values[t][p] + dw;
+            }
+        }
+    }
+
+    /// At a note-on from silence: each part's Phase sum as the sources stand
+    /// there, for its slots' onsets.
+    void phaseOffsetsAtNoteOn(const VoiceKnobs& knobs) noexcept
+    {
+        modulation::Sums sums{};
+        if (!compiled().empty())
+        {
+            modulation::SourceValues now{};
+            valuesNow(knobs, contextOf(knobs), 0, now);
+            modulation::accumulate(compiled(), now, sums);
+        }
+        for (std::size_t s = 0; s < slotCount; ++s)
+        {
+            slots[s].setPhaseOffset(sums.at(Target::phase, s / slotsPerPart));
+        }
     }
 
     void applyEnvelopeSettings(std::size_t k, const SourceContext& context) noexcept
@@ -746,6 +854,8 @@ private:
         {
             compiler.reset();
             compiler.update(patchOf(context));
+            fading = false;
+            fadeIndex = 0;
         }
         for (std::size_t k = 0; k < modEnvelopeCount; ++k)
         {
@@ -913,7 +1023,7 @@ private:
     void beginSegment(const VoiceKnobs& knobs, std::size_t done, bool atNoteOn) noexcept
     {
         const auto& context = contextOf(knobs);
-        compiler.update(patchOf(context));
+        updateRoutesAt(context, atNoteOn);
         for (std::size_t k = 0; k < modEnvelopeCount; ++k)
         {
             if (!sameSettings(context.modEnvelopes[k], appliedEnvelopes[k]))
@@ -944,15 +1054,22 @@ private:
         }
         segmentBegun = true;
         updatePerSample();
-        if (compiled().empty())
+        if (noRoutes())
         {
             gridSums = {}; // nothing reads a source: the exact 0s
+            updatePan(atNoteOn);
             return;
         }
         modulation::SourceValues now{};
         valuesNow(knobs, context, done, now);
         modulation::Sums sums{};
         modulation::accumulate(compiled(), now, sums);
+        if (fading)
+        {
+            modulation::Sums old{};
+            modulation::accumulate(fadeFrom, now, old);
+            blend(sums, old, static_cast<float>(fadeIndex + 1) / static_cast<float>(fadeSegments));
+        }
         for (std::size_t k = 0; k < lfoCount; ++k)
         {
             if (!live[index(lfoSource(k))])
@@ -970,6 +1087,27 @@ private:
             lfos[k].process(lfoWave[k]);
         }
         gridSums = sums;
+        updatePan(atNoteOn);
+    }
+
+    /// Pan ramped on the grid, a segment late: from the previous grid
+    /// point's sum to this one's (at a note-on from silence, this one's).
+    void updatePan(bool atNoteOn) noexcept
+    {
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            const float now = gridSums.at(Target::pan, p);
+            panBefore[p] = atNoteOn ? now : panNow[p];
+            panNow[p] = now;
+        }
+    }
+
+    /// Part p's Pan is modulated this segment: a route, or a sum still
+    /// returning to 0.
+    [[nodiscard]] bool panModulated(std::size_t p) const noexcept
+    {
+        return routesTo(Target::pan, p) || panBefore[p] < 0.0f || panBefore[p] > 0.0f || panNow[p] < 0.0f ||
+               panNow[p] > 0.0f;
     }
 
     /// The routes to the per-sample targets (Pitch, Mix), and the sources
@@ -977,17 +1115,31 @@ private:
     void updatePerSample() noexcept
     {
         perSample = {};
-        std::size_t count = 0;
-        for (const auto& r : compiled().live())
+        const auto collect = [this](const modulation::CompiledRoutes& from, modulation::CompiledRoutes& to)
         {
-            if (r.target == Target::pitch || r.target == Target::mix)
+            std::size_t count = 0;
+            for (const auto& r : from.live())
             {
-                perSample[index(r.source)] = true;
-                perSampleRoutes.routes[count] = r;
-                ++count;
+                if (isPerSample(r.target))
+                {
+                    perSample[index(r.source)] = true;
+                    to.routes[count] = r;
+                    ++count;
+                }
             }
+            to.count = count;
+        };
+        collect(compiled(), perSampleRoutes);
+        fadePerSampleRoutes.count = 0;
+        if (fading)
+        {
+            collect(fadeFrom, fadePerSampleRoutes);
         }
-        perSampleRoutes.count = count;
+    }
+
+    [[nodiscard]] static constexpr bool isPerSample(Target t) noexcept
+    {
+        return t == Target::pitch || t == Target::mix || t == Target::volume || t == Target::phase;
     }
 
     /// Source s at sample i of the chunk starting at the block's sample
@@ -1055,10 +1207,23 @@ private:
         }
     }
 
+    /// The per-sample targets' sums: Pitch, Mix, Volume, Phase.
+    static constexpr std::size_t perSampleTargetCount = 4;
     [[nodiscard]] static constexpr std::size_t sumIndex(Target t) noexcept
     {
-        return t == Target::pitch ? 0 : 1;
+        switch (t)
+        {
+        case Target::pitch:
+            return 0;
+        case Target::mix:
+            return 1;
+        case Target::volume:
+            return 2;
+        default:
+            return 3; // phase
+        }
     }
+    static constexpr std::array perSampleTargets{Target::pitch, Target::mix, Target::volume, Target::phase};
 
     /// The sources over the chunk: the mod envelopes run, the per-sample
     /// sums of Pitch and Mix, and the LFOs' values as they stand after it.
@@ -1072,17 +1237,21 @@ private:
                 modEnvelopes[k].process(std::span{modEnvelopeBuffers[k]}.first(length));
             }
         }
-        for (const auto t : {Target::pitch, Target::mix})
+        for (const auto t : perSampleTargets)
         {
             for (std::size_t p = 0; p < partCount; ++p)
             {
                 if (routesTo(t, p))
                 {
                     std::fill_n(sampleSums[sumIndex(t)][p].begin(), length, 0.0f);
+                    if (fading)
+                    {
+                        std::fill_n(fadeSums[sumIndex(t)][p].begin(), length, 0.0f);
+                    }
                 }
             }
         }
-        if (perSampleRoutes.count > 0)
+        if (perSampleRoutes.count > 0 || fadePerSampleRoutes.count > 0)
         {
             sumFolded(knobs, context, done, length);
         }
@@ -1133,7 +1302,42 @@ private:
             }
             src[s] = b.data();
         }
-        for (const auto& route : std::span{perSampleRoutes.routes}.first(perSampleRoutes.count))
+        addRoutes(perSampleRoutes, src, constant, length, sampleSums);
+        if (!fading)
+        {
+            return;
+        }
+        addRoutes(fadePerSampleRoutes, src, constant, length, fadeSums);
+        // The crossfade: each per-sample sum from the old routes' to the new
+        // ones', each product in a statement of its own.
+        for (const auto t : perSampleTargets)
+        {
+            for (std::size_t p = 0; p < partCount; ++p)
+            {
+                if (!routesTo(t, p))
+                {
+                    continue;
+                }
+                auto& dst = sampleSums[sumIndex(t)][p];
+                const auto& old = fadeSums[sumIndex(t)][p];
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    const float d = dst[i] - old[i];
+                    const float dw = d * fadeWeight(gridPosition + i);
+                    dst[i] = old[i] + dw;
+                }
+            }
+        }
+    }
+
+    using PerSampleSums = std::array<std::array<Chunk, partCount>, perSampleTargetCount>;
+
+    /// Each route's terms into its parts' sums in `sums`, in slot order.
+    static void addRoutes(const modulation::CompiledRoutes& list, const std::array<const float*, sourceCount>& src,
+                          const std::array<bool, sourceCount>& constant, std::size_t length,
+                          PerSampleSums& sums) noexcept
+    {
+        for (const auto& route : list.live())
         {
             const auto s = index(route.source);
             const float* values = src[s];
@@ -1143,7 +1347,7 @@ private:
                 {
                     continue;
                 }
-                auto& dst = sampleSums[sumIndex(route.target)][p];
+                auto& dst = sums[sumIndex(route.target)][p];
                 if (constant[s])
                 {
                     const float term = route.amount * values[0];
@@ -1300,13 +1504,22 @@ private:
         return false;
     }
 
-    /// Whether part p's slots can add anything this chunk.
-    [[nodiscard]] bool partProduces(std::size_t p) const noexcept
+    /// Whether part p's slots can add anything over the next `length`
+    /// samples (volumeBounds: each part's Volume bound there).
+    [[nodiscard]] bool partProduces(std::size_t p, std::size_t length) const noexcept
     {
         for (std::size_t s = 0; s < slotsPerPart; ++s)
         {
-            const auto& slot = slots[(p * slotsPerPart) + s];
-            if (slot.soundingVoices() > 0 && !slot.isSilent())
+            const auto index = (p * slotsPerPart) + s;
+            const auto& slot = slots[index];
+            if (slot.soundingVoices() == 0)
+            {
+                continue;
+            }
+            const bool silent = slotsModulated[p]
+                                    ? slot.isSilentUnder(slotModulation(index, 0, length), volumeBounds[p], length)
+                                    : slot.isSilent();
+            if (!silent)
             {
                 return true;
             }
@@ -1317,7 +1530,15 @@ private:
     /// Every sounding slot's left channel is its right, to the bit.
     [[nodiscard]] bool allCentred() const noexcept
     {
-        return std::ranges::all_of(slots, [](const Slot& s) { return s.soundingVoices() == 0 || s.isCentred(); });
+        for (std::size_t i = 0; i < slotCount; ++i)
+        {
+            const auto& s = slots[i];
+            if (s.soundingVoices() > 0 && (!s.isCentred() || panModulated(i / slotsPerPart)))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     void updateRoutes() noexcept
@@ -1440,20 +1661,68 @@ private:
     [[nodiscard]] float mixModulationBound(std::size_t part, const VoiceKnobs& knobs, std::size_t done,
                                            std::size_t length) const noexcept
     {
-        if (!routesTo(Target::mix, part))
+        return modulationBound(Target::mix, part, knobs, done, length);
+    }
+
+    /// An upper bound on target t's sum on part `part` over those samples:
+    /// each route's amount times its source's interval; during a crossfade
+    /// the larger of the old routes' and the new ones' (the sum lies between
+    /// them). Exactly 0 with no route to it.
+    [[nodiscard]] float modulationBound(Target t, std::size_t part, const VoiceKnobs& knobs, std::size_t done,
+                                        std::size_t length) const noexcept
+    {
+        if (!routesTo(t, part))
         {
             return 0.0f;
         }
         const auto& context = contextOf(knobs);
         modulation::SourceBounds bounds{};
-        for (const auto& r : compiled().live())
+        const auto take = [&](const modulation::CompiledRoutes& list)
         {
-            if (r.target == Target::mix)
+            for (const auto& r : list.live())
             {
-                bounds[index(r.source)] = boundOf(r.source, knobs, context, done, length);
+                if (r.target == t)
+                {
+                    bounds[index(r.source)] = boundOf(r.source, knobs, context, done, length);
+                }
             }
+        };
+        take(compiled());
+        float hi = modulation::targetBound(compiled(), t, part, bounds).hi;
+        if (fading)
+        {
+            take(fadeFrom);
+            hi = std::max(hi, modulation::targetBound(fadeFrom, t, part, bounds).hi);
         }
-        return modulation::targetBound(compiled(), Target::mix, part, bounds).hi;
+        return hi;
+    }
+
+    /// Slot `index`'s modulation for the samples [start, start + run) of the
+    /// chunk that starts at the block's sample `done`.
+    [[nodiscard]] SlotModulation slotModulation(std::size_t index, std::size_t start, std::size_t run) const noexcept
+    {
+        const std::size_t p = index / slotsPerPart;
+        SlotModulation m;
+        if (routesTo(Target::volume, p))
+        {
+            m.volume = std::span<const float>{sampleSums[2][p]}.subspan(start, run);
+        }
+        if (panModulated(p))
+        {
+            m.pan = true;
+            m.panBefore = panBefore[p];
+            m.panNow = panNow[p];
+        }
+        m.position = gridPosition + start;
+        m.segment = gridSamples;
+        // A route that goes crossfades its sum to exactly 0 on the
+        // crossfade's last sample, so the offset in force returns to 0 with
+        // it: nothing else is needed once the routes are gone.
+        if (routesTo(Target::phase, p))
+        {
+            m.phase = std::span<const float>{sampleSums[3][p]}.subspan(start, run);
+        }
+        return m;
     }
 
     /// Part p's Mix, knob plus modulation, can't be above the law's 0 over
@@ -1503,7 +1772,8 @@ private:
         std::array<bool, partCount> produces{};
         for (std::size_t p = 0; p < partCount; ++p)
         {
-            produces[p] = partProduces(p);
+            volumeBounds[p] = modulationBound(Target::volume, p, knobs, done, rest);
+            produces[p] = partProduces(p, rest);
             if (gridPosition == 0 || segmentSilent[p])
             {
                 segmentSilent[p] = gainSilent(p, knobs, done, rest);
@@ -1561,6 +1831,13 @@ private:
         const auto length = out.numSamples();
         leaveMonoIfMoved();
         const std::size_t channels = mono ? 1 : 2;
+        // A part with no Volume, Pan or Phase modulation takes the slots'
+        // plain calls: its SlotModulation would be empty, which is the same
+        // to the bit, and the bookkeeping would cost the init patch.
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            slotsModulated[p] = routesTo(Target::volume, p) || panModulated(p) || routesTo(Target::phase, p);
+        }
         const Plan plan = planChunk(knobs, done);
         const auto& context = contextOf(knobs);
 
@@ -1580,7 +1857,7 @@ private:
         {
             envelopes[p].process(std::span{envelopeBuffers[p]}.first(length));
         }
-        if (!compiled().empty())
+        if (!noRoutes())
         {
             renderSources(knobs, context, done, length);
         }
@@ -1632,7 +1909,20 @@ private:
             {
                 const auto index = (p * slotsPerPart) + s;
                 const auto& slot = slots[index];
-                const bool skippable = (!plan.render[p] || slot.isSilent()) && slot.canSkip();
+                bool silent = false;
+                bool canSkip = false;
+                if (slotsModulated[p])
+                {
+                    const auto m = slotModulation(index, 0, length);
+                    silent = slot.isSilentUnder(m, volumeBounds[p], gridSamples - gridPosition);
+                    canSkip = slot.canSkipUnder(m);
+                }
+                else
+                {
+                    silent = slot.isSilent();
+                    canSkip = slot.canSkip();
+                }
+                const bool skippable = (!plan.render[p] || silent) && canSkip;
                 slotSkipping[index] = skippable && (gridPosition == 0 || slotSkipping[index]);
             }
         }
@@ -1669,20 +1959,24 @@ private:
                                    const auto piece = parts[p].subBlock(start, run);
                                    for (std::size_t s = 0; s < slotsPerPart; ++s)
                                    {
-                                       auto& slot = slots[(p * slotsPerPart) + s];
+                                       const auto index = (p * slotsPerPart) + s;
+                                       auto& slot = slots[index];
+                                       const SlotModulation m =
+                                           slotsModulated[p] ? slotModulation(index, start, run) : SlotModulation{};
                                        if (slot.soundingVoices() == 0)
                                        {
+                                           slot.trackPhase(m);
                                            continue;
                                        }
-                                       if (slotSkipping[(p * slotsPerPart) + s])
+                                       if (slotSkipping[index])
                                        {
                                            if (perSampleNotes)
                                            {
-                                               slot.skip(partNotes);
+                                               slot.skip(partNotes, m);
                                            }
                                            else
                                            {
-                                               slot.skip(run, steadyPitch + offset);
+                                               slot.skip(run, steadyPitch + offset, m);
                                            }
                                            continue;
                                        }
@@ -1693,11 +1987,11 @@ private:
                                        }
                                        if (perSampleNotes)
                                        {
-                                           slot.process(piece, partNotes);
+                                           slot.process(piece, partNotes, m);
                                        }
                                        else
                                        {
-                                           slot.process(piece, steadyPitch + offset);
+                                           slot.process(piece, steadyPitch + offset, m);
                                        }
                                    }
                                }
@@ -1920,14 +2214,26 @@ private:
     std::array<float, lfoCount> lfoLast{}; ///< each LFO's latest value as a source
     std::array<bool, sourceCount> live{};  ///< a mod envelope or LFO running
     std::array<bool, sourceCount> perSample{};
-    modulation::CompiledRoutes perSampleRoutes{};             ///< the routes to Pitch and Mix
-    std::array<Chunk, sourceCount> sourceBuffers{};           ///< a moving source's values over the chunk
-    std::array<std::array<Chunk, partCount>, 2> sampleSums{}; ///< Pitch, Mix: each part's per-sample sum
-    std::array<Chunk, partCount> partNoteBuffers{};           ///< each part's notes while its Pitch is routed
-    modulation::Sums gridSums{};                              ///< the sums at the grid point
+    modulation::CompiledRoutes perSampleRoutes{};   ///< the routes to Pitch and Mix
+    std::array<Chunk, sourceCount> sourceBuffers{}; ///< a moving source's values over the chunk
+    PerSampleSums sampleSums{};                     ///< Pitch, Mix, Volume, Phase: each part's per-sample sum
+    std::array<Chunk, partCount> partNoteBuffers{}; ///< each part's notes while its Pitch is routed
+    modulation::Sums gridSums{};                    ///< the sums at the grid point
     bool segmentBegun = false;
     bool keyHeld = false;
     modulation::SourceObserver* observer = nullptr;
+
+    // The per-voice destinations (M1.5 task 4).
+    std::array<float, partCount> panBefore{}; ///< Pan's sum at the previous grid point
+    std::array<float, partCount> panNow{};    ///< ... and at this one
+    std::array<float, partCount> volumeBounds{};
+    std::array<bool, partCount> slotsModulated{};     ///< a part's slots take Volume, Pan or Phase modulation
+    modulation::CompiledRoutes fadeFrom{};            ///< the routes a crossfade leaves
+    modulation::CompiledRoutes fadePerSampleRoutes{}; ///< ... to the per-sample targets
+    PerSampleSums fadeSums{};
+    bool fading = false;
+    std::size_t fadeIndex = 0;    ///< the crossfade's segments done
+    std::size_t fadeSegments = 1; ///< its length (routeCrossfadeSegments())
 };
 
 } // namespace anoesis::dsp

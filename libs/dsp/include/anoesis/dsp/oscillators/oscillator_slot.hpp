@@ -13,7 +13,9 @@
 #include <anoesis/dsp/math/random.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>
+#include <anoesis/dsp/oscillators/slot_modulation.hpp>
 #include <anoesis/dsp/oscillators/unison.hpp>
+#include <anoesis/dsp/oscillators/volume_law.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 
 #include <algorithm>
@@ -82,6 +84,31 @@ namespace anoesis::dsp
 /// jumps there with MinBlepOscillator::jumpTo(), band-limited, so a
 /// free-running phase carries on unheard.
 ///
+/// Modulation (M1.5 task 4, docs/dsp/modulation-destinations.md): the
+/// process() and skip() overloads that take a SlotModulation, the voice's
+/// sums for the call in knob units.
+///
+/// - Volume per sample: the slot's own Volume ramp (10 ms, knob units,
+///   started where the gain ramps start) plus its sum, through volumeLaw
+///   (clamped to [0, 10], linear), signed by Inv.
+/// - Pan on the grid: the slot's own Pan ramp plus the sum at the segment's
+///   two grid points, clamped to [0, 10], each voice's equal-power gains
+///   there, interpolated.
+/// - While either is modulated, each voice's gains are computed here, times
+///   its presence (a ramp that fades a voice in and out as setVoices() does);
+///   its gain ramps are moved on with StereoGain::skip(), so the slot can
+///   leave that path at any grid point exactly where the plain one stands.
+/// - Phase per sample: a running offset, its change folded into each
+///   sample's phase step, a band-limited jump where that would leave [0,
+///   Nyquist); a retrigger lands at Phase plus the offset in force, a note
+///   from silence at Phase plus setPhaseOffset()'s; skip() carries it, and
+///   trackPhase() follows it while no voice sounds.
+/// - Noise: the mix at unit volume from the pan positions at the grid points,
+///   interpolated, times the volume per sample; two draws per sample while a
+///   voice's presence is above 0.
+/// - The knob and presence ramps are advanced lazily (catchUp()): the plain
+///   path only counts its samples, so it costs what it did.
+///
 /// Satisfies Preparable. No allocation: fixed capacity for 8 voices, the
 /// table is shared, and the mono signal goes through a small buffer on the
 /// stack. About 5 KB at 64 taps.
@@ -109,12 +136,29 @@ public:
             gains[v].setGain(0.0f);
             gains[v].reset();
         }
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            presence[v].setRampTime(StereoGain::defaultRampSeconds);
+            presence[v].setCurrentAndTarget(v < count ? 1.0f : 0.0f);
+        }
+        volumeKnob.setRampTime(StereoGain::defaultRampSeconds);
+        panKnob.setRampTime(StereoGain::defaultRampSeconds);
+        volumeKnob.setCurrentAndTarget(volumeLaw.unity);
+        panKnob.setCurrentAndTarget(panCentre);
         noise.setSeed(noiseSeedSalt);
         updateNoiseMix();
     }
 
     void prepare(const ProcessSpec& spec) noexcept
     {
+        sampleRate = spec.sampleRate;
+        for (auto& p : presence)
+        {
+            p.prepare(spec);
+        }
+        volumeKnob.prepare(spec);
+        panKnob.prepare(spec);
+        lagging = 0;
         for (auto& oscillator : oscillators)
         {
             oscillator.prepare(spec);
@@ -152,11 +196,17 @@ public:
         {
             oscillators[v].reset();
             gains[v].reset();
+            presence[v].reset();
         }
         for (auto& ramp : mixRamps)
         {
             ramp.reset();
         }
+        volumeKnob.reset();
+        panKnob.reset();
+        lagging = 0;
+        panCached = false;
+        appliedPhase = 0;
         noteHeld = false;
         running = false;
         pending = {};
@@ -201,6 +251,7 @@ public:
             return;
         }
         resume();
+        catchUp();
         count = newCount;
         for (std::size_t v = 0; v < maxUnisonVoices; ++v)
         {
@@ -219,15 +270,18 @@ public:
                 states[v] = VoiceState::on;
                 gains[v].setGain(volume);
                 gains[v].setInverted(inverted);
+                presence[v].setTarget(1.0f);
             }
             else if (v >= count && states[v] == VoiceState::on)
             {
                 gains[v].setGain(0.0f);
+                presence[v].setTarget(0.0f);
                 states[v] = running ? VoiceState::fading : VoiceState::off;
                 if (!running)
                 {
                     oscillators[v].reset();
                     gains[v].reset();
+                    presence[v].reset();
                 }
             }
         }
@@ -333,7 +387,9 @@ public:
     /// (inventory O4).
     void setVolume(float linearGain) noexcept
     {
+        catchUp();
         volume = linearGain;
+        volumeKnob.setTarget(linearGain * volumeLaw.unity);
         for (std::size_t v = 0; v < count; ++v)
         {
             gains[v].setGain(volume);
@@ -346,7 +402,9 @@ public:
     /// unison, every voice's position moves by it (O8).
     void setPan(float position) noexcept
     {
+        catchUp();
         pan = position;
+        panKnob.setTarget((position + 1.0f) * panCentre);
         updatePositions();
         updateNoiseMix();
     }
@@ -417,6 +475,132 @@ public:
         resume();
         const auto numSamples = std::min(out.numSamples(), notes.size());
         render(out, numSamples, notes.first(numSamples));
+    }
+
+    /// As process(out, note), with Volume, Pan and Phase modulated by the
+    /// voice (M1.5 task 4; see the class comment). Unmodulated (nothing
+    /// active, or Noise with only Phase), it is process(out, note).
+    void process(const AudioBlock& out, float note, const SlotModulation& modulation) noexcept
+    {
+        if (!modulated(modulation))
+        {
+            process(out, note);
+            return;
+        }
+        resume();
+        const float centre = frequencyFor(note);
+        // With Phase per sample, each sample sets its own step; setting the
+        // base here too would add a step change per call, so the output
+        // would depend on how the caller splits its blocks.
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            if (states[v] != VoiceState::off)
+            {
+                baseIncrements[v] = incrementFor(centre * ratios[v], sampleRate);
+                if (modulation.phase.empty())
+                {
+                    oscillators[v].setIncrement(baseIncrements[v]);
+                }
+            }
+        }
+        renderModulated(out, out.numSamples(), {}, modulation);
+    }
+
+    /// As process(out, notes), modulated.
+    void process(const AudioBlock& out, std::span<const float> notes, const SlotModulation& modulation) noexcept
+    {
+        if (!modulated(modulation))
+        {
+            process(out, notes);
+            return;
+        }
+        resume();
+        const auto numSamples = std::min(out.numSamples(), notes.size());
+        renderModulated(out, numSamples, notes.first(numSamples), modulation);
+    }
+
+    /// As skip(numSamples, note), with the call's modulation: Phase's change
+    /// is added to each oscillator's skipped steps, as rendering would add
+    /// it, and Noise on its modulated path draws what rendering would.
+    void skip(std::size_t numSamples, float note, const SlotModulation& modulation) noexcept
+    {
+        if (noiseSelected && modulated(modulation))
+        {
+            skipNoiseModulated(numSamples);
+            return;
+        }
+        skip(numSamples, note);
+        skipModulation(numSamples, modulation);
+    }
+    void skip(std::span<const float> notes, const SlotModulation& modulation) noexcept
+    {
+        if (noiseSelected && modulated(modulation))
+        {
+            skipNoiseModulated(notes.size());
+            return;
+        }
+        skip(notes);
+        skipModulation(notes.size(), modulation);
+    }
+
+    /// While no voice sounds (the voice doesn't call process() or skip()):
+    /// the offset in force follows the call's Phase sum, so a voice that
+    /// unison brings back starts at Phase plus the offset as it stands, not
+    /// where the last call happened to leave it (found in M1.5 task 4's
+    /// stage 2: that depended on the host's blocks).
+    void trackPhase(const SlotModulation& modulation) noexcept
+    {
+        if (!modulation.phase.empty())
+        {
+            appliedPhase = phaseOf(modulation.phase.back());
+        }
+    }
+
+    /// The Phase offset for a note from silence, in knob units (10 a cycle):
+    /// a retriggered onset lands at Phase plus this.
+    void setPhaseOffset(float units) noexcept
+    {
+        appliedPhase = phaseOf(units);
+    }
+
+    /// The Phase offset in force, 2^32 per cycle.
+    [[nodiscard]] std::uint32_t phaseOffset() const noexcept
+    {
+        return appliedPhase;
+    }
+
+    /// Whether a call with this modulation adds exact zeros for the next
+    /// `length` samples, given an upper bound on Volume's sum there: the
+    /// Volume knob's larger end there plus the bound can't lift the clamp
+    /// above 0. With its gains unmodulated, isSilent().
+    [[nodiscard]] bool isSilentUnder(const SlotModulation& modulation, float volumeBound,
+                                     std::size_t length) const noexcept
+    {
+        if (!modulated(modulation) || !modulation.gainsModulated())
+        {
+            return isSilent();
+        }
+        catchUp();
+        const auto last = std::max<std::size_t>(length, 1);
+        const float knob = std::max(volumeKnob.valueAfter(1), volumeKnob.valueAfter(last));
+        return knob + volumeBound <= volumeLaw.knobMin;
+    }
+
+    /// Whether skip() with this modulation keeps the slot exact. Modulated,
+    /// the slot's knob ramps and the voices' presence must be still too.
+    [[nodiscard]] bool canSkipUnder(const SlotModulation& modulation) const noexcept
+    {
+        if (!canSkip())
+        {
+            return false;
+        }
+        if (!modulated(modulation))
+        {
+            return true;
+        }
+        catchUp();
+        return !volumeKnob.isSmoothing() && !panKnob.isSmoothing() &&
+               std::ranges::none_of(presence, [](const LinearSmoother& p) { return p.isSmoothing(); });
     }
 
     /// Whether process() would add exact zeros: every voice it renders has
@@ -519,6 +703,7 @@ public:
             }
         }
         skipNoise(numSamples);
+        lagging += numSamples;
         skipped = skipped || numSamples > 0;
         running = running || numSamples > 0;
     }
@@ -539,6 +724,7 @@ public:
             }
         }
         skipNoise(notes.size());
+        lagging += notes.size();
         skipped = skipped || !notes.empty();
         running = running || !notes.empty();
     }
@@ -567,7 +753,7 @@ private:
     {
         if (retrigger)
         {
-            oscillators[v].jumpTo(startPhase, since);
+            oscillators[v].jumpTo(startPhase + appliedPhase, since);
         }
         else if (!oscillators[v].isRunning())
         {
@@ -586,6 +772,13 @@ private:
         {
             gains[v].reset();
         }
+        catchUp();
+        for (auto& p : presence)
+        {
+            p.reset();
+        }
+        volumeKnob.reset();
+        panKnob.reset();
     }
 
     void updateDetune() noexcept
@@ -637,6 +830,8 @@ private:
         {
             renderVoices(out, numSamples, notes);
         }
+        lagging += numSamples; // the modulated path's ramps, advanced when next read
+        panCached = false;
         running = running || numSamples > 0;
     }
 
@@ -685,6 +880,316 @@ private:
                 }
                 gains[v].process(std::span{mono.data(), length}, out.subBlock(start, length));
             }
+        }
+    }
+
+    // --- Modulated Volume, Pan and Phase (M1.5 task 4) ---------------------------------------
+
+    /// Pan's knob units at the centre (0-10, 5 the centre).
+    static constexpr float panCentre = 5.0f;
+    static constexpr float panMax = 10.0f;
+
+    /// Phase knob units (10 a cycle) to a phase, wrapped.
+    [[nodiscard]] static std::uint32_t phaseOf(float units) noexcept
+    {
+        const double cycles = static_cast<double>(units) / 10.0;
+        const double wrapped = cycles - std::floor(cycles);
+        return static_cast<std::uint32_t>(static_cast<std::uint64_t>(std::ldexp(wrapped, 32)) & 0xFFFFFFFFU);
+    }
+
+    /// Whether a call takes the modulated path: Noise only for its gains.
+    [[nodiscard]] bool modulated(const SlotModulation& m) const noexcept
+    {
+        return noiseSelected ? m.gainsModulated() : m.active();
+    }
+
+    /// The modulated path's own ramps (the knobs, the voices' presence) are
+    /// advanced only when something reads or sets them: rendering
+    /// unmodulated counts the samples, and this skips them, in closed form.
+    void catchUp() const noexcept
+    {
+        if (lagging == 0)
+        {
+            return;
+        }
+        volumeKnob.skip(lagging);
+        panKnob.skip(lagging);
+        for (auto& p : presence)
+        {
+            p.skip(lagging);
+        }
+        lagging = 0;
+    }
+
+    /// Voice v's equal-power gains at Pan `units` (knob plus modulation),
+    /// clamped to [0, 10], at its unison position.
+    [[nodiscard]] StereoGains panGainsAt(std::size_t v, float units) const noexcept
+    {
+        const float clamped = std::clamp(units, 0.0f, panMax);
+        const auto& layout = unisonLayout(count);
+        return panGains(unisonPosition((clamped / panCentre) - 1.0f, stereoWidth, layout.side[v]));
+    }
+
+    /// The pan gains at the segment's two grid points: the first taken when
+    /// the segment starts (cached), the last for this call (the knob at the
+    /// segment's end, in closed form).
+    void panEnds(const SlotModulation& m) noexcept
+    {
+        const auto toEnd = m.segment > m.position ? m.segment - m.position : 0;
+        const float startUnits = panKnob.valueAfter(0) + m.panBefore;
+        const float endUnits = panKnob.valueAfter(toEnd) + m.panNow;
+        if (m.position == 0 || !panCached)
+        {
+            for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+            {
+                panStart[v] = panGainsAt(v, startUnits);
+            }
+            panCached = true;
+        }
+        for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+        {
+            panEnd[v] = panGainsAt(v, endUnits);
+        }
+    }
+
+    /// Volume per sample over a chunk: the knob's ramp plus its sum, through
+    /// the law, signed by Inv (unsigned for Noise, whose mix holds Inv).
+    void volumeChunk(const SlotModulation& m, std::size_t start, std::size_t length, bool sign,
+                     std::array<float, chunkSize>& out) noexcept
+    {
+        for (std::size_t i = 0; i < length; ++i)
+        {
+            const float knob = volumeKnob.next();
+            const float sum = m.volume.empty() ? 0.0f : m.volume[start + i];
+            const float units = volumeUnits({.volume = knob, .modulation = sum});
+            out[i] = (sign && inverted ? -units : units) / volumeLaw.unity;
+        }
+    }
+
+    void renderModulated(const AudioBlock& out, std::size_t numSamples, std::span<const float> notes,
+                         const SlotModulation& m) noexcept
+    {
+        catchUp();
+        if (noiseSelected)
+        {
+            renderNoiseModulated(out, numSamples, m);
+            running = running || numSamples > 0;
+            return;
+        }
+        const bool phaseMoves = !m.phase.empty();
+        const bool gainsModulated = m.gainsModulated();
+        if (gainsModulated)
+        {
+            panEnds(m);
+        }
+        else
+        {
+            panCached = false;
+        }
+        std::array<float, chunkSize> mono;   // NOLINT(cppcoreguidelines-pro-type-member-init): written before read
+        std::array<float, chunkSize> centre; // NOLINT(cppcoreguidelines-pro-type-member-init): written before read
+        std::array<float, chunkSize> gain;   // NOLINT(cppcoreguidelines-pro-type-member-init): written before read
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init): written before read
+        std::array<std::int64_t, chunkSize> phaseChange;
+        const auto segment = static_cast<float>(m.segment);
+        for (std::size_t start = 0; start < numSamples; start += chunkSize)
+        {
+            const auto length = std::min(chunkSize, numSamples - start);
+            if (!notes.empty())
+            {
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    centre[i] = frequencyFor(notes[start + i]);
+                }
+            }
+            if (phaseMoves)
+            {
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    const std::uint32_t target = phaseOf(m.phase[start + i]);
+                    phaseChange[i] = static_cast<std::int32_t>(target - appliedPhase);
+                    appliedPhase = target;
+                }
+            }
+            if (gainsModulated)
+            {
+                volumeChunk(m, start, length, true, gain);
+            }
+            else
+            {
+                volumeKnob.skip(length);
+            }
+            panKnob.skip(length);
+            for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+            {
+                if (states[v] == VoiceState::fading && !gains[v].isSmoothing())
+                {
+                    states[v] = VoiceState::off;
+                    oscillators[v].reset();
+                }
+                if (states[v] == VoiceState::off)
+                {
+                    presence[v].skip(length);
+                    continue;
+                }
+                auto& oscillator = oscillators[v];
+                const float ratio = ratios[v];
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    const std::uint32_t base =
+                        notes.empty() ? baseIncrements[v] : incrementFor(centre[i] * ratio, sampleRate);
+                    if (phaseMoves)
+                    {
+                        // Phase's change folded into this sample's step;
+                        // where that would leave [0, Nyquist), a
+                        // band-limited jump instead.
+                        const std::int64_t step = static_cast<std::int64_t>(base) + phaseChange[i];
+                        if (step >= 0 && std::cmp_less(step, halfCycle))
+                        {
+                            oscillator.setIncrement(static_cast<std::uint32_t>(step));
+                        }
+                        else
+                        {
+                            oscillator.setIncrement(base);
+                            oscillator.jumpTo(oscillator.nextPhase() + static_cast<std::uint32_t>(phaseChange[i]));
+                        }
+                    }
+                    else if (!notes.empty())
+                    {
+                        oscillator.setIncrement(base);
+                    }
+                    mono[i] = oscillator.next();
+                }
+                const auto piece = out.subBlock(start, length);
+                if (!gainsModulated)
+                {
+                    gains[v].process(std::span{mono.data(), length}, piece);
+                    presence[v].skip(length);
+                    continue;
+                }
+                float* const left = piece.channel(0).data();
+                float* const right = piece.channel(1).data();
+                const auto a = panStart[v];
+                const auto b = panEnd[v];
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    const float t = static_cast<float>(m.position + start + i) / segment;
+                    const float pl = a.left + ((b.left - a.left) * t);
+                    const float pr = a.right + ((b.right - a.right) * t);
+                    const float g = gain[i] * presence[v].next();
+                    left[i] += (g * pl) * mono[i];
+                    right[i] += (g * pr) * mono[i];
+                }
+                gains[v].skip(length);
+            }
+        }
+        running = running || numSamples > 0;
+    }
+
+    /// Noise with its gains modulated: the mix at unit volume from the pan
+    /// positions at the segment's grid points, interpolated, times the
+    /// volume per sample. Two draws per sample while the mix sounds.
+    void renderNoiseModulated(const AudioBlock& out, std::size_t numSamples, const SlotModulation& m) noexcept
+    {
+        const auto toEnd = m.segment > m.position ? m.segment - m.position : 0;
+        const auto mixAt = [&](float units)
+        {
+            std::array<StereoGains, maxUnisonVoices> g{};
+            for (std::size_t v = 0; v < count; ++v)
+            {
+                g[v] = panGainsAt(v, units);
+            }
+            return unisonNoiseMix(std::span{g.data(), count}, inverted);
+        };
+        if (m.position == 0 || !panCached)
+        {
+            noiseStart = mixAt(panKnob.valueAfter(0) + m.panBefore);
+            panCached = true;
+        }
+        const auto end = mixAt(panKnob.valueAfter(toEnd) + m.panNow);
+        const auto& s = noiseStart;
+        float* const left = out.channel(0).data();
+        float* const right = out.channel(1).data();
+        std::array<float, chunkSize> gain; // NOLINT(cppcoreguidelines-pro-type-member-init): written before read
+        const auto segment = static_cast<float>(m.segment);
+        // Two draws per sample while a voice sounds (any voice's presence
+        // above 0, checked per sample, so where a count of 0 stops the draws
+        // doesn't depend on the caller's blocks). The Volume knob at 0 doesn't
+        // stop them: a route can lift it.
+        for (std::size_t start = 0; start < numSamples; start += chunkSize)
+        {
+            const auto length = std::min(chunkSize, numSamples - start);
+            volumeChunk(m, start, length, false, gain);
+            panKnob.skip(length);
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                float sounding = 0.0f;
+                for (auto& p : presence)
+                {
+                    sounding = std::max(sounding, p.next());
+                }
+                if (!(sounding > 0.0f))
+                {
+                    continue;
+                }
+                const float t = static_cast<float>(m.position + start + i) / segment;
+                const float a = s.left + ((end.left - s.left) * t);
+                const float c = s.cross + ((end.cross - s.cross) * t);
+                const float b = s.right + ((end.right - s.right) * t);
+                const float n1 = noise.next();
+                const float n2 = noise.next();
+                left[start + i] += gain[i] * ((a * n1) + (c * n2));
+                right[start + i] += gain[i] * ((c * n1) + (b * n2));
+            }
+        }
+        for (auto& ramp : mixRamps)
+        {
+            ramp.skip(numSamples);
+        }
+        for (auto& g : gains)
+        {
+            g.skip(numSamples);
+        }
+    }
+
+    /// A skip of Noise on its modulated path: the draws rendering would make
+    /// (canSkipUnder() holds the presence still, so a voice sounds
+    /// throughout or not at all), and the ramps it advances.
+    void skipNoiseModulated(std::size_t numSamples) noexcept
+    {
+        catchUp();
+        const bool sounding =
+            std::ranges::any_of(presence, [](const LinearSmoother& p) { return p.currentValue() > 0.0f; });
+        for (std::size_t i = 0; sounding && i < 2 * numSamples; ++i)
+        {
+            static_cast<void>(noise.next());
+        }
+        lagging += numSamples;
+        panCached = false;
+        skipped = skipped || numSamples > 0;
+        running = running || numSamples > 0;
+    }
+
+    /// After skip(): Phase's change into the skipped steps.
+    void skipModulation(std::size_t numSamples, const SlotModulation& m) noexcept
+    {
+        if (!m.phase.empty() && !noiseSelected && numSamples > 0)
+        {
+            const std::uint32_t target = phaseOf(m.phase[numSamples - 1]);
+            const std::uint32_t change = target - appliedPhase;
+            for (std::size_t v = 0; v < maxUnisonVoices; ++v)
+            {
+                if (states[v] != VoiceState::off)
+                {
+                    pending[v] += change;
+                }
+            }
+            appliedPhase = target;
+            skipped = skipped || change != 0;
+        }
+        if (!m.gainsModulated())
+        {
+            panCached = false;
         }
     }
 
@@ -817,6 +1322,21 @@ private:
     bool running = false;                                 // output rendered since the last stop()
     std::array<std::uint32_t, maxUnisonVoices> pending{}; // phase steps skipped, not yet jumped to
     bool skipped = false;                                 // skip() since the last jump
+
+    // The modulated path (M1.5 task 4).
+    float sampleRate = 48000.0f;
+    std::array<std::uint32_t, maxUnisonVoices> baseIncrements{}; // each voice's step at the call's note
+    std::uint32_t appliedPhase = 0;                              // the Phase offset in force
+    // Advanced lazily (catchUp()), so mutable: the queries that read them
+    // stay const.
+    mutable LinearSmoother volumeKnob;                              // Volume in knob units, ramped
+    mutable LinearSmoother panKnob;                                 // Pan in knob units, 5 the centre
+    mutable std::array<LinearSmoother, maxUnisonVoices> presence{}; // each voice faded in (1) or out (0)
+    mutable std::size_t lagging = 0;                                // samples they haven't advanced yet
+    std::array<StereoGains, maxUnisonVoices> panStart{};            // each voice's pan gains at the first grid point
+    std::array<StereoGains, maxUnisonVoices> panEnd{};              // ... and at the last, for this call
+    NoiseMix noiseStart{};                                          // the noise mix at the first grid point
+    bool panCached = false;                                         // panStart (noiseStart) is this segment's
 };
 
 } // namespace anoesis::dsp

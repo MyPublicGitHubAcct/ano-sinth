@@ -373,3 +373,35 @@ TEST_CASE("Destinations: the Volume skip test over 16 voices", "[!benchmark][des
         };
     }
 }
+
+TEST_CASE("Destinations as built: CPU per voice, against the prototype as decided", "[!benchmark][voice-destinations]")
+{
+    // M1.5 task 4, stage 2: dsp::Voice with the destinations, and the
+    // stage-1 prototype in its decided configuration, in the same runs.
+    const auto decided = with(dest::decidedAt(rate));
+    struct Case
+    {
+        std::string name;
+        Routes routes;
+        bool changing = false;
+    };
+    const std::vector<Case> cases{
+        {.name = "no routes", .routes = nullptr},
+        {.name = "Volume A, 4 routes", .routes = four(Dest::volumeA)},
+        {.name = "Pan A, 4 routes", .routes = four(Dest::panA)},
+        {.name = "Phase A, 4 routes", .routes = four(Dest::phaseA)},
+        {.name = "16 routes, every destination", .routes = &mixed},
+        {.name = "16 routes, a change every segment (crossfading)", .routes = &mixed, .changing = true},
+    };
+    for (const auto& c : cases)
+    {
+        {
+            Held<dsp::Voice<>> h{c.routes, {}, c.changing};
+            bench("voice destinations: dsp::Voice, " + c.name, h);
+        }
+        {
+            Held<DestV> h{c.routes, decided, c.changing};
+            bench("voice destinations: prototype (decided), " + c.name, h);
+        }
+    }
+}

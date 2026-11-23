@@ -5,6 +5,7 @@ A destination is the control a route moves. [modulation.md](modulation.md) decid
 - **Theory:** adding before a knob's law and clamping before it; Phase's wrap and an unclamped Pitch; a gain computed outside its smoother, and keeping two paths in step; Pan's law on the grid; stepping or crossfading a change of the routes; why a Noise slot needs its own path; proving a modulated slot silent.
 - **Sylenth1:** what is known, from task 1 and two developer threads found for this task (inventory §6, [The destinations in detail](../reference/sylenth1-features.md#the-destinations-in-detail), M24–M27).
 - **Stage 1:** the candidates, prototyped on the library's own classes and measured; the recommendations; what stage 2 needs, and what this pushes back on.
+- **The decision and stage 2:** every recommendation chosen; Volume, Pan and Phase as built in `OscillatorSlot` and `dsp::Voice`, with the crossfade of route changes; two flaws stage 2 found in the prototype (both block-size dependences) and fixed; the tests, the deliberate breaks, and CPU.
 
 Read [modulation.md](modulation.md) and [modulation-sources.md](modulation-sources.md) first, then [oscillator-controls.md](oscillator-controls.md) (Volume, Pan, Inv and their 10 ms ramps), [oscillator-phase.md](oscillator-phase.md) (Phase and Retrig), [oscillator-unison.md](oscillator-unison.md) (the unison voices' positions and the Noise mix), and [part-solo-and-skipping.md](part-solo-and-skipping.md) (the skip test and the mono path).
 
@@ -335,9 +336,104 @@ Chosen by the project owner on 2026-11-23: every recommendation (Decisions log).
 
 **The inventory (M24–M27):** M25–M27 are now our working hypotheses, built in stage 2 and checked against the demo in M1.13. M24's crossfade is our own choice, made for clicks, which the demo can only show to differ from Sylenth1.
 
+
+## As built
+
+Stage 2 (2026-11-23) built the decision into `libs/dsp`, test-first. It is bit for bit the stage-1 prototype in its decided configuration (`DestVoice` with `decidedAt()`: the slot's own knob ramps, the crossfade over ⌈10 ms × fs / 32⌉ segments, Noise mixed, the Volume bound), except for two flaws stage 2 found. Both break the invariant that the output doesn't depend on the host's blocks, so they are fixed in the prototype too, and the stage-1 report reproduces unchanged.
+
+- **[volume_law.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/volume_law.hpp): `volumeLaw`, `volumeUnits()`, `volumeGain()`.** This is Volume's law beside `mixLaw`: the knob plus its modulation clamped to [0, 10] (NaN is silence), then linear, with 10 as unity.
+- **[slot_modulation.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/slot_modulation.hpp): `SlotModulation`,** what a voice tells a slot for one call: Volume's sum per sample, Pan's two grid-point sums, the call's position in the segment, and Phase's sum per sample.
+- **[stereo_gain.hpp](../../libs/dsp/include/anoesis/dsp/control/stereo_gain.hpp): `StereoGain::skip()`.** It advances both gain ramps without rendering, exactly as `process()` would.
+- **[oscillator_slot.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/oscillator_slot.hpp): the modulated path.** `process()` and `skip()` overloads take a `SlotModulation`:
+  - **Knob ramps.** Its own Volume and Pan ramps, in knob units (10 ms, started where the gain ramps start).
+  - **Volume** per sample through `volumeGain()`, signed by Inv.
+  - **Pan's gains** at the segment's two grid points, interpolated.
+  - **Presence:** a ramp per unison voice for `setVoices()`'s fades.
+  - **Phase:** folded per sample, with a band-limited jump where the step would leave [0, Nyquist). A retrigger lands at Phase plus the offset in force, and a note from silence at Phase plus `setPhaseOffset()`'s value; `skip()` carries the offset, and `trackPhase()` follows it while no voice sounds.
+  - **Noise:** the mix at unit volume from the pan positions at the grid points, interpolated, times the volume per sample.
+  - **The skip test:** `isSilentUnder()` and `canSkipUnder()`.
+  - **Lazy ramps.** The knob and presence ramps are advanced **lazily**: the plain path only counts its samples (`lagging`), and `catchUp()` skips them in closed form, before anything reads them or sets them. The setters keep their arguments (`setVolume(gain)`, `setPan(position)`), and the ramps hold gain × 10 and (position + 1) × 5, which is knob units under the linear law. The test files call these setters about twenty times, and through them the slot is the prototype to the bit.
+- **[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp): the destinations in `dsp::Voice`:**
+  - **Sums.** Volume and Phase join Pitch and Mix in the folded per-sample sums. Pan's sums are kept at the previous and the current grid point.
+  - **Note-on.** The slots' note-on now comes after the sources', so a note from silence knows its Phase sum.
+  - **The crossfade.** It runs on any change of the routes at a grid point (`routeCrossfadeSegments()` in [route_compiler.hpp](../../libs/dsp/include/anoesis/dsp/modulation/route_compiler.hpp), its length set at `prepare()`). The old routes and their sources are kept until it ends, a further change waits for its end, sums are blended per sample and at each grid point, and each bound is the larger of the old routes' and the new ones' (`modulationBound()`, which generalises `mixModulationBound()`).
+  - **The skip test and the mono path.** The skip test reads each part's Volume bound, and a Pan route takes its part off the mono path.
+  - **A fast path.** A part with no Volume, Pan or Phase modulation calls the slots' plain methods (below).
+
+### What differs from the prototype, and why
+
+- **Found: a silent slot's Phase offset depended on the host's blocks.** A slot with no voice sounding isn't called, so its offset in force stopped where its last call ended. A call runs on to the end of its chunk, so with host blocks of 4096 that was up to 31 samples later than with blocks of 1. When unison brought voices back, they started at Phase plus that stale offset, so the output after it differed between host block sizes. The random scenario at 44.1 kHz found it, with B2 going to 0 voices and back under Phase routes. **The fix:** the voice tells such a slot its Phase sum each chunk (`trackPhase()`), so the offset is always the sum at the previous sample.
+- **Found: Noise on its modulated path drew past the point where its voices went silent.** It drew two numbers every sample it was called. Going to 0 voices, it is called until its gain ramps finish, and a long call runs on past that sample, so every later noise sample shifted with the host's blocks. The first fix tried, copying the plain path's rule ("draw while the mix isn't settled at zero"), silenced a slot at Volume 0 that a route lifts, because that mix includes the Volume knob. **The fix:** draw while any voice's presence is above 0, checked per sample, and a modulated skip draws by the same rule.
+- **Left out: the prototype's return of the Phase offset to 0 when its routes go.** Under the decided crossfade, a route that goes fades its sum to exactly 0 on the last sample, so the offset is 0 with it. The separate path was needed only when changes stepped, and no test could reach it. A test pins the return itself: once the crossfade and the oscillator's band-limiting residuals are past, the note is the one that never had the route, to the bit.
+- **Added: a fast path for a part with no Volume, Pan or Phase modulation.** Building each slot's `SlotModulation` and taking the modulated tests on every chunk cost the init patch about 2.5 ns per voice (paired against the build before this stage: median +2.5, six of seven pairs above). Such a part's `SlotModulation` would be empty, which is the plain path to the bit, so it now calls the plain methods. Against the build before this stage, over 14 interleaved pairs, the medians are 130.1 and 130.3 ns: no routes costs nothing measurable.
+- **Only the decided configuration:** no knob-source, amount, Noise or skip switches, and no skip counters.
+
+### Tests (stage 2)
+
+Under `[modulation]` in the default run, there are 11 test cases in [voice_destinations_test.cpp](../../tests/dsp/modulation/voice_destinations_test.cpp). They drive `LibraryDestEngine`, stage 1's engine over `dsp::Voice` ([destination_support.hpp](../../tests/dsp/modulation/destination_support.hpp)), with the same events as the prototype, plus a unison-count event.
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| The prototype as decided | `dsp::Voice` against `DestVoice` with `decidedAt()`, through the real `VoiceAllocator`, at host blocks of 1, 37 and 4096: stage 1's busy patch with unison counts changing mid-note; a Pan move on a slot skipped at Volume 0 and a Volume route lifting it 1 ms later; random scenarios at 44.1 and 96 kHz (Volume, Pan, Phase, Pitch, Mix and Cutoff routes appearing and changing mid-note, knob and unison changes, Noise) | bit for bit; 0 allocations |
+| Phase through unison's return | the random scenario that found the first flaw (B2 a saw) at host blocks of 1 and 37 against 4096 | bit for bit |
+| A Phase route that goes | after the crossfade and the band-limiting residuals, the note that never had the route | bit for bit |
+| No such route, no change mid-note | the init patch and task 3's busy patch against the prototype stepping (stage 1 pinned it to `dsp::Voice` before this stage) | bit for bit |
+| Units and clamps | the stage-1 cases on the library: Volume and Pan against the knob, both clamps, Phase at +2.5, +10 and −2.5 | bit for bit |
+| The crossfade | 14, 15 and 30 segments at 44.1, 48 and 96 kHz; a new route on Mix at −10 brings exact silence on the crossfade's last sample, not before | exact |
+| Volume 0 held and lifted | the note stays busy and is heard once a route lifts it | exact |
+| Noise | Volume and Pan routes move a 4-voice Noise slot to the knob's level and position | 0.05 dB (two noise draws) |
+| Phase through a skip | a skipped slot's offset and every unison voice's phase equal a rendered one's, and the offset isn't 0 | exact |
+| `volumeLaw` | unity, the clamps, NaN | exact (`WithinULP(…, 0)`) |
+| `StereoGain::skip()` | the gains where processing leaves them, at 1, 37, 100 and 512 samples | exact |
+
+**Red first.** Against inert stubs (the overloads ignoring their modulation, `skip()` doing nothing, the crossfade one segment long), 6 of the first 9 cases failed. Three passed:
+- the init patch, as it must;
+- `volumeLaw`, written in final form;
+- Phase through a skip, which passed for the wrong reason: the stub's offset read 0 on both slots. It now also checks that the rendered offset isn't 0, which the stub fails.
+
+**Task 3's tests.** Two of its comparisons with its own prototype now differ where the decision says they should, and assert that: the scenario whose routes change mid-note (now crossfaded), and the one with Volume, Pan and Phase routes (now acting). Its "running only what is read" case for a free LFO routed mid-note now differs from running everything, because the route crossfades in. "A free LFO's copy" still pins the copy itself.
+
+**Deliberate breaks.** 17, each built and run on its own in a runner of just these tests. All 17 were caught, none only at compile time.
+
+| Break | Caught by |
+|---|---|
+| `StereoGain::skip()` advances nothing | `StereoGain::skip()`, the prototype |
+| The crossfade 5 ms long | the crossfade, the prototype |
+| A change of the routes steps | the crossfade, a Phase route that goes, the prototype |
+| The crossfade's bound from the new routes only | the crossfade, the prototype |
+| A silent slot's Phase offset not tracked | Phase through unison's return |
+| The fast path taken by a part with Volume, Pan or Phase routes | Noise, a Phase route that goes, Volume 0 lifted, units and clamps, the prototype |
+| A skip's samples not counted for the lazy ramps | the prototype (the Pan move on a skipped slot) |
+| Modulated Noise draws whether or not a voice sounds | the prototype |
+| Volume not clamped below 0 (v2's inversion) | `volumeLaw`, the prototype |
+| Pan not clamped | the prototype |
+| A note from silence ignores the Phase sum | units and clamps, the prototype |
+| The modulated path's ramps not caught up before a setter | the prototype |
+| Presence ignored on the modulated path | Phase through unison's return, the prototype |
+| A Pan route keeps its part on the mono path | units and clamps |
+| The Volume bound taken as 0 | Noise, Volume 0 lifted, units and clamps, the prototype |
+| Pan held at the grid point | the prototype |
+| The crossfade's product fused into its sum | the prototype |
+
+### CPU (stage 2)
+
+`tools/bench.sh "[voice-destinations]"` ([destination_benchmark.cpp](../../tests/dsp/benchmarks/destination_benchmark.cpp)), `relwithdebinfo`, Apple M1 Ultra (virtualised), Apple Clang 21.0.0. Stage 1's held voice and routes. Figures are the median of three runs (spread up to 8.6%; one prototype run of 769.9 ns came from a host stall), in ns per sample. The prototype in its decided configuration ran in the same runs. Full table: [baselines.md](../performance/baselines.md#2026-11-23-m15-the-destinations-as-built).
+
+| One voice (ns / sample) | `dsp::Voice` | the prototype (decided) | stage 1 |
+|---|---:|---:|---:|
+| no routes | 131.7 | 130.0 | 131.4 |
+| Volume A, 4 routes | 145.6 | 144.9 | 143.3 |
+| Pan A, 4 routes | 252.2 | 252.8 | 250.9 |
+| Phase A, 4 routes | 140.8 | 142.5 | 138.1 |
+| 16 routes, every destination | 259.7 | 263.1 | 259.8 |
+| 16 routes, a change at every grid point (always crossfading) | 286.7 | 283.2 | 282.8 |
+
+- **No routes costs nothing against the voice before this stage.** The commit before it (c35c5f1) was built in a separate worktree and run interleaved with this build, 14 times each: 130.3 against 130.1 ns (medians). The paired differences run from −9.4 to +8.1 ns, median +1.3, 8 of 14 above zero: within the noise.
+- **Routes cost what stage 1 measured**, within the noise, and the library runs level with the prototype.
+
 ## Tests
 
-Stage 1's prototypes are checked in the default run under `[destinations-model]` ([destination_candidates_test.cpp](../../tests/dsp/modulation/destination_candidates_test.cpp), 6 test cases, about 12 s in debug):
+Stage 2's tests are above ([Tests (stage 2)](#tests-stage-2)): 11 cases under `[modulation]`, with `dsp::Voice` the prototype to the bit. Stage 1's prototypes are checked in the default run under `[destinations-model]` ([destination_candidates_test.cpp](../../tests/dsp/modulation/destination_candidates_test.cpp), 6 test cases, about 12 s in debug):
 
 | Test | What it pins down | Tolerance and why |
 |---|---|---|

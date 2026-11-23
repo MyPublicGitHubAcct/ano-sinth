@@ -6,6 +6,27 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-23: M1.5 the destinations, as built
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-destinations]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread up to 8.6%; one prototype run of the crossfading row, 769.9 ns, was a host stall and is outside the median).
+- **What is measured** ([modulation-destinations.md](../dsp/modulation-destinations.md#cpu-stage-2)): stage 1's held voice (the init patch, A1 one saw, A3, past the attacks) and routes, `dsp::Voice` with the destinations (libs/dsp voice/voice.hpp) and, in the same runs, the stage-1 prototype in its decided configuration (`decidedAt()`).
+
+| Benchmark: one voice (ns / sample) | `dsp::Voice` | prototype (decided) |
+|---|---:|---:|
+| no routes | 131.7 | 130.0 |
+| Volume A, 4 routes | 145.6 | 144.9 |
+| Pan A, 4 routes | 252.2 | 252.8 |
+| Phase A, 4 routes | 140.8 | 142.5 |
+| 16 routes, every destination | 259.7 | 263.1 |
+| 16 routes, a change at every grid point (always crossfading) | 286.7 | 283.2 |
+
+### Observations
+
+- **No routes costs nothing against the voice before this stage**: the commit before it (c35c5f1), built in a separate worktree and run interleaved with this one 14 times, 130.3 against 130.1 ns (medians), paired differences −9.4 to +8.1, median +1.3. Without the fast path for a part with no Volume, Pan or Phase modulation it was +2.5 (six of seven pairs above).
+- **The library runs level with the prototype**, and both with stage 1's numbers.
+
+---
+
 ## 2026-11-23: M1.5 the destinations, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[destinations]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 1.0–5.3%).

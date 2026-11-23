@@ -20,6 +20,7 @@
 /// Doc: docs/dsp/modulation.md
 #include <anoesis/dsp/modulation/routing.hpp>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -67,6 +68,19 @@ private:
 };
 
 /// A voice's compiled routes, recompiled when the patch has changed.
+/// The segments a change of the routes crossfades over (M1.5 task 4,
+/// decided 2026-11-23): ceil(10 ms x fs / 32), 15 at 48 kHz.
+[[nodiscard]] inline std::size_t routeCrossfadeSegments(float sampleRate) noexcept
+{
+    constexpr std::size_t segment = 32; // the voice's grid (LadderFilter::gridSamples)
+    const double samples = std::round(0.01 * static_cast<double>(sampleRate));
+    if (!(samples >= 1.0)) // also NaN
+    {
+        return 1;
+    }
+    return (static_cast<std::size_t>(samples) + segment - 1) / segment;
+}
+
 class RouteCompiler
 {
 public:

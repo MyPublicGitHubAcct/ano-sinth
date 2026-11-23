@@ -83,7 +83,7 @@ Stage 1 prototypes the sources in `tests/dsp/modulation/` on the library's own c
   - LFO Rate (held) and Gain (ramped) in segment order;
   - `mixModulationBound()` from the sources' bounds.
 
-  Volume, Phase and Pan are task 4's: their routes compile and are ignored.
+  Volume, Phase and Pan are task 4's ([modulation-destinations.md](modulation-destinations.md)).
 - **The candidates, as switches** (`SourceSettings`), one question each (below).
 
 `SourceEngine` runs the real `VoiceAllocator` over 16 `SourceVoice`s. It holds the engine's state the plan gives M1.8: the `modulation::Patch` (slot events at their samples), the two controllers, the free LFOs' global instances (moved on with each piece the engine renders), and Step Velocity.

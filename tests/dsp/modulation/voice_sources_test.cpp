@@ -90,6 +90,11 @@ struct Scenario
     std::vector<SourceEvent> events;
     std::size_t length = 24000;
     float sampleRate = 48000.0f;
+    /// M1.5 task 4's decision changes it: routes that change mid-note now
+    /// crossfade, and Volume, Pan and Phase routes now act, where this
+    /// task's prototype steps and ignores them. voice_destinations_test pins
+    /// it against task 4's prototype instead.
+    bool changedByTask4 = false;
 };
 
 /// Free LFOs through steals, one with its rate keytracked so each voice's
@@ -126,7 +131,7 @@ Scenario freeLfos()
 /// there), a free LFO copied there.
 Scenario lateRoutes()
 {
-    Scenario s{.name = "routes that appear mid-note"};
+    Scenario s{.name = "routes that appear mid-note", .changedByTask4 = true};
     s.settings.modEnvelopes[0] = {.attack = 0.05f, .decay = 0.2f, .sustain = 0.5f, .release = 0.3f};
     s.settings.modEnvelopes[1] = {.attack = 0.01f, .decay = 0.1f, .sustain = 0.7f, .release = 0.4f};
     s.settings.lfos[0] = {.waveform = dsp::LfoWaveform::sine, .rate = 6.0f, .gain = 10.0f};
@@ -179,7 +184,7 @@ Scenario legato()
 /// Phase), whose routes compile and are ignored.
 Scenario gridTargets()
 {
-    Scenario s{.name = "Cutoff, Reso, LFO Rate and Gain; Volume, Pan and Phase ignored"};
+    Scenario s{.name = "Cutoff, Reso, LFO Rate and Gain; Volume, Pan and Phase", .changedByTask4 = true};
     s.settings.modEnvelopes[0] = {.attack = 0.01f, .decay = 0.15f, .sustain = 0.3f, .release = 0.1f};
     s.settings.modEnvelopes[1] = {.attack = 0.2f, .decay = 0.1f, .sustain = 0.9f, .release = 0.1f};
     s.settings.lfos[0] = {.waveform = dsp::LfoWaveform::sine, .rate = 7.0f, .gain = 6.0f};
@@ -264,7 +269,7 @@ TEST_CASE("Sources: dsp::Voice is the stage-1 prototype as decided, to the bit a
             const auto library =
                 renderLibrary(settings, sc.voicing, sc.events, sc.length,
                               {.blockSize = block, .sampleRate = sc.sampleRate, .allocations = &allocations});
-            CHECK(identical(library, prototype.out));
+            CHECK(identical(library, prototype.out) != sc.changedByTask4);
             CHECK(allocations == 0);
         }
     }
@@ -957,11 +962,14 @@ TEST_CASE("Sources: running only what a route reads is running everything, where
                 route(12345, 0, source, Dest::pitchA, 0.1f),
                 noteOff(20000, 59),
             };
+            // Since M1.5 task 4 a route that appears mid-note crossfades in,
+            // where the prototype steps: different for every source. A free
+            // LFO's copy is still exact ("a free LFO's copy" test).
             cases.push_back({
                 .name = std::string(source == Source::modEnv1 ? "Mod Env 1" : "LFO 1") + (free ? " (free)" : "") +
                         ", routed mid-note",
                 .scenario = s,
-                .same = free,
+                .same = false,
             });
         }
     }

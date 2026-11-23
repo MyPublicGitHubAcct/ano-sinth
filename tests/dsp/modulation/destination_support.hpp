@@ -33,11 +33,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace anoesis::test::destinations
@@ -60,6 +62,7 @@ struct DestEvent
         source,
         volume, ///< slot `slot`'s Volume, `value` in knob units (0-10)
         pan,    ///< slot `slot`'s Pan, `value` in knob units (0-10, 5 the centre)
+        voices, ///< slot `slot`'s unison voices, `value` 0-8
     };
     std::size_t offset = 0;
     Kind kind = Kind::source;
@@ -89,6 +92,10 @@ inline DestEvent volumeKnob(std::size_t t, std::size_t slot, float units)
 inline DestEvent panKnob(std::size_t t, std::size_t slot, float units)
 {
     return {.offset = t, .kind = DestEvent::Kind::pan, .slot = slot, .value = units};
+}
+inline DestEvent unison(std::size_t t, std::size_t slot, int voices)
+{
+    return {.offset = t, .kind = DestEvent::Kind::voices, .slot = slot, .value = static_cast<float>(voices)};
 }
 inline DestEvent route(std::size_t t, std::size_t slot, Source s, Dest d, float amount)
 {
@@ -136,29 +143,33 @@ void configureSlots(V& v, const DestVoicing& d)
     }
 }
 
-/// DestVoice over the real VoiceAllocator, with the engine's modulation
-/// state and knob ramps.
-class DestEngine
+/// A voice over the real VoiceAllocator (DestVoice, or dsp::Voice as built),
+/// with the engine's modulation state and knob ramps. The prototype's
+/// candidates and knob ramps are set only on a voice that has them.
+template <typename V>
+class DestEngineOf
 {
 public:
-    using Voice = DestVoice<>;
+    using Voice = V;
     using Allocator = dsp::VoiceAllocator<Voice, 16>;
 
-    DestEngine(const dsp::MinBlepTable& table, const proto::SourceSettings& settings,
-               const DestinationSettings& destinationSettings, std::uint64_t seed = 3)
-        : scratch(4096)
+    DestEngineOf(const dsp::MinBlepTable& table, const proto::SourceSettings& settings,
+                 const DestinationSettings& destinationSettings, std::uint64_t seed = 3)
+        : allocator(std::make_unique<Allocator>(seed, table)), scratch(4096)
     {
         voice_sources::copySettings(settings, context);
         context.patch = &patch;
         context.modWheel = &modWheel;
         context.aftertouch = &aftertouch;
         context.freeLfos = &freeLfos;
-        allocator = std::make_unique<Allocator>(seed, table);
         allocator->forEachVoice(
             [&](Voice& v)
             {
-                v.setDestinationSettings(destinationSettings);
-                v.setKnobRamps(&volumeRamps, &panRamps);
+                if constexpr (requires { v.setDestinationSettings(destinationSettings); })
+                {
+                    v.setDestinationSettings(destinationSettings);
+                    v.setKnobRamps(&volumeRamps, &panRamps);
+                }
             });
         for (auto* r : {cutoff.data(), &cutoff[1], &controlCutoff})
         {
@@ -281,6 +292,9 @@ private:
             allocator->forEachVoice([&](Voice& v) { v.slot(ev.slot).setPan((ev.value / 5.0f) - 1.0f); });
             panRamps[ev.slot].setTarget(ev.value);
             return;
+        case DestEvent::Kind::voices:
+            allocator->forEachVoice([&](Voice& v) { v.slot(ev.slot).setVoices(static_cast<int>(ev.value)); });
+            return;
         case DestEvent::Kind::source:
             break;
         }
@@ -338,6 +352,9 @@ private:
     std::uint64_t time = 0;
 };
 
+using DestEngine = DestEngineOf<DestVoice<>>;
+using LibraryDestEngine = DestEngineOf<dsp::Voice<>>;
+
 /// The candidates' defaults (DestinationSettings), and no mod envelope or
 /// LFO settings: for renders that don't vary them.
 inline const DestinationSettings defaultSettings{};
@@ -350,15 +367,19 @@ struct DestRenderOptions
     std::size_t* allocations = nullptr;
     /// Called after each host block, with the engine (for measurement).
     std::function<void(DestEngine&, std::size_t end)> after;
+    /// The same, for the library's engine.
+    std::function<void(LibraryDestEngine&, std::size_t end)> afterLibrary;
 };
 
-/// Renders `events` (any order) through DestEngine.
-inline anoesis::test::Buffer renderDest(const DestinationSettings& settings, const proto::SourceSettings& sources,
-                                        const DestVoicing& voicing, std::vector<DestEvent> events, std::size_t length,
-                                        const DestRenderOptions& options = {})
+/// Renders `events` (any order) through an engine.
+template <typename Engine>
+anoesis::test::Buffer renderWith(const DestinationSettings& settings, const proto::SourceSettings& sources,
+                                 const DestVoicing& voicing, std::vector<DestEvent> events, std::size_t length,
+                                 const DestRenderOptions& options,
+                                 const std::function<void(Engine&, std::size_t)>& after)
 {
     std::ranges::stable_sort(events, {}, &DestEvent::offset);
-    auto engine = std::make_unique<DestEngine>(proto::table(), sources, settings);
+    auto engine = std::make_unique<Engine>(proto::table(), sources, settings);
     engine->setSlots(voicing);
     engine->setCutoff(voicing.base.cutoff, voicing.base.controlCutoff);
     engine->setResonance(voicing.base.resonance, 0.0f);
@@ -385,12 +406,44 @@ inline anoesis::test::Buffer renderDest(const DestinationSettings& settings, con
         {
             *options.allocations += counter.count();
         }
-        if (options.after)
+        if (after)
         {
-            options.after(*engine, start + n);
+            after(*engine, start + n);
         }
     }
     return out;
+}
+
+/// The prototype (DestVoice) with these candidates.
+inline anoesis::test::Buffer renderDest(const DestinationSettings& settings, const proto::SourceSettings& sources,
+                                        const DestVoicing& voicing, std::vector<DestEvent> events, std::size_t length,
+                                        const DestRenderOptions& options = {})
+{
+    return renderWith<DestEngine>(settings, sources, voicing, std::move(events), length, options, options.after);
+}
+
+/// dsp::Voice as built, through the same engine and events.
+inline anoesis::test::Buffer renderBuilt(const proto::SourceSettings& sources, const DestVoicing& voicing,
+                                         std::vector<DestEvent> events, std::size_t length,
+                                         const DestRenderOptions& options = {})
+{
+    return renderWith<LibraryDestEngine>(defaultSettings, sources, voicing, std::move(events), length, options,
+                                         options.afterLibrary);
+}
+
+/// The prototype in its decided configuration at `sampleRate` (M1.5 task 4,
+/// the decision): the slot's own knob ramps, a crossfade over ceil(10 ms x
+/// fs / 32) segments, Noise mixed, the Volume bound.
+[[nodiscard]] inline DestinationSettings decidedAt(float sampleRate)
+{
+    const auto samples = static_cast<std::size_t>(std::llround(0.01 * static_cast<double>(sampleRate)));
+    return {
+        .knobs = KnobSource::slotRamps,
+        .amounts = AmountChange::crossfade,
+        .fadeSegments = (samples + 31) / 32,
+        .noise = NoiseModulation::mixed,
+        .volumeSkip = VolumeSkip::bound,
+    };
 }
 
 /// The same voicing and source events through dsp::Voice (task 3's

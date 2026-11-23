@@ -700,11 +700,21 @@ public:
     /// rendering would have added it.
     void skip(std::size_t numSamples, float note, const SlotModulation& modulation) noexcept
     {
+        if (noiseSelected && modulated(modulation))
+        {
+            skipNoiseModulated(numSamples);
+            return;
+        }
         skip(numSamples, note);
         skipModulation(numSamples, modulation);
     }
     void skip(std::span<const float> notes, const SlotModulation& modulation) noexcept
     {
+        if (noiseSelected && modulated(modulation))
+        {
+            skipNoiseModulated(notes.size());
+            return;
+        }
         skip(notes);
         skipModulation(notes.size(), modulation);
     }
@@ -718,6 +728,17 @@ public:
     void setNoiseModulation(NoiseModulation n) noexcept
     {
         noiseModulation = n;
+    }
+
+    /// While no voice sounds (the voice doesn't call process() or skip()):
+    /// the offset in force follows the call's Phase sum, so a voice that
+    /// unison brings back starts at Phase plus the offset as it stands.
+    void trackPhase(const SlotModulation& modulation) noexcept
+    {
+        if (!modulation.phase.empty())
+        {
+            appliedPhase = phaseOf(modulation.phase.back());
+        }
     }
 
     /// The Phase offset for a note from silence, in knob units (10 per
@@ -1297,7 +1318,7 @@ private:
 
     /// Noise with its gains modulated: the mix at unit volume from the pan
     /// positions at the segment's grid points, interpolated, times the
-    /// volume per sample. Two draws per sample, always.
+    /// volume per sample. Two draws per sample while the mix sounds.
     void renderNoiseModulated(const AudioBlock& out, std::size_t numSamples, const SlotModulation& m) noexcept
     {
         const auto toEnd = m.segment > m.position ? m.segment - m.position : 0;
@@ -1321,6 +1342,10 @@ private:
         float* const right = out.channel(1).data();
         std::array<float, chunkSize> gain; // NOLINT(cppcoreguidelines-pro-type-member-init)
         const auto segment = static_cast<float>(m.segment);
+        // Two draws per sample while a voice sounds (any voice's presence
+        // above 0, checked per sample, so where a count of 0 stops the draws
+        // doesn't depend on the caller's blocks). The Volume knob at 0 doesn't
+        // stop them: a route can lift it.
         for (std::size_t start = 0; start < numSamples; start += chunkSize)
         {
             const auto length = std::min(chunkSize, numSamples - start);
@@ -1328,6 +1353,15 @@ private:
             advanceRamps(length, knobSource == KnobSource::slotRamps);
             for (std::size_t i = 0; i < length; ++i)
             {
+                float sounding = 0.0f;
+                for (auto& p : presence)
+                {
+                    sounding = std::max(sounding, p.next());
+                }
+                if (!(sounding > 0.0f))
+                {
+                    continue;
+                }
                 const float t = static_cast<float>(m.position + start + i) / segment;
                 const float a = s.left + ((end.left - s.left) * t);
                 const float c = s.cross + ((end.cross - s.cross) * t);
@@ -1341,10 +1375,6 @@ private:
         for (auto& ramp : mixRamps)
         {
             ramp.skip(numSamples);
-        }
-        for (auto& p : presence)
-        {
-            p.skip(numSamples);
         }
         for (auto& g : gains)
         {
@@ -1363,17 +1393,26 @@ private:
         }
     }
 
-    /// After skip(): Phase's change into the skipped steps; for Noise mixed,
-    /// the draws rendering would have made (it always draws).
+    /// A skip of Noise on its modulated path: the draws rendering would make
+    /// (canSkipUnder() holds the presence still, so a voice sounds
+    /// throughout or not at all), and the ramps it advances.
+    void skipNoiseModulated(std::size_t numSamples) noexcept
+    {
+        const bool sounding =
+            std::ranges::any_of(presence, [](const LinearSmoother& p) { return p.currentValue() > 0.0f; });
+        for (std::size_t i = 0; sounding && i < 2 * numSamples; ++i)
+        {
+            static_cast<void>(noise.next());
+        }
+        skipRamps(numSamples);
+        panCached = false;
+        skipped = skipped || numSamples > 0;
+        running = running || numSamples > 0;
+    }
+
+    /// After skip(): Phase's change into the skipped steps.
     void skipModulation(std::size_t numSamples, const SlotModulation& m) noexcept
     {
-        if (noiseSelected && modulated(m) && noiseSettledAtZero())
-        {
-            for (std::size_t i = 0; i < 2 * numSamples; ++i)
-            {
-                static_cast<void>(noise.next());
-            }
-        }
         if (!m.phase.empty() && !noiseSelected && numSamples > 0)
         {
             const std::uint32_t target = phaseOf(m.phase[numSamples - 1]);

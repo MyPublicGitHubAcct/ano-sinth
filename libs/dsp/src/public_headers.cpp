@@ -38,7 +38,9 @@
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
+#include <anoesis/dsp/oscillators/slot_modulation.hpp>
 #include <anoesis/dsp/oscillators/unison.hpp>
+#include <anoesis/dsp/oscillators/volume_law.hpp>
 #include <anoesis/dsp/oscillators/waveform.hpp>
 #include <anoesis/dsp/output/main_volume.hpp>
 #include <anoesis/dsp/output/output_guard.hpp>

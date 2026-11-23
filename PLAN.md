@@ -50,7 +50,17 @@ Task 4 (the per-voice destinations: Volume, Pan and Phase, each through its unit
 - task 2's prototype ignored Noise;
 - the Volume bound skips 50–80% of a lifted slot (−36% CPU on 16 voices).
 
-The project owner chose every recommendation (2026-11-23, Decisions log; [the decision](docs/dsp/modulation-destinations.md#the-decision)). 504 tests pass on macOS in debug. **Next:** task 4's stage 2.
+The project owner chose every recommendation (2026-11-23, Decisions log; [the decision](docs/dsp/modulation-destinations.md#the-decision)). Stage 2 built them (2026-11-23), so task 4 is done ([as built](docs/dsp/modulation-destinations.md#as-built)):
+- **What was built:**
+  - `volumeLaw`, `SlotModulation` and `StereoGain::skip()`;
+  - `OscillatorSlot`'s modulated path, its new ramps advanced lazily;
+  - in `dsp::Voice`: Volume and Phase per sample, Pan on the grid, and a 10 ms crossfade of any change of the routes.
+- **Bit for bit** the prototype at host blocks 1/37/4096 with no allocation.
+- **Two flaws found and fixed** in both. Each made the output depend on the host's blocks: a silent slot's stale Phase offset, and modulated Noise drawing past its voices' end.
+- **Cost:** no routes costs nothing measurable against the build before.
+- **Tests:** 17 deliberate breaks, all caught.
+
+515 tests pass on macOS in debug. **Next:** task 5, the global destinations and hand-offs.
 
 **Phase 5 (VCV Rack modules) added to the plan** (2026-11-14). Not started. It starts after Phase 2 (D10, decided 2026-11-14). Its license and distribution are still open (D11).
 
@@ -321,7 +331,7 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
     - Tests (14 cases, `[modulation]`): the prototype to the bit at host blocks 1/37/4096 on 7 scenarios with no allocation; the init patch as it was; each source against its definition at every sample; each bound against its values at 44.1/48/96 kHz and blocks 1/37/4096, its widths the prototype's, three small rules failing; the free LFO's copy exact through a steal and from a late route; running only what is read is running everything where the prototype says so; `ControllerRamp`. Red against inert stubs (13 of 14, after strengthening one); 23 deliberate breaks, all caught by tests. The stage-1 report reproduces (but for a wall-clock time).
     - CPU, one voice: 4 routes +11.0 ns (stage 1 +11.9), 16 routes +31.2 (+33.5), 1–3% under the prototype in the same runs; no routes against today's voice a paired +0.8 ns, within the noise ([baselines](docs/performance/baselines.md#2026-11-23-m15-the-sources-as-built)).
     - Requirements recorded on task 4, M1.6, M1.7, M1.8 and M1.9 (below).
-- [~] **Task 4: The per-voice destinations**, each through its units, its rate (task 2), and its clamp.
+- [x] **Task 4: The per-voice destinations**, each through its units, its rate (task 2), and its clamp.
   - *Requirements from task 2's stage 2 (2026-11-22):* each destination's rate, units and clamp come from its `modulation::DestinationRow` (`destinationRow()`), never from a switch on the destination. Read the sums per target and part from `modulation::Sums::at()`; the Filter Control's terms are `Target::controlCutoff` and `Target::controlResonance`. `mixModulationBound()` and the Volume skip test take `modulation::targetBound(routes, target, part, bounds).hi` over the segment.
   - **Clamp each control plus its modulation to its knob's range before the knob law** (inventory F24, decided 2026-11-15 in M1.3 task 7): with 16 destination slots at ±10 each, an unclamped Resonance or Drive would reach far past its knob (k 108, +400 dB). The filter is correct up to its own ceilings (k 64, drive 1000) either way; this keeps the voice inside the knobs' ranges (k ≤ 6, drive ≤ +24 dB under F5 and F8). Applies to every destination whose knob has a range, with M1.9's parameter table. *For the filters' Cutoff and Resonance it is built (M1.3 task 6, 2026-11-21): the Filter Control's law clamps each control with its own modulation (`clampToKnob`), and the voice computes it, so k ≤ 12 with the Filter Control's Resonance added (F24, F28). It remains for Drive and every other destination.*
   - **The Filter Control's terms:** Cutoff A/B/AB and Reso A/B/AB, fed into the voice's existing grid-point feed. They are 0 today ([voice-architecture.md](docs/dsp/voice-architecture.md)).
@@ -338,7 +348,7 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
     - a bound that is too small fails a test;
     - host blocks of 1, 37 and 4096 give the same output to the bit;
     - CPU with 16 routes goes into the Phase 3 baselines.
-  - *Status (2026-11-23): stage 1 done; **the project owner chose every recommendation** (2026-11-23, Decisions log; [the decision](docs/dsp/modulation-destinations.md#the-decision)). Stage 2 builds it next.*
+  - *Status (2026-11-23): stage 1 done; **the project owner chose every recommendation** (2026-11-23, Decisions log; [the decision](docs/dsp/modulation-destinations.md#the-decision)). Stage 2 built it (below).*
     - **The evidence** (inventory §6, new [The destinations in detail](docs/reference/sylenth1-features.md#the-destinations-in-detail), M24–M27; M8 and M9 annotated):
       - The developer in 2026: "In v2 the osc inverses the wave amplitude at negative volume, in v3 it will mute negative volume". That confirms Volume's clamp at 0 and its units.
       - In 2023 a user said Pan modulation did nothing on a Noise oscillator; the developer: "Works fine here".
@@ -362,6 +372,21 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
       - the registry's clamps.
 
       Stage 2 must advance the slot's new ramps lazily, since the prototype's +2.5 ns per voice with no routes must go. CPU is in [baselines](docs/performance/baselines.md#2026-11-23-m15-the-destinations-stage-1-prototypes). 504 tests pass on macOS in debug.
+  - *Status (2026-11-23): **stage 2 done**; task 4 is done* ([as built](docs/dsp/modulation-destinations.md#as-built)). Bit for bit the stage-1 prototype in its decided configuration at host blocks 1/37/4096 with no allocation, but for two flaws stage 2 found:
+    - **What was built:**
+      - `volumeLaw` ([volume_law.hpp](libs/dsp/include/anoesis/dsp/oscillators/volume_law.hpp));
+      - `SlotModulation` ([slot_modulation.hpp](libs/dsp/include/anoesis/dsp/oscillators/slot_modulation.hpp));
+      - `StereoGain::skip()`;
+      - `OscillatorSlot`'s modulated path: its own knob ramps and per-voice presence, advanced lazily so the plain path costs what it did; Volume per sample; Pan on the grid; Phase folded with `setPhaseOffset()` and `trackPhase()`; Noise mixed; `isSilentUnder()` and `canSkipUnder()`;
+      - in `dsp::Voice`: Volume and Phase in the folded sums, Pan's grid sums, the slots' note-on after the sources', the crossfade of any change of the routes over `routeCrossfadeSegments()` segments with bounds the larger of old and new (`modulationBound()`), the Volume bound in the skip test, Pan routes off the mono path, and a fast path for a part with none of them.
+    - **The flaws:** both made the output depend on the host's blocks, and both are fixed in the prototype too:
+      - a slot with no voice sounding kept a stale Phase offset, now followed by `trackPhase()`;
+      - modulated Noise drew past its voices' end, now drawing while a voice's presence is above 0.
+    - **Left out:** the prototype's separate Phase-return path, which the crossfade makes unreachable.
+    - **The setters keep their arguments:** `setVolume(gain)` and `setPan(position)`, with knob units inside.
+    - **Tests:** 11 cases, red first (6 of 9 against inert stubs). 17 deliberate breaks, all caught.
+    - **Task 3's tests:** two comparisons with its prototype now assert the decided differences.
+    - **CPU:** no routes costs nothing against the build before (14 interleaved pairs: 130.1 against 130.3 ns), and the library is level with the prototype ([baselines](docs/performance/baselines.md#2026-11-23-m15-the-destinations-as-built)). 515 tests pass on macOS in debug.
 - [ ] **Task 5: Global destinations and hand-offs.**
   - The registry defines the global destinations (the effects' parameters, such as the phaser's centre frequency, and Main Volume if X7 finds it) under task 2's rule. Wiring them waits for the effects, so write it onto M1.7 as a requirement.
   - Step Velocity's wiring goes onto M1.6.

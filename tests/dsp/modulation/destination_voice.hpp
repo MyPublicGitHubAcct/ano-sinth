@@ -1893,11 +1893,12 @@ private:
                                    {
                                        const auto index = (p * slotsPerPart) + s;
                                        auto& slot = slots[index];
+                                       const auto m = slotModulation(index, knobs, done, start, run);
                                        if (slot.soundingVoices() == 0)
                                        {
+                                           slot.trackPhase(m);
                                            continue;
                                        }
-                                       const auto m = slotModulation(index, knobs, done, start, run);
                                        if (slotSkipping[index])
                                        {
                                            if (perSampleNotes)

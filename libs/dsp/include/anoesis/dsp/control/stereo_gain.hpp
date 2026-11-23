@@ -114,6 +114,15 @@ public:
         return left.isSmoothing() || right.isSmoothing();
     }
 
+    /// Advances both ramps `numSamples` samples without rendering, exactly
+    /// as process() would (M1.5 task 4: a slot whose gains are computed
+    /// elsewhere keeps these where they would be).
+    void skip(std::size_t numSamples) noexcept
+    {
+        left.skip(numSamples);
+        right.skip(numSamples);
+    }
+
     /// Adds left gain x `in` to channel 0 of `out` and right gain x `in` to
     /// channel 1, for the shorter of `in` and the block. A block with fewer
     /// than 2 channels is left untouched; channels after the second are

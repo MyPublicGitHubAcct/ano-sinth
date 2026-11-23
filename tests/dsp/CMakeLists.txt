@@ -65,6 +65,7 @@ add_executable(anoesis_dsp_tests
     modulation/source_candidates_test.cpp
     modulation/source_report.cpp
     modulation/source_bound_test.cpp
+    modulation/voice_destinations_test.cpp
     modulation/voice_sources_test.cpp
     oscillators/antialiasing_report.cpp
     oscillators/band_limited_oscillator_test.cpp
