@@ -6,7 +6,7 @@ Modulation moves a control over time without anyone turning its knob. A source (
 - **Sylenth1** (task 1): what is known about its sources, destinations and amounts, and what that means for the build.
 - **The model** (task 2): the candidates for the registries, the routing, each destination's rate, the order through cycles, a per-voice source on a global destination, and each source's bound; what they measured; the recommendations; and the project owner's decision (every recommendation, 2026-11-22).
 
-Task 2's stage 2 and tasks 3–5 will add the as-built sections.
+Task 2's stage 2 built the model in `libs/dsp` ([as built](#as-built-the-model)). Tasks 3–5 will add theirs.
 
 Read [lfos.md](lfos.md) and [envelopes.md](envelopes.md) (the sources), [keytracking.md](keytracking.md) (the keytrack source), [filter-control.md](filter-control.md) (the first destination built with modulation inputs, and the clamp), [mixer.md](mixer.md) (Mix, a destination applied per sample), and [part-solo-and-skipping.md](part-solo-and-skipping.md) (why each source must bound its value) first.
 
@@ -498,6 +498,115 @@ Chosen by the project owner on 2026-11-22: every recommendation (Decisions log).
 - **A per-voice source on a global destination:** each per-voice source has a global copy, which the global destinations read on the absolute 32-sample grid, ramped: an envelope gated by the first key down and released by the last, the last note-on's velocity, a free LFO's global instance, the last note's keytrack. A requirement on M1.7.
 - **Each source's bound:** an envelope by stage; an LFO exact, from its segment rendered ahead; a linear source its two ends; the rest their range. A slot at Volume 0 is silent only while its Volume routes can't lift it.
 
+## As built: the model
+
+Stage 2 (2026-11-22) built the decision's model in `libs/dsp`, test-first, against the stage-1 prototype's registry (a). It is the model only: the registries, the routing, the bounds, and when routes are compiled. The sources (task 3) and the per-voice destinations (task 4) are built inside `dsp::Voice` next, on top of it. Everything is in the namespace `anoesis::dsp::modulation`, so that names like `Target`, `Source` and `Interval` don't crowd `anoesis::dsp`.
+
+- **[registry.hpp](../../libs/dsp/include/anoesis/dsp/modulation/registry.hpp): the registries.**
+  - `enum class Destination` (None and the 27) and `enum class Source` (None and the 11), in the demo's menu order (M1, M2). The values are internal: presets never save them.
+  - Each `DestinationRow` holds only the DSP's fields: `target`, `parts` (A, B or AB; for the LFO targets LFO 1 or 2; part A for a global one), `scope`, `rate`, `unitsPerAmount` (1 knob unit, 12 semitones for Pitch) and `range` (F24's clamp: 0–10, Mix's 0–15, Phase's wrap, or none for Pitch). Each `SourceRow` holds its `scope`, its range (`min`, `max`) and its `bound` kind. **No strings and no groups:** the keys, the labels and the popup's groups go to M1.9's parameter table.
+  - **Position can't matter.** The rows are listed with their enum value (`destinationEntries`, `sourceEntries`) and placed at that value's index (`destinations`, `sources`). A `static_assert` checks that every value has exactly one row, so a list in another order builds the same table, and a missing or doubled row doesn't build.
+  - **Every row is checked at compile time:** only None moves nothing; a voice row acts on a part; a global row is on part A and never per sample; units are positive and finite; a range is ordered and finite, or unbounded; AB on a filter's own Cutoff or Resonance is refused (it must be the Filter Control's term). Rows that share a target agree on scope, rate, units and range (the voice reads them per target), and never act on the same parts.
+  - The ranges come from the laws themselves (`filterControlLaw.knobMin`/`knobMax`, `mixLaw.knobMin`/`knobMax`), not from copied numbers. The LFO's constants are here too: `lfoSourceScale` 0.5 (M6), `lfoWaveLimit` 1.25 (a slew's overshoot, lfo.hpp), `lfoSourceLimit` 1.125.
+- **[routing.hpp](../../libs/dsp/include/anoesis/dsp/modulation/routing.hpp): routing.**
+  - `Slot` (a source, a destination and an amount) and `Slots`, the 16. The default is the init patch: every slot empty. `slotOwners` records the panel's layout (two slots each for ModEnv 1/2 and LFO 1/2, then 8 misc slots).
+  - `compile(slots)` returns `CompiledRoutes`: the live routes in slot order, each 8 bytes (source, target, parts, amount × units). A slot drops out if either end is None or outside the enums, or if its amount is 0 or NaN. **The amount is held to [−10, +10].** The result also records, per target, which parts a route reaches (`routesTo()`) and, per source, whether a route reads it (`uses()`). The prototype voice computed both for itself. Tasks 3 and 4 use them to run only the sources in use and to keep an unmodulated target on its exact path.
+  - `accumulate(routes, values, sums)` adds amount × value into `Sums`, one sum per target and part. AB adds to both parts, except Cutoff AB and Reso AB, whose rows are the Filter Control's own targets (`controlCutoff`, `controlResonance`). With no routes it adds nothing, so the sums stay exactly what they were.
+- **[source_bound.hpp](../../libs/dsp/include/anoesis/dsp/modulation/source_bound.hpp): the bounds.**
+  - `Interval`, `scaled()` (amount × an interval, flipped for a negative amount) and the per-kind functions. `envelopeBound()` works by stage (`EnvelopeState`, read from an `Adsr` with `envelopeState()`). `lfoBound(wave, gain, offset)` takes each as an interval, with `waveBound()` the minimum and maximum of the segment rendered ahead. `linearBound()` takes the two ends. `lfoSourceValue()` is the LFO as a source, 0.5 × gain × (wave + offset).
+  - `sourceBound(source, inputs)` dispatches on the row's kind (`boundOfRow()`). That is the one switch, and it is on the kind, not the source.
+  - `targetBound(routes, target, part, bounds)` gives the interval a target's modulation on a part lies in: the sum over its routes of amount × the source's interval. It is exactly 0 with no route there. This is what `mixModulationBound()` and the Volume skip test will call in tasks 3 and 4.
+- **[route_compiler.hpp](../../libs/dsp/include/anoesis/dsp/modulation/route_compiler.hpp): when routes are compiled.**
+  - `Patch` is the engine's: the 16 slots and a version that every `set()` bumps.
+  - `RouteCompiler` is the voice's. `update(patch)` compiles only if the version moved since its last compile, or if nothing has been compiled since `reset()`. The voice calls `reset()` and `update()` at a note-on from silence, and `update()` at each of its own grid points. A patch change mid-segment therefore takes effect at that voice's next grid point, wherever the host's blocks fall. A grid point with no change costs one comparison.
+  - **"At a note-on" means a note-on from silence, as in the prototype.** A note-on on a sounding voice keeps its grid (M1.4 task 2), and the prototype's retrigger path doesn't compile, so such a voice takes a change at its next grid point, like any other change.
+  - **Not built into `dsp::Voice` here.** Nothing in the voice reads the routes until the sources exist, so the helper goes in with task 3, as a requirement in PLAN.md. There it must add an exact 0 with no sources wired, and the init patch must render bit-identically to today.
+
+### What differs from the prototype, and why
+
+None of these changes a sum or a bound on any patch the prototype accepts (the bit-for-bit tests below):
+
+- **Rows carry their enum value and are placed by it.** The prototype's table was indexed by position, with a `static_assert` on three of its rows. Placement makes the order irrelevant, and the "each value once" check covers every row.
+- **No keys, labels or groups.** The prototype's key checks (unique, in a fixed alphabet, found by key and not by label) move to M1.9 with the keys.
+- **A slot holds the enums**, not `uint8_t` indices. Values outside the enums drop out like an empty slot, as the prototype's bounds check did.
+- **The amount is held to ±10.** The prototype trusted its inputs. Inside the range nothing changes. Outside it, a preset or a bug can't add 16 × ∞.
+- **`CompiledRoutes` carries `routed` and `used`**, which the prototype voice built itself in `compileIfChanged()`.
+- **A fifth bound kind, `range`**, for the decision's "the rest, their range". None of the 11 sources uses it. It is there so a Phase 2 source with nothing tighter is one row.
+- **`targetBound()` returns both ends.** The prototype's `modulationBound()` summed only the top. The top is the same to the bit. The bottom costs one add per route, and it is there for a test that needs to know how far a factor can be pulled down.
+- **`RouteCompiler` remembers whether it has compiled** (`hasCompiled`). The prototype used version `0xFFFFFFFF` as "never", so a patch that reached that version would never have compiled.
+
+**Found in the build:** no flaw in the prototype. `tests/dsp/modulation/` is unchanged, and the stage-1 report reproduces to the printed digit. Two findings for the tasks that build on this:
+
+- **Bit for bit depends on statement structure.** A test's expected value written as one expression, `4 + (−3 × w)`, gave a different float from `accumulate()` at sample 1,031 (the first the test found; it stops there). Apple Clang contracts a multiply and an add within one expression into a fused multiply-add (`-ffp-contract=on`), but not across statements. `accumulate()` and the prototype both form the product in a statement of its own, so they agree to the bit. Tasks 3 and 4 must keep that structure wherever they reproduce the prototype, and the expected values in tests must too.
+- **Selecting `[modulation]` also runs the hidden benchmarks** that carry that tag (stage 1's included), which takes about 2 minutes in debug. Run the tests alone with `"[modulation]~[!benchmark]"` (1.5 s).
+
+### Tests (stage 2)
+
+Under `[modulation]` in the default run: 22 test cases in four files, plus `static_assert`s in each header and test file.
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| The registry against the prototype ([registry_test.cpp](../../tests/dsp/modulation/registry_test.cpp)) | every destination row's six DSP fields and every source row's four against `dspDestinations` and `sourceRows`; the enums against `table_registry`'s, by name; the LFO's range 1.125 | bit for bit |
+| The rows' checks | `static_assert`s: the counts; lookups by value, out of range is None; Mix's and the filters' ranges are the laws'; Pitch unbounded, Phase wraps. Each broken row (no part, global per sample, units 0, a reversed range, AB on the filters' own Cutoff, None with a target, a row with no target, a source's reversed range, None with a range, a source with no kind) fails its check; a list with a value twice or missing fails placement, a reordered one passes | compile time |
+| Shared targets and AB | Volume, Pitch, Phase, Pan and Mix each have A, B and AB on one target; Cutoff and Reso A/B on the filters', AB on the Filter Control's; the two global rows on part A, not per sample | exact |
+| Routing against the prototype ([routing_test.cpp](../../tests/dsp/modulation/routing_test.cpp)) | 400 random patches (a quarter of slots empty, a fifth at 0): the same live routes (source, target, parts, scaled amount); the same sums from random values, starting from 0 or from random sums; `routesTo()` and `uses()` against the prototype voice's own | bit for bit (`std::bit_cast`) |
+| Bounds against the prototype | 400 random patches with random inputs per source: each source's bound against `table_registry::bound()` and `boundDsp()`, each target's on each part against the prototype voice's `modulationBound()` (both ends); 2,000 random inputs to each kind's function (`envelopeBound`, `linearBound`, `lfoBound`, `waveBound`) and `lfoSourceValue` against the prototype's | bit for bit |
+| Exact 0 | the init patch: no routes, every sum +0.0, every target bound +0.0; amounts of 0, −0 and NaN, ends of None or outside the enums, among random sums: unchanged to the bit; an empty slot between live ones changes nothing | bit for bit |
+| AB, units and sums | Volume/Pitch/Phase/Pan/Mix AB on both parts; Cutoff AB and Reso AB on the Filter Control's term only; Pitch 12 per unit; two routes at +10 make Mix +15; the LFO targets' bits | bit for bit |
+| The amount's clamp | 25, −10³⁰, +∞ held to ±10 (Pitch's ∞ to 120 semitones), 9.5 untouched | bit for bit |
+| No allocation | compile, accumulate, 12 bounds and a target bound, 50 random patches | 0 allocations |
+| Constant expressions | `static_assert`s: Volume AB +2 from velocity 0.5 is 1 on both parts, empty slots add nothing; Cutoff AB lands on the Filter Control's term; a route's bound (−2 × a release from 0.5 is [−1, 0], nothing on the other part) | compile time |
+| The envelope's bound ([source_bound_test.cpp](../../tests/dsp/modulation/source_bound_test.cpp)) | 36,000 stretches of 1–32 samples (12,000 at each of 44.1, 48 and 96 kHz): 180 random ADSRs with random gates and sustain changes between stretches, each stretch rendered in host blocks of 1, 7 or 32; every sample inside the bound taken at its start | no sample outside |
+| The LFO's bound | 79,200 grid segments (26,400 at each rate): 264 LFOs of every waveform from 0.1 Hz to 819 Hz, gain held or ramped as the prototype voice ramps it, a random offset, retriggers mid-segment rendering the rest again from a copy taken at the grid point. The bound for each chunk that host blocks of 1, 37 or 4096 make; every value inside it and inside ±1.125; with the gain held, the bound equal to the values' minimum and maximum. A twin run in the host's chunks, retriggered at the same samples, makes the same wave | no sample outside; exact in every held chunk; the twin bit for bit |
+| A bound that is too small fails | the same checks with an envelope's level alone, an LFO's two ends (no crests, no slews), and the exact LFO bound one ulp narrower at each end | over 1,000 samples outside, each |
+| Each stage's bound, each interval | idle, attack (below and above the sustain), decay, sustain, release; a sine at Gain 10 ±0.5, Offset +10 0 to 1, a ramping gain, an offset interval, the widest (±1.125) | exact |
+| When routes compile ([route_compiler_test.cpp](../../tests/dsp/modulation/route_compiler_test.cpp)) | two stand-in voices on different grids (note-ons at 0 and 517), the patch changed at 1000 (mid-segment for both), a retrigger at 1500; Mix A per sample and Cutoff A held at grid points, at host blocks of 1, 37 and 4096; each voice compiles once for the change | bit for bit; 0 allocations |
+| Each voice's own grid point | voice 0 takes the change at 1024, voice 1 at 1029, every sample's value against its expected one; Cutoff A held from each voice's own grid points | bit for bit |
+| A grid that follows the host differs | the control: a voice whose grid restarts at each `process()` call gives different held values at blocks of 37 and 4096 | differs |
+| `update()` | compiles first, then only on a change; `reset()` forgets; an out-of-range slot changes nothing; a whole preset; any change of version | exact |
+
+**Red first.** Against headers with the API and inert bodies, the three constant-expression checks didn't compile. With those switched off, 15 of the 22 cases failed. The seven that passed were the five registry tests (the registry is data, written with its tests), the no-allocation test, and the LFO bound's test, which passed for the wrong reason: it took the source's value from the library's `lfoSourceValue()`, inert at 0, so every value fit the inert bound of [0, 0]. It now computes the value itself, as the prototype voice does, and checks that most values aren't 0. Then it failed too (16 of 22).
+
+**Deliberate breaks.** 15, each built and run on its own. All 15 were caught: 7 by `static_assert`s and 8 by the tests.
+
+| Break | Caught by |
+|---|---|
+| Pan A held on the grid (one row) | the shared-target check (compile time) |
+| Mix AB on a 0–10 range | the shared-target check (compile time) |
+| `pitchA` and `pitchB` swapped in the enum | the prototype comparisons of the rows, the routes and the bounds (2,340 assertions) |
+| KeyTrack's top 1.2 | the source rows against the prototype |
+| Aftertouch per voice | the source rows against the prototype |
+| AB adds only to part A | a constant expression (compile time) |
+| An amount of 0 kept | a constant expression (compile time) |
+| `uses()` misses velocity | a constant expression (compile time) |
+| No clamp on the amount | the clamp test |
+| `update()` never recompiles | the block-size, grid-point and `update()` tests |
+| `reset()` forgets nothing | the `update()` test |
+| The attack's bound ignores the decay after it | the random envelope stretches, each stage's bound, and the prototype comparisons |
+| `lfoBound()` drops a corner | the prototype comparisons, the random LFO segments, and the intervals test |
+| `waveBound()` skips the last sample | the prototype comparisons and the random LFO segments |
+| `targetBound()` ignores the amount's sign | a constant expression (compile time) |
+
+### CPU (stage 2)
+
+`tools/bench.sh "[modulation]"`, `relwithdebinfo`, Apple M1 Ultra (virtualised), Apple Clang 21.0.0. Each benchmark is one call; the median of three runs (spread 0.6–6%, except accumulate with 4 routes, 18% from one fast run). The prototype's registry (a) ran on the same 16 routes in the same session ([modulation_routes_benchmark.cpp](../../tests/dsp/benchmarks/modulation_routes_benchmark.cpp)). Full table: [baselines.md](../performance/baselines.md#2026-11-22-m15-the-modulation-model-as-built).
+
+| Per call | library | prototype (a), this session | stage 1 |
+|---|---:|---:|---:|
+| `accumulate()`, 0 routes | 1.72 | | |
+| `accumulate()`, 4 routes | 6.50 | | |
+| `accumulate()`, 16 routes | **13.70** | 13.56 | 13.97 |
+| `compile()`, 16 routes | 22.30 | 17.56 | 18.71 |
+| 16 source bounds, in a runtime order | 20.83 | | 18.93 |
+| Mix A's bound from the 16 routes (`targetBound()`) | 8.09 | | |
+| `RouteCompiler::update()`, the patch unchanged | 0.62 | | |
+| `RouteCompiler::update()` after a change (a compile) | 27.13 | | |
+
+- **`accumulate()` costs what the prototype's did**: 13.70 ns for 16 routes against 13.56 in the same session and stage 1's 13.97. Its 1.72 ns with no routes is the benchmark zeroing its 28 sums. The loop over no routes costs nothing, which is what a voice with the init patch pays.
+- **`compile()` costs 4.7 ns more than the prototype's** (22.30 against 17.56): the amount's clamp, and `routesTo()` and `uses()` recorded as it goes, which the prototype voice did in a second loop of its own. It runs once per voice per patch change, at a grid point.
+- **A grid point with nothing changed costs 0.62 ns** (`update()`'s one comparison).
+- **The 16 bounds cost 20.83 ns against stage 1's 18.93**, in a different session from a different binary; there was no same-session prototype run for them. A voice asks only for the sources its routes read, and only at a grid point where the skip test runs.
+
 ## Tests
 
 Task 1 is research and adds no code. Task 2's stage 1 adds the prototypes' checks under `[modulation-model]` in the default run ([modulation_test.cpp](../../tests/dsp/modulation/modulation_test.cpp)):
@@ -510,7 +619,9 @@ Task 1 is research and adds no code. Task 2's stage 1 adds the prototypes' check
 - `ModVoice` with no routes is `dsp::Voice` to the bit, at host blocks of 512 and 37;
 - a busy patch (12 routes, an LFO cycle and a self-route) gives the same output at host blocks of 1, 37 and 4096 at every rate in both LFO orders, with no allocation.
 
-The compile-time checks are `static_assert`s on the rows and on each candidate. Tasks 3–4 add the library's tests: each source's values against its definition and its bound against its values, each destination's units and clamp, the init patch rendering bit-identically to before, and bit for bit the stage-1 prototype at host blocks of 1, 37 and 4096.
+Task 2's stage 2 adds the library's tests under `[modulation]` in the default run, 22 test cases in [registry_test.cpp](../../tests/dsp/modulation/registry_test.cpp), [routing_test.cpp](../../tests/dsp/modulation/routing_test.cpp), [source_bound_test.cpp](../../tests/dsp/modulation/source_bound_test.cpp) and [route_compiler_test.cpp](../../tests/dsp/modulation/route_compiler_test.cpp) ([as built](#tests-stage-2)): the registries, `compile()`, `accumulate()` and every bound against the prototype's registry (a), bit for bit, on 400 random patches; an exact 0 from an empty slot, an amount of 0 and the init patch; each bound against its source's values over 36,000 envelope stretches and 79,200 LFO segments at three sample rates and three host block sizes, with three bounds that are too small failing the same checks; recompiling at the voices' own grid points, the same at host blocks of 1, 37 and 4096 with a patch change mid-block; no allocation. Benchmarks: `[!benchmark][modulation]` in [modulation_routes_benchmark.cpp](../../tests/dsp/benchmarks/modulation_routes_benchmark.cpp).
+
+The compile-time checks are `static_assert`s on the rows and on each candidate, and in the library on every row. Tasks 3–4 add the voice's tests: each source's values against its definition and its bound against its values, each destination's units and clamp, the init patch rendering bit-identically to before, and bit for bit the stage-1 prototype at host blocks of 1, 37 and 4096.
 
 ## References
 

@@ -6,6 +6,30 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-22: M1.5 the modulation model, as built
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[modulation]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.6–6%, except accumulate with 4 routes, 18% from one fast run).
+- **What is measured** ([modulation.md](../dsp/modulation.md#cpu-stage-2)): the library's `anoesis::dsp::modulation` (libs/dsp modulation/), per call, on stage 1's mixed patch (16 live routes): `accumulate()` with 0, 4 (slots 0, 4, 8 and 10: an envelope, an LFO, velocity, the wheel) and 16 routes; `compile()` of the 16 slots; 16 source bounds in a runtime order; Mix A's bound from the 16 routes; `RouteCompiler::update()` unchanged and after a change. Then the prototype's registry (a) on the same routes in the same binary, and stage 1's own registry benchmarks in the same runs.
+
+| Per call (ns) | library | prototype (a), same routes | stage 1's registry (a) benchmark, these runs |
+|---|---:|---:|---:|
+| accumulate, 0 routes | 1.72 | | |
+| accumulate, 4 routes | 6.50 | | |
+| accumulate, 16 routes | 13.70 | 13.56 | 13.91 |
+| compile, 16 routes | 22.30 | 17.56 | 17.45 |
+| 16 source bounds (a runtime order) | 20.83 | | |
+| Mix A's bound from 16 routes | 8.09 | | |
+| `update()`, unchanged | 0.62 | | |
+| `update()`, after a change | 27.13 | | |
+
+### Observations
+
+- **`accumulate()` is the prototype's cost**: 13.70 ns for 16 routes against 13.56 on the same routes, 13.91 for stage 1's benchmark in these runs, and stage 1's recorded 13.97. With no routes, the 1.72 ns is the benchmark zeroing its 28 sums; the loop itself is empty.
+- **`compile()` is 4.7 ns slower than the prototype's** (22.30 against 17.56) because it also clamps the amount and records `routesTo()` and `uses()`. It runs once per voice per patch change, at a grid point. With the patch unchanged a grid point costs 0.62 ns.
+- **These are per call, not per sample.** A voice calls `update()` once per 32-sample segment (0.02 ns per sample), and `accumulate()` per segment or per sample as each destination's rate requires (tasks 3 and 4).
+
+---
+
 ## 2026-11-22: M1.5 the modulation model, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[modulation]"`, 100 samples per benchmark, three runs; the tables give each row's median (spread 0.4–6.6%).
