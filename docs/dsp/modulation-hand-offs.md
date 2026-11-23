@@ -11,6 +11,7 @@ The last task of M1.5 (task 5). [modulation.md](modulation.md) built the model, 
 - **Theory:** routes a consumer never reads; a modulation slot as parameters, and why a menu's host value depends on how many entries it has; persisting a choice by key; default CCs and MIDI learn.
 - **Sylenth1:** what is known (inventory §6, new [Global destinations, parameters and CCs](../reference/sylenth1-features.md#global-destinations-parameters-and-ccs), M28–M30). New for this task: the manual's default CC table (pp. 31–32) has no modulation control.
 - **Stage 1:** two candidates for global routes in the voice, measured; the recommendations, and the hand-offs. Chosen by the project owner on 2026-11-23, every one ([The decision](#the-decision)).
+- **Stage 2:** `compile()` by scope, the voice's `RouteCompiler`, and a flaw it found (a recompile that gave the same routes still started a crossfade); the tests, the deliberate breaks, and CPU ([As built](#as-built)).
 
 Read [modulation.md](modulation.md) first (scope, the registry, and [question 5](modulation.md#question-5-a-per-voice-source-on-a-global-destination), a per-voice source on a global destination).
 
@@ -135,7 +136,7 @@ That is per voice: 16 voices pay it 16 times, for nothing they read.
 
 Chosen by the project owner on 2026-11-23: every recommendation (Decisions log).
 
-- **Global routes in the voice:** the voice compiles only its own routes. `compile()` takes a scope, and `RouteCompiler` compiles for one: `Scope::voice` in `dsp::Voice`, `Scope::global` in M1.7's engine, from the same 16 slots. Stage 2 builds this in `libs/dsp`.
+- **Global routes in the voice:** the voice compiles only its own routes. `compile()` takes a scope, and `RouteCompiler` compiles for one: `Scope::voice` in `dsp::Voice`, `Scope::global` in M1.7's engine, from the same 16 slots. Built in stage 2 ([As built](#as-built)).
 - **M1.9:**
   - the 16 amounts are host-automatable floats from −10 to +10, linear, default 0, MIDI-learnable;
   - the 16 destination menus and the 4 misc source menus are preset state, stored by key, not host-automatable and not MIDI-learnable;
@@ -148,10 +149,70 @@ Chosen by the project owner on 2026-11-23: every recommendation (Decisions log).
 
 **The inventory (M28–M30):** M28's menus are our own choice, made for Phase 2's rows, whatever the demo shows; M29 is our working hypothesis; M30 goes to M1.9.
 
+## As built
+
+Stage 2 (2026-11-23) built recommendation 1 in `libs/dsp`. The rest are requirements now recorded on M1.6, M1.7, M1.9, M1.10 and M1.11 in [PLAN.md](../../PLAN.md).
+
+- **`compile(slots, scope)`** ([routing.hpp](../../libs/dsp/include/anoesis/dsp/modulation/routing.hpp)) keeps the live routes of one scope, in slot order. `compile(slots)` still keeps every route: both go through one loop, which checks the destination row's scope after the liveness test, so `compile(slots)` is unchanged.
+- **`RouteCompiler`** ([route_compiler.hpp](../../libs/dsp/include/anoesis/dsp/modulation/route_compiler.hpp)) takes its scope at construction, `Scope::voice` by default, and `scope()` reports it. `dsp::Voice` names it: `RouteCompiler{Scope::voice}`. M1.7's engine will hold one with `Scope::global`.
+- **`sameRoutes(a, b)`** ([routing.hpp](../../libs/dsp/include/anoesis/dsp/modulation/routing.hpp)): the same routes in the same order, each amount to the bit. `dsp::Voice` starts its crossfade only when a recompile gives different routes.
+
+### What differs from stage 1, and why
+
+**Found: a recompile that gave the same routes still started a crossfade.** Every `Patch::set()` bumps the patch's version, so a voice recompiles at its next grid point after *any* slot changes. Before stage 2, the voice treated every recompile as a change of its routes and started its 10 ms crossfade. With the scope filter alone, a change to a global slot therefore still started a crossfade in every voice. That crossfade blended identical sums, so it was exact in itself, but it held back the next real change for up to 10 ms: the −14.1 dBFS of stage 1's delayed-change case was still there. The same held for a per-voice slot re-sent unchanged, as host automation and preset reloads may do.
+
+Stage 1's reference, (b), is the patch with its global routes removed, so it never bumps the version for them. Matching it needs the voice to ask whether the routes changed, not whether it compiled. `RouteCompiler::update()` keeps its meaning (true when it compiled, pinned by task 2's tests). The voice compares the routes before and after with `sameRoutes()`. The same fix went into task 4's prototype (`DestVoice`), so the library and the prototype still agree to the bit wherever task 4's tests compare them.
+
+Task 4's decision was "a crossfade of any change of the routes", and a slot set to what it holds is no change of the routes, so this fix is that decision built as written.
+
+### Tests (stage 2)
+
+[global_routes_test.cpp](../../tests/dsp/modulation/global_routes_test.cpp), 8 cases (`[modulation]`), and two compile-time checks:
+
+- **`compile()` by scope:** on 400 random patches, each scope's compile equals `compile()` of the slots with the other scope's routes emptied, and the two counts add up to `compile()`'s. A `static_assert`: a global route is no route to a voice, and the engine's compile keeps it.
+- **`RouteCompiler`:** the voice's scope by default and the engine's on request, each the matching `compile()`, with no allocation.
+- **`sameRoutes()`:** a `static_assert` that a route's amount, source, destination and count each matter, and that a route moved to another slot or a global route added doesn't. On 400 random patches it agrees with the test's own comparison.
+- **The voice is the patch without its global routes, to the bit, at host blocks of 1, 37 and 4096:**
+  - only global routes, with a Noise slot and an S&H LFO (no allocation);
+  - the busy patch with global routes;
+  - a global change 97 samples before a per-voice change (stage 1: −14.1 dBFS);
+  - a late route on an LFO that a global route reads, on a sine and on S&H (stage 1: −26.0 and −21.6).
+- **A slot re-sent unchanged** is the patch without the re-send, at host blocks of 1, 37 and 4096.
+- **An amount's change alone still crossfades:** Mix A from −5 to −10 reaches exact silence on the crossfade's last sample, not at the grid point.
+- **The report** ("[global-routes-report]") now prints the library against the reference: no difference in any case. Stage 1's numbers come from commit a455b3e.
+
+**Red first:** against inert stubs that ignored the scope, the `static_assert` failed and 4 of 5 runtime cases failed (the init-patch case passed, as stage 1 found it would). The re-send case failed before the `sameRoutes()` fix.
+
+**Deliberate breaks:** 8 tried, 7 caught (by a `static_assert` or by 2–17 failing cases):
+- `compile()` ignoring the scope;
+- `RouteCompiler` ignoring it;
+- the voice compiling global routes;
+- the voice without `sameRoutes()`;
+- `sameRoutes()` ignoring the amount (caught only after the amount-only crossfade test and the `static_assert` were added);
+- ignoring the source;
+- ignoring the count (caught only after a prefix case was added).
+
+The eighth, `sameRoutes()` ignoring `routed` and `used`, is equivalent, since both follow from the routes. The comparison was removed.
+
+All 58 `[modulation]` cases pass, task 3's and task 4's comparisons with their prototypes included.
+
+### CPU (stage 2)
+
+One held voice, "[global-routes]", 4 runs, medians ([baselines](../performance/baselines.md#2026-11-23-m15-global-routes-as-built)):
+
+| Routes | stage 1 (a) | as built |
+|---|---:|---:|
+| none | 130.3 | 128.6 |
+| 4 global routes | 129.6 | 128.3 |
+| 16 global routes | 134.3 | 127.7 |
+| 16 global routes, a change at every grid point | 139.0 | 130.6 |
+
+Global routes now cost what no routes costs. The last row still recompiles and compares at every grid point (+2 ns). `compile()` for 16 routes costs 22.4–23.3 ns, against 22.30 before.
+
 ## Tests
 
-- [global_routes_test.cpp](../../tests/dsp/modulation/global_routes_test.cpp): only global routes is (b) to the bit at host blocks of 1, 37 and 4096, with no allocation; the busy patch with global routes is (b) to the bit; a global change delays a per-voice one in (a); the hidden report ("[global-routes-report]") prints the differences above.
-- [destination_benchmark.cpp](../../tests/dsp/benchmarks/destination_benchmark.cpp): "[global-routes]", the CPU above.
+- [global_routes_test.cpp](../../tests/dsp/modulation/global_routes_test.cpp): above.
+- [destination_benchmark.cpp](../../tests/dsp/benchmarks/destination_benchmark.cpp): "[global-routes]".
 
 ## References
 

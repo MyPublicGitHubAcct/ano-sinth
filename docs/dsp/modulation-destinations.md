@@ -339,6 +339,9 @@ Chosen by the project owner on 2026-11-23: every recommendation (Decisions log).
 
 ## As built
 
+
+*Later (M1.5 task 5, 2026-11-23): the crossfade starts only when a recompile gives different routes (`sameRoutes()`). A slot set to what it holds, or a change to a global route, no longer starts one and holds back the next change ([modulation-hand-offs.md](modulation-hand-offs.md#what-differs-from-stage-1-and-why)).*
+
 Stage 2 (2026-11-23) built the decision into `libs/dsp`, test-first. It is bit for bit the stage-1 prototype in its decided configuration (`DestVoice` with `decidedAt()`: the slot's own knob ramps, the crossfade over ⌈10 ms × fs / 32⌉ segments, Noise mixed, the Volume bound), except for two flaws stage 2 found. Both break the invariant that the output doesn't depend on the host's blocks, so they are fixed in the prototype too, and the stage-1 report reproduces unchanged.
 
 - **[volume_law.hpp](../../libs/dsp/include/anoesis/dsp/oscillators/volume_law.hpp): `volumeLaw`, `volumeUnits()`, `volumeGain()`.** This is Volume's law beside `mixLaw`: the knob plus its modulation clamped to [0, 10] (NaN is silence), then linear, with 10 as unity.

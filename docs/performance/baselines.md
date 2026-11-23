@@ -6,6 +6,25 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-23: M1.5 global routes, as built
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[global-routes]"`, 100 samples per benchmark, four runs; the table gives each row's median (the no-routes row spread 126.4–129.1).
+- **What is measured** ([modulation-hand-offs.md](../dsp/modulation-hand-offs.md#cpu-stage-2)): stage 1's held voice and routes, with `dsp::Voice` compiling only its own routes (`compile(slots, Scope::voice)`) and starting a crossfade only when its routes change (`sameRoutes()`).
+
+| Benchmark: one voice (ns / sample) | stage 1, (a) | as built |
+|---|---:|---:|
+| no routes | 130.3 | 128.6 |
+| 4 global routes | 129.6 | 128.3 |
+| 16 global routes | 134.3 | 127.7 |
+| 16 global routes, a change at every grid point | 139.0 | 130.6 |
+
+### Observations
+
+- **Global routes cost what no routes costs.** With a change at every grid point the voice still recompiles and compares (+2 ns).
+- **`compile()` is unchanged:** 16 routes in 22.4–23.3 ns (`[modulation]`'s "compile 16 routes"), against 22.30 when it was built.
+
+---
+
 ## 2026-11-23: M1.5 global routes, stage 1
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[global-routes]"`, 100 samples per benchmark, four runs; the table gives each row's median (the no-routes row spread 124.7–132.5).

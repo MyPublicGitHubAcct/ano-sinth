@@ -500,6 +500,9 @@ Chosen by the project owner on 2026-11-22: every recommendation (Decisions log).
 
 ## As built: the model
 
+
+*Later (M1.5 task 5, 2026-11-23): `compile()` gained a scope. A voice compiles only `Scope::voice` routes, and M1.7's engine will compile `Scope::global` ([modulation-hand-offs.md](modulation-hand-offs.md#as-built)).*
+
 Stage 2 (2026-11-22) built the decision's model in `libs/dsp`, test-first, against the stage-1 prototype's registry (a). It is the model only: the registries, the routing, the bounds, and when routes are compiled. The sources (task 3) and the per-voice destinations (task 4) are built inside `dsp::Voice` next, on top of it. Everything is in the namespace `anoesis::dsp::modulation`, so that names like `Target`, `Source` and `Interval` don't crowd `anoesis::dsp`.
 
 - **[registry.hpp](../../libs/dsp/include/anoesis/dsp/modulation/registry.hpp): the registries.**

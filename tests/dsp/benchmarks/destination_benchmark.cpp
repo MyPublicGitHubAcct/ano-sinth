@@ -408,9 +408,10 @@ TEST_CASE("Destinations as built: CPU per voice, against the prototype as decide
 
 TEST_CASE("Global routes: CPU per voice of routes the voice doesn't read", "[!benchmark][global-routes]")
 {
-    // M1.5 task 5, stage 1 (global_routes_test.cpp): candidate (a), today,
-    // compiles routes to Phaser Frequency and Distortion Amount into every
-    // voice; (b) leaves them out, which costs what no routes costs.
+    // M1.5 task 5 (global_routes_test.cpp): routes to Phaser Frequency and
+    // Distortion Amount. Stage 1 measured candidate (a), every voice
+    // compiling them (commit a455b3e); as built, (b), the voice compiles
+    // only its own routes, so these should cost what no routes costs.
     const Routes globalFour = [](mod::Patch& p)
     {
         p.set(0, {.source = Source::modEnv1, .destination = Dest::phaserFrequency, .amount = 0.5f});
@@ -420,18 +421,18 @@ TEST_CASE("Global routes: CPU per voice of routes the voice doesn't read", "[!be
     };
     {
         Held<dsp::Voice<>> h{nullptr, {}};
-        bench("global routes: dsp::Voice, no routes ((b) with any global routes)", h);
+        bench("global routes: dsp::Voice, no routes", h);
     }
     {
         Held<dsp::Voice<>> h{globalFour, {}};
-        bench("global routes: dsp::Voice (a), 4 global routes", h);
+        bench("global routes: dsp::Voice, 4 global routes", h);
     }
     {
         Held<dsp::Voice<>> h{sixteen(Dest::phaserFrequency), {}};
-        bench("global routes: dsp::Voice (a), 16 global routes", h);
+        bench("global routes: dsp::Voice, 16 global routes", h);
     }
     {
         Held<dsp::Voice<>> h{sixteen(Dest::phaserFrequency), {}, true};
-        bench("global routes: dsp::Voice (a), 16 global routes, a change every segment", h);
+        bench("global routes: dsp::Voice, 16 global routes, a change every segment", h);
     }
 }

@@ -17,6 +17,9 @@
 ///   holds its source, its destination's target and parts, and the amount
 ///   already in the target's units (amount x units per amount). The amount
 ///   is held to [-10, +10].
+/// - compile(slots, scope) keeps only the routes of one scope (M1.5 task 5):
+///   a voice compiles Scope::voice, the engine Scope::global (the master
+///   effects' destinations, M1.7), from the same 16 slots.
 /// - accumulate() adds amount x the source's value into the target's sum on
 ///   each part the route acts on: AB is both parts, except Cutoff AB and
 ///   Reso AB, which are the Filter Control's own targets (registry.hpp).
@@ -28,6 +31,7 @@
 #include <anoesis/dsp/modulation/registry.hpp>
 
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -108,8 +112,10 @@ struct CompiledRoutes
     return amount < -amountMax ? -amountMax : amount;
 }
 
-/// The slots' live routes, in slot order.
-[[nodiscard]] constexpr CompiledRoutes compile(const Slots& slots) noexcept
+namespace detail
+{
+/// The slots' live routes, in slot order: every scope, or only `scope`.
+[[nodiscard]] constexpr CompiledRoutes compileRoutes(const Slots& slots, bool everyScope, Scope scope) noexcept
 {
     CompiledRoutes c;
     for (const auto& slot : slots)
@@ -123,8 +129,12 @@ struct CompiledRoutes
         {
             continue;
         }
-        const float amount = clampAmount(slot.amount);
         const auto& row = destinations[d];
+        if (!everyScope && row.scope != scope)
+        {
+            continue;
+        }
+        const float amount = clampAmount(slot.amount);
         c.routes[c.count] = {
             .source = slot.source,
             .target = row.target,
@@ -136,6 +146,48 @@ struct CompiledRoutes
         c.used[s] = true;
     }
     return c;
+}
+} // namespace detail
+
+/// The slots' live routes, in slot order, of every scope: what the voices
+/// and the engine compile between them.
+[[nodiscard]] constexpr CompiledRoutes compile(const Slots& slots) noexcept
+{
+    return detail::compileRoutes(slots, true, Scope::voice);
+}
+
+/// The live routes of one scope, in slot order (M1.5 task 5, decided
+/// 2026-11-23): Scope::voice, the routes a voice reads; Scope::global, the
+/// master effects' (the engine's, M1.7). A voice never compiles a global
+/// route, so it never runs a source, crossfades or leaves its no-routes
+/// path for a route it doesn't read.
+[[nodiscard]] constexpr CompiledRoutes compile(const Slots& slots, Scope scope) noexcept
+{
+    return detail::compileRoutes(slots, false, scope);
+}
+
+/// True if a and b are the same routes: in the same order, each amount to
+/// the bit (routed and used follow from the routes). A recompile that gives
+/// the same routes is no change of the routes (M1.5 task 5): a slot set to
+/// what it holds, or a change to a route of another scope, starts no
+/// crossfade.
+[[nodiscard]] constexpr bool sameRoutes(const CompiledRoutes& a, const CompiledRoutes& b) noexcept
+{
+    if (a.count != b.count)
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.count; ++i)
+    {
+        const auto& x = a.routes[i];
+        const auto& y = b.routes[i];
+        if (x.source != y.source || x.target != y.target || x.parts != y.parts ||
+            std::bit_cast<std::uint32_t>(x.amount) != std::bit_cast<std::uint32_t>(y.amount))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 /// The sums the routes produce: per target, per part (or LFO). A global

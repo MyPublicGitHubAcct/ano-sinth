@@ -695,7 +695,8 @@ private:
             fading = false;
         }
         const auto before = compiled();
-        const bool changed = compiler.update(patchOf(context));
+        // A recompile that gives the same routes is no change (M1.5 task 5).
+        const bool changed = compiler.update(patchOf(context)) && !modulation::sameRoutes(before, compiled());
         if (changed && !atNoteOn && settings.amounts == AmountChange::crossfade && settings.fadeSegments > 0)
         {
             fadeFrom = before;

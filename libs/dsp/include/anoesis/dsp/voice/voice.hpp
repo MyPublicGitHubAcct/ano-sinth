@@ -131,6 +131,9 @@
 ///     silence, updated at each of the voice's own grid points, so a patch
 ///     change reaches the voice at its next grid point wherever the host's
 ///     blocks fall. A note-on on a sounding voice keeps its routes and grid.
+///     It compiles only the voice's own routes (Scope::voice, M1.5 task 5):
+///     a route to a global destination (the master effects') is the
+///     engine's, so the voice runs nothing and crossfades nothing for it.
 ///   - Two mod envelopes (Adsr), the same as the amp envelopes in every way:
 ///     gated at each note-on, legatoGateOn() at a legato note, released at a
 ///     note-off, ending at exactly 0, no velocity. They don't keep the voice
@@ -769,7 +772,8 @@ private:
             fading = false;
         }
         const auto before = compiled();
-        const bool changed = compiler.update(patchOf(context));
+        // A recompile that gives the same routes is no change (M1.5 task 5).
+        const bool changed = compiler.update(patchOf(context)) && !modulation::sameRoutes(before, compiled());
         if (changed && !atNoteOn)
         {
             fadeFrom = before;
@@ -2201,7 +2205,7 @@ private:
     std::array<bool, slotCount> slotSkipping{};  ///< each slot is being skipped
 
     // The modulation sources (M1.5 task 3).
-    modulation::RouteCompiler compiler;
+    modulation::RouteCompiler compiler{modulation::Scope::voice};
     std::array<Adsr, modEnvelopeCount> modEnvelopes{};
     std::array<modulation::ModEnvelopeSettings, modEnvelopeCount> appliedEnvelopes{}; ///< each's last settings
     std::array<Lfo, lfoCount> lfos{Lfo{}, Lfo{}};

@@ -84,6 +84,15 @@ private:
 class RouteCompiler
 {
 public:
+    /// Compiles the routes of `scope` (M1.5 task 5): Scope::voice in a
+    /// voice, Scope::global in the engine.
+    explicit constexpr RouteCompiler(Scope scope = Scope::voice) noexcept : routeScope(scope) {}
+
+    [[nodiscard]] constexpr Scope scope() const noexcept
+    {
+        return routeScope;
+    }
+
     /// Forget the compiled routes: the next update() compiles. For a voice
     /// starting from silence.
     constexpr void reset() noexcept
@@ -100,7 +109,7 @@ public:
         {
             return false;
         }
-        compiled = compile(patch.slots());
+        compiled = compile(patch.slots(), routeScope);
         compiledVersion = patch.version();
         hasCompiled = true;
         return true;
@@ -113,6 +122,7 @@ public:
 
 private:
     CompiledRoutes compiled{};
+    Scope routeScope = Scope::voice;
     std::uint32_t compiledVersion = 0;
     bool hasCompiled = false;
 };
