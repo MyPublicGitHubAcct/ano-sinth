@@ -248,6 +248,8 @@ if (!ampEnvelopeA.isActive() && !ampEnvelopeB.isActive())
     freeVoice();                     // M1.4
 ```
 
+In `dsp::Voice` (M1.5 task 3, built 2026-11-23, [modulation-sources.md](modulation-sources.md#as-built)) the two mod envelopes are `Adsr`s gated exactly as the amp envelopes: `gateOn()` at each note-on, `legatoGateOn()` at a legato note, `gateOff()` at a note-off. They run only while a route reads them, their gates tracked either way, and they don't keep a voice alive (`isActive()` reads the amp envelopes only). They take their settings from the engine's context at each note-on, and a change reaches a sounding voice at its next grid point. Both amp envelopes always run, so either can be a source (AmpEnv A/B) whatever the skip plan does.
+
 Control changes (sample-accurate automation, M1.8) split the block at their sample: process up to it, set the control, process on. The knob laws live in the parameter table (M1.9): times t = 25 s · x^4.64 for knob x ∈ [0, 1] and sustain = knob / 10, both working hypotheses (E1, E4).
 
 ## Results, as built

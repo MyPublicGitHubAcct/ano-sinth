@@ -20,6 +20,7 @@ add_executable(anoesis_dsp_tests
     benchmarks/tempo_sync_benchmark.cpp
     benchmarks/voice_allocation_benchmark.cpp
     benchmarks/voice_benchmark.cpp
+    benchmarks/voice_sources_benchmark.cpp
     core/allocation_counter_test.cpp
     core/audio_block_test.cpp
     core/denormals_test.cpp
@@ -48,6 +49,7 @@ add_executable(anoesis_dsp_tests
     math/pan_test.cpp
     math/pitch_test.cpp
     math/random_test.cpp
+    modulation/controller_ramp_test.cpp
     modulation/modulation_report.cpp
     modulation/modulation_test.cpp
     modulation/registry_size_functions.cpp
@@ -60,6 +62,7 @@ add_executable(anoesis_dsp_tests
     modulation/source_candidates_test.cpp
     modulation/source_report.cpp
     modulation/source_bound_test.cpp
+    modulation/voice_sources_test.cpp
     oscillators/antialiasing_report.cpp
     oscillators/band_limited_oscillator_test.cpp
     oscillators/band_limiting_residuals_test.cpp

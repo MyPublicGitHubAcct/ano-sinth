@@ -28,10 +28,12 @@
 #include <anoesis/dsp/math/pan.hpp>
 #include <anoesis/dsp/math/pitch.hpp>
 #include <anoesis/dsp/math/random.hpp>
+#include <anoesis/dsp/modulation/controller_ramp.hpp>
 #include <anoesis/dsp/modulation/registry.hpp>
 #include <anoesis/dsp/modulation/route_compiler.hpp>
 #include <anoesis/dsp/modulation/routing.hpp>
 #include <anoesis/dsp/modulation/source_bound.hpp>
+#include <anoesis/dsp/modulation/source_context.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/phase.hpp>

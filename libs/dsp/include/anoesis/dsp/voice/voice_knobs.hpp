@@ -18,6 +18,11 @@
 namespace anoesis::dsp
 {
 
+namespace modulation
+{
+struct SourceContext;
+} // namespace modulation
+
 /// The global knobs a voice reads (M1.4 tasks 1-3, until task 3 named
 /// VoiceFilterKnobs):
 ///
@@ -35,6 +40,7 @@ namespace anoesis::dsp
 /// - Solo's two gains (M1.4 task 5, part_solo.hpp), 0-1, read like Mix and
 ///   multiplied into its gain. A null one reads as 1, so a caller without
 ///   Solo hears the voice as before, to the bit.
+/// - the modulation sources' context (M1.5 task 3), read through `sources`.
 struct VoiceKnobs
 {
     std::array<const LinearSmoother*, 2> cutoff{};    ///< Cutoff A, Cutoff B (knob units)
@@ -52,6 +58,12 @@ struct VoiceKnobs
     /// Solo's gains for parts A and B (0-1; PartSolo, part_solo.hpp), read
     /// like Mix and multiplied into its gain. Null reads as 1: no Solo.
     std::array<const LinearSmoother*, 2> solo{};
+    /// The modulation sources' context (M1.5 task 3; modulation/
+    /// source_context.hpp): the patch, the mod envelopes' and LFOs' settings,
+    /// the wheel and pressure, the free LFOs' global instances (standing,
+    /// like the ramps, `offset` samples before the block) and Step Velocity.
+    /// Null is the init patch: no routes, the voice as before, to the bit.
+    const modulation::SourceContext* sources = nullptr;
 
     /// The same knobs for a block starting `samples` later.
     [[nodiscard]] constexpr VoiceKnobs advanced(std::size_t samples) const noexcept

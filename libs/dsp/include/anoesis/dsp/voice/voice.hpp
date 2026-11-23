@@ -4,12 +4,18 @@
 #pragma once
 
 #include <anoesis/dsp/control/adsr.hpp>
+#include <anoesis/dsp/control/lfo.hpp>
 #include <anoesis/dsp/control/smoother.hpp>
 #include <anoesis/dsp/core/audio_block.hpp>
 #include <anoesis/dsp/core/process_spec.hpp>
 #include <anoesis/dsp/filters/filter_control.hpp>
 #include <anoesis/dsp/filters/keytrack.hpp>
 #include <anoesis/dsp/filters/ladder_filter.hpp>
+#include <anoesis/dsp/modulation/registry.hpp>
+#include <anoesis/dsp/modulation/route_compiler.hpp>
+#include <anoesis/dsp/modulation/routing.hpp>
+#include <anoesis/dsp/modulation/source_bound.hpp>
+#include <anoesis/dsp/modulation/source_context.hpp>
 #include <anoesis/dsp/oscillators/min_blep.hpp>
 #include <anoesis/dsp/oscillators/oscillator_slot.hpp>
 #include <anoesis/dsp/oscillators/pitch_drift.hpp>
@@ -20,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -49,8 +56,8 @@
 ///   plus keytrack from the voice's note, into setCutoffModulation() (with
 ///   setCutoff() held at the law's anchor) and setResonanceModulation()
 ///   (with setResonance(0)). A non-finite result keeps the last finite one.
-///   The voice's modulation of Cutoff X / AB and Reso X / AB joins the sum
-///   in M1.5; until then those terms are 0.
+///   The modulation of Cutoff X / AB and Reso X / AB (M1.5) joins the sum
+///   there, from the sources as they stand at the grid point.
 /// - Input Select and Bypass changes apply at the voice's next grid point,
 ///   so a filter is always on the voice's grid; a filter switched on from
 ///   "--", or out of Bypass, starts from rest there.
@@ -74,8 +81,8 @@
 ///   modulation clamped to [0, 15]), per sample, with Mix's global ramp read
 ///   through the knobs at each sample; constant over a chunk while the ramp
 ///   is still. A part crossing into the other filter takes that filter's
-///   part's Mix only (V3). A null Mix ramp is unity. The modulation term is 0
-///   until M1.5.
+///   part's Mix only (V3). A null Mix ramp is unity. Mix's modulation (M1.5)
+///   is added per sample, before the clamp.
 ///
 /// - Solo, and skipping what can't be heard (M1.4 task 5, docs/dsp/
 ///   part-solo-and-skipping.md):
@@ -86,7 +93,8 @@
 ///   - At each grid point, for the whole coming segment, each part's output
 ///     gain is tested with an upper bound per factor: its amp envelope (idle,
 ///     or held at a sustain of exactly 0), Mix's ramp at its larger end plus
-///     the bound on Mix's modulation (mixModulationBound(), 0 until M1.5),
+///     the bound on Mix's modulation (mixModulationBound(): each route's
+///     amount times its source's bound, M1.5),
 ///     and Solo's ramp at its larger end. A process() call mid-segment
 ///     re-tests only a part whose gain is 0, over the rest of the segment,
 ///     which can only end its skip; so a skip starts only at the voice's
@@ -115,20 +123,66 @@
 ///     silence. The same to the bit as the stereo path.
 ///   isActive() and the allocator's view are unchanged.
 ///
-/// Rendering runs in chunks that stop at the grid (at most 32 samples): the
-/// plan for the chunk (what runs, what is skipped); the four slots added
-/// into their part's buffer (in drift's runs of constant offset); both
-/// envelopes, each heard part's Mix and Solo gains, each filter's input
-/// built in its own buffer, the filters in place, and each filter's output
-/// times its part's envelope and gains added into channels 0 and 1 of the
-/// caller's block. The scratch is fixed (14 buffers of 32 samples), so
-/// nothing is allocated, prepare() included; the output does not depend on
-/// how the caller splits its blocks.
+/// - The modulation sources (M1.5 task 3, docs/dsp/modulation-sources.md),
+///   with what the voice reads from the engine in VoiceKnobs::sources
+///   (modulation/source_context.hpp; null is the init patch):
+///   - One modulation::RouteCompiler: reset and compiled at a note-on from
+///     silence, updated at each of the voice's own grid points, so a patch
+///     change reaches the voice at its next grid point wherever the host's
+///     blocks fall. A note-on on a sounding voice keeps its routes and grid.
+///   - Two mod envelopes (Adsr), the same as the amp envelopes in every way:
+///     gated at each note-on, legatoGateOn() at a legato note, released at a
+///     note-off, ending at exactly 0, no velocity. They don't keep the voice
+///     alive. They take the context's settings at each note-on; a change
+///     reaches a sounding voice at its next grid point.
+///   - Two LFOs (Lfo) in segment order: at each grid point each one's rate
+///     (held) and gain (ramped from the previous grid point's) are set from
+///     the sources as they stand there, and its wave is rendered for the
+///     segment ahead; its value is 0.5 x gain x (wave + offset). Restarted at
+///     a note-on from silence, retriggered on a sounding voice (the rest of
+///     the segment rendered again from a copy taken at the grid point), left
+///     alone by a legato note. A free one is copied from the context's
+///     global instance at a note-on from silence, moved on to the voice's own
+///     sample, and kept through a steal.
+///   - A mod envelope or an LFO runs only while a route reads it; its gates
+///     are tracked either way. A route that appears mid-note starts it at the
+///     voice's next grid point from its note-on state (an envelope gated on,
+///     and off if the key is already up; an LFO restarted; a free one copied).
+///   - Velocity (ramped over a glide) and keytrack (the glide, the bend and
+///     the master tune) per sample; both amp envelopes, always run, so the
+///     skip plan is unchanged; the mod wheel, channel pressure and Step
+///     Velocity read from the context at absolute samples.
+///   - Folded delivery: in each chunk, each source that a route to Pitch or
+///     Mix reads goes into a chunk buffer or, if it is constant over the
+///     chunk, is added as one term; each route adds amount x value into its
+///     part's per-sample sum, the product in a statement of its own (a fused
+///     multiply-add would move the result by an ulp). A part whose Pitch is
+///     routed feeds its slots a note per sample; Mix's sum goes into
+///     mixGain(). Cutoff, Reso, the Filter Control's terms and the LFOs'
+///     Rate and Gain take the sums of the sources as they stand at each grid
+///     point.
+///   - Each source's bound (source_bound.hpp, by its kind; keytrack's from
+///     its parts, the glide's ends plus the bend's) feeds
+///     mixModulationBound().
+///   With no routes nothing runs and nothing is summed, so the init patch is
+///   the voice as it was, to the bit. Volume, Pan and Phase routes compile
+///   and are ignored until M1.5 task 4.
 ///
-/// Velocity's routes are the modulation system's (M1.5). About 25 KB at 64
-/// taps.
+/// Rendering runs in chunks that stop at the grid (at most 32 samples): the
+/// plan for the chunk (what runs, what is skipped); both amp envelopes, the
+/// other sources and the per-sample sums; the four slots added into their
+/// part's buffer (in drift's runs of constant offset); each heard part's Mix
+/// and Solo gains, each filter's input built in its own buffer, the filters
+/// in place, and each filter's output times its part's envelope and gains
+/// added into channels 0 and 1 of the caller's block. The scratch is fixed
+/// (14 buffers of 32 samples for the audio, 22 for the sources), so nothing
+/// is allocated, prepare() included; the output does not depend on how the
+/// caller splits its blocks.
+///
+/// About 30 KB at 64 taps (25 KB before the sources).
 /// Docs: docs/dsp/voice-architecture.md, docs/dsp/legato-portamento.md,
-/// docs/dsp/mixer.md, docs/dsp/part-solo-and-skipping.md
+/// docs/dsp/mixer.md, docs/dsp/part-solo-and-skipping.md,
+/// docs/dsp/modulation-sources.md
 namespace anoesis::dsp
 {
 
@@ -157,8 +211,8 @@ public:
     static constexpr float maxInputLevel = 1e3f;
 
     /// The table must outlive the voice. `seed` sets every random sequence
-    /// (the slots' free-running phases and noise, the drift): give each voice
-    /// its own.
+    /// (the slots' free-running phases and noise, the drift, the LFOs' random
+    /// rows): give each voice its own.
     explicit Voice(const MinBlepTable& residuals, std::uint64_t seed = 0) noexcept
         : slots{Slot{residuals}, Slot{residuals}, Slot{residuals}, Slot{residuals}}
     {
@@ -167,6 +221,10 @@ public:
             slots[s].setRandomSeed(seed ^ (0x9E3779B97F4A7C15U * (s + 1)));
         }
         pitchDrift.setSeed(seed ^ 0x3C6EF372FE94F82BU);
+        for (std::size_t k = 0; k < lfoCount; ++k)
+        {
+            lfos[k].setSeed(seed ^ (0xA54FF53A5F1D36F1U * (k + 1)));
+        }
         updateRoutes();
     }
 
@@ -253,6 +311,14 @@ public:
         return mono;
     }
 
+    /// For measurement and tests: told about every chunk this voice renders
+    /// (its sources' values, and their bounds where it takes them); null for
+    /// none. It must outlive its use.
+    void setSourceObserver(modulation::SourceObserver* sourceObserver) noexcept
+    {
+        observer = sourceObserver;
+    }
+
     /// Stereo throughout; nothing is allocated.
     void prepare(const ProcessSpec& spec) noexcept
     {
@@ -273,6 +339,14 @@ public:
         {
             e.prepare(spec);
         }
+        for (auto& e : modEnvelopes)
+        {
+            e.prepare(spec);
+        }
+        for (auto& l : lfos)
+        {
+            l.prepare(spec);
+        }
         pitchDrift.prepare(spec);
         glide.prepare(spec.sampleRate);
         velocityRamp.prepare(spec.sampleRate);
@@ -290,6 +364,14 @@ public:
         {
             e.reset();
         }
+        for (auto& e : modEnvelopes)
+        {
+            e.reset();
+        }
+        for (auto& l : lfos)
+        {
+            l.reset();
+        }
         pitchDrift.reset();
         applyPending();
         for (auto& f : filters)
@@ -305,15 +387,26 @@ public:
         mono = false;
         segmentSilent = {};
         slotSkipping = {};
+        compiler.reset();
+        live = {};
+        gridSums = {};
+        lfoGainBefore = {};
+        lfoGainNow = {};
+        lfoOffsetNow = {};
+        lfoLast = {};
+        segmentBegun = false;
+        keyHeld = false;
     }
 
     /// A note-on before the next process() call, with the knobs positioned at
     /// its sample. The pitch jumps to `note`, or glides to it from
     /// `start.from` over `start.glideSeconds` (linear in semitones); the
     /// velocity is `start.velocity`, or, while it glides, ramps there from
-    /// `start.fromVelocity` over the same time. The slots, the drift and both
+    /// `start.fromVelocity` over the same time. The slots, the drift and the
     /// envelopes start (or, on a sounding voice, retrigger: the slots as
-    /// Retrig says, the envelopes attacking from their level).
+    /// Retrig says, the envelopes attacking from their level), and so do the
+    /// modulation sources (restarted from silence; on a sounding voice the
+    /// LFOs retrigger and a free one keeps its copy).
     ///
     /// - From silence (isActive() false): pending routing applies, and each
     ///   filter is fed for this sample and reset(), so the voice's grid
@@ -349,17 +442,20 @@ public:
         {
             e.gateOn();
         }
+        keyHeld = true;
+        sourcesNoteOn(knobs, sounding);
         if (sounding)
         {
             return;
         }
         applyPending();
+        gridPosition = 0;
+        beginSegment(knobs, 0, true);
         feedFilters(knobs, 0, keytrackPitch(knobs, 0, 0));
         for (auto& f : filters)
         {
             f.reset();
         }
-        gridPosition = 0;
         segmentSilent = {};
         slotSkipping = {};
         mono = allCentred();
@@ -386,14 +482,26 @@ public:
         {
             e.legatoGateOn();
         }
+        for (auto& e : modEnvelopes)
+        {
+            e.legatoGateOn();
+        }
+        keyHeld = true;
     }
 
+    /// Releases the amp and mod envelopes (a dormant mod envelope's gate is
+    /// kept for a route that appears later).
     void noteOff() noexcept
     {
         for (auto& e : envelopes)
         {
             e.gateOff();
         }
+        for (auto& e : modEnvelopes)
+        {
+            e.gateOff();
+        }
+        keyHeld = false;
     }
 
     /// The master tune: the frequency of A4 in Hz, for the four slots and for
@@ -456,6 +564,10 @@ public:
         {
             e.reset();
         }
+        for (auto& e : modEnvelopes)
+        {
+            e.reset();
+        }
     }
 
     /// True while anything can still be heard: a filter with an input
@@ -509,19 +621,29 @@ public:
     {
         const auto n = out.numSamples();
         std::size_t done = 0;
+        bool callStart = true;
         while (done < n)
         {
             if (gridPosition == 0)
             {
+                if (!segmentBegun)
+                {
+                    beginSegment(knobs, done, false);
+                }
                 applyPendingAtGrid(knobs, done);
                 feedFilters(knobs, done + gridSamples, keytrackPitch(knobs, done, gridSamples));
             }
             const auto length = std::min(n - done, gridSamples - gridPosition);
-            renderChunk(out.subBlock(done, length), knobs, done);
+            renderChunk(out.subBlock(done, length), knobs, done, callStart);
+            callStart = false;
             glide.advance(length);
             velocityRamp.advance(length);
             done += length;
             gridPosition = (gridPosition + length) % gridSamples;
+            if (gridPosition == 0)
+            {
+                segmentBegun = false;
+            }
         }
     }
 
@@ -543,6 +665,588 @@ private:
         std::array<bool, partCount> render{};   ///< the part's slots are rendered (else skipped, where exact)
         std::array<bool, partCount> crossing{}; ///< the part is added into the other filter's input (AB)
     };
+
+    // --- The modulation sources (M1.5 task 3, docs/dsp/modulation-sources.md) ---------------
+
+    using Source = modulation::Source;
+    using Target = modulation::Target;
+    using SourceContext = modulation::SourceContext;
+    static constexpr std::size_t sourceCount = modulation::sourceCount;
+    static constexpr std::size_t lfoCount = modulation::lfoCount;
+    static constexpr std::size_t modEnvelopeCount = modulation::modEnvelopeCount;
+
+    [[nodiscard]] static constexpr std::size_t index(Source s) noexcept
+    {
+        return static_cast<std::size_t>(s);
+    }
+    [[nodiscard]] static constexpr Source modEnvSource(std::size_t k) noexcept
+    {
+        return k == 0 ? Source::modEnv1 : Source::modEnv2;
+    }
+    [[nodiscard]] static constexpr Source lfoSource(std::size_t k) noexcept
+    {
+        return k == 0 ? Source::lfo1 : Source::lfo2;
+    }
+
+    /// The context the knobs carry; none is the init patch.
+    [[nodiscard]] static const SourceContext& contextOf(const VoiceKnobs& knobs) noexcept
+    {
+        static constexpr SourceContext none{};
+        return knobs.sources != nullptr ? *knobs.sources : none;
+    }
+    [[nodiscard]] static const modulation::Patch& patchOf(const SourceContext& context) noexcept
+    {
+        static constexpr modulation::Patch empty{};
+        return context.patch != nullptr ? *context.patch : empty;
+    }
+
+    [[nodiscard]] const modulation::CompiledRoutes& compiled() const noexcept
+    {
+        return compiler.routes();
+    }
+    [[nodiscard]] bool routesTo(Target t, std::size_t part) const noexcept
+    {
+        return compiled().routesTo(t, part);
+    }
+    /// A mod envelope or an LFO runs only while a route reads it.
+    [[nodiscard]] bool wanted(Source s) const noexcept
+    {
+        return compiled().uses(s);
+    }
+
+    void applyEnvelopeSettings(std::size_t k, const SourceContext& context) noexcept
+    {
+        const auto& e = context.modEnvelopes[k];
+        modEnvelopes[k].setAttack(e.attack);
+        modEnvelopes[k].setDecay(e.decay);
+        modEnvelopes[k].setSustain(e.sustain);
+        modEnvelopes[k].setRelease(e.release);
+        appliedEnvelopes[k] = e;
+    }
+
+    [[nodiscard]] static bool sameSettings(const modulation::ModEnvelopeSettings& a,
+                                           const modulation::ModEnvelopeSettings& b) noexcept
+    {
+        const auto same = [](float x, float y)
+        {
+            return std::bit_cast<std::uint32_t>(x) == std::bit_cast<std::uint32_t>(y);
+        };
+        return same(a.attack, b.attack) && same(a.decay, b.decay) && same(a.sustain, b.sustain) &&
+               same(a.release, b.release);
+    }
+
+    /// At every note-on: the routes (from silence), the mod envelopes' gates
+    /// and each LFO's start. After every grid point and every note-on from
+    /// silence a source is live exactly while a route reads it, and a note-on
+    /// on a sounding voice doesn't recompile, so there it only retriggers.
+    void sourcesNoteOn(const VoiceKnobs& knobs, bool sounding) noexcept
+    {
+        const auto& context = contextOf(knobs);
+        if (!sounding)
+        {
+            compiler.reset();
+            compiler.update(patchOf(context));
+        }
+        for (std::size_t k = 0; k < modEnvelopeCount; ++k)
+        {
+            // Gated as the amp envelopes; a dormant one keeps its gate for a
+            // route that appears later; one that starts from silence starts
+            // from 0.
+            const auto e = index(modEnvSource(k));
+            applyEnvelopeSettings(k, context);
+            if (!sounding)
+            {
+                const bool want = wanted(modEnvSource(k));
+                if (want && !live[e])
+                {
+                    modEnvelopes[k].reset();
+                }
+                live[e] = want;
+            }
+            modEnvelopes[k].gateOn();
+        }
+        for (std::size_t k = 0; k < lfoCount; ++k)
+        {
+            // Restarted from silence, retriggered on a sounding voice; a free
+            // one copied from the global instance from silence and kept
+            // through a steal.
+            const auto l = index(lfoSource(k));
+            const bool free = context.lfos[k].free;
+            if (!sounding)
+            {
+                live[l] = wanted(lfoSource(k));
+                lfoLast[k] = 0.0f;
+                if (!free)
+                {
+                    restartLfo(k, context);
+                }
+                else if (live[l])
+                {
+                    copyFree(k, context, knobs.offset);
+                }
+            }
+            else if (live[l] && !free)
+            {
+                retriggerLfo(k);
+            }
+        }
+    }
+
+    /// A free LFO copies the global instance. The engine moves the global on
+    /// with each piece it renders, so it stands where the knob ramps stand,
+    /// at the start of the call: the copy is moved on to the voice's own
+    /// sample, `ahead` samples later (a copy taken at the call's start was 7
+    /// samples stale in stage 1).
+    void copyFree(std::size_t k, const SourceContext& context, std::size_t ahead) noexcept
+    {
+        if (context.freeLfos == nullptr)
+        {
+            return;
+        }
+        lfos[k] = (*context.freeLfos)[k];
+        Chunk scratch{};
+        while (ahead > 0)
+        {
+            const auto m = std::min(ahead, gridSamples);
+            lfos[k].process(std::span{scratch}.first(m));
+            ahead -= m;
+        }
+    }
+
+    /// A note-on on a sounding voice: the cycle restarts, slewed. Mid-segment
+    /// the rest of the segment is rendered again from the copy taken at the
+    /// grid point, moved on to here.
+    void retriggerLfo(std::size_t k) noexcept
+    {
+        if (!segmentBegun)
+        {
+            lfos[k].retrigger();
+            return;
+        }
+        lfos[k] = lfoAtSegmentStart[k];
+        Chunk scratch{};
+        lfos[k].process(std::span{scratch}.first(gridPosition));
+        lfos[k].retrigger();
+        lfos[k].process(std::span{lfoWave[k]}.subspan(gridPosition));
+    }
+
+    /// A source that a route starts reading mid-note, at the voice's grid
+    /// point (block sample `done`), from its note-on state.
+    void lateStartEnvelope(std::size_t k, const SourceContext& context) noexcept
+    {
+        live[index(modEnvSource(k))] = true;
+        modEnvelopes[k].reset();
+        applyEnvelopeSettings(k, context);
+        modEnvelopes[k].gateOn();
+        if (!keyHeld)
+        {
+            modEnvelopes[k].gateOff();
+        }
+    }
+    void lateStartLfo(std::size_t k, const SourceContext& context, std::size_t ahead) noexcept
+    {
+        live[index(lfoSource(k))] = true;
+        lfoLast[k] = 0.0f; // it hasn't produced anything yet
+        if (context.lfos[k].free)
+        {
+            copyFree(k, context, ahead); // exact: the global instance is where a running copy would be
+        }
+        else
+        {
+            restartLfo(k, context);
+        }
+        lfoGainNow[k] = -1.0f; // a start: the gain doesn't ramp from a stale value
+    }
+
+    /// The cycle's start, of the waveform it is set to now. The waveform is
+    /// set first: restarted with the one it last had (a new voice's is the
+    /// sine), it would start at that one's start and slew into this one,
+    /// out of phase for the whole note (the stage-1 prototype's flaw).
+    void restartLfo(std::size_t k, const SourceContext& context) noexcept
+    {
+        lfos[k].setWaveform(context.lfos[k].waveform);
+        lfos[k].restart();
+    }
+
+    [[nodiscard]] static float lfoOffsetOf(const modulation::LfoSettings& l) noexcept
+    {
+        return std::clamp(l.offset, -10.0f, 10.0f) / 10.0f;
+    }
+
+    /// LFO k as a source at the segment's sample `position`: the gain ramped
+    /// from the previous grid point's value to this one's (t < 1, so it stays
+    /// between them).
+    [[nodiscard]] float lfoValueAt(std::size_t k, std::size_t position) const noexcept
+    {
+        const float t = static_cast<float>(position) / static_cast<float>(gridSamples);
+        const float g = lfoGainBefore[k] + ((lfoGainNow[k] - lfoGainBefore[k]) * t);
+        return modulation::lfoSourceValue(lfoWave[k][position], g, lfoOffsetNow[k]);
+    }
+
+    /// Each source as it stands at the block's sample `done` (the envelopes
+    /// and LFOs: their last output).
+    void valuesNow(const VoiceKnobs& knobs, const SourceContext& context, std::size_t done,
+                   modulation::SourceValues& v) const noexcept
+    {
+        v = {};
+        v[index(Source::velocity)] = velocityRamp.at(0);
+        v[index(Source::keytrack)] = keytrackSource(keytrackPitch(knobs, done, 0));
+        v[index(Source::ampEnvA)] = envelopes[0].level();
+        v[index(Source::ampEnvB)] = envelopes[1].level();
+        for (std::size_t k = 0; k < lfoCount; ++k)
+        {
+            const auto e = index(modEnvSource(k));
+            const auto l = index(lfoSource(k));
+            v[e] = live[e] ? modEnvelopes[k].level() : 0.0f;
+            v[l] = live[l] ? lfoLast[k] : 0.0f;
+        }
+        const auto t = knobs.time + done;
+        v[index(Source::modWheel)] = context.modWheel != nullptr ? context.modWheel->valueAt(t) : 0.0f;
+        v[index(Source::aftertouch)] = context.aftertouch != nullptr ? context.aftertouch->valueAt(t) : 0.0f;
+        v[index(Source::stepVelocity)] = context.stepVelocity;
+    }
+
+    /// At a grid point (or a note-on from silence, `atNoteOn`): recompile if
+    /// the patch changed; start a source a new route reads; the grid sums
+    /// from the sources as they stand; each live LFO's rate (held) and gain
+    /// (ramped), and its wave for the segment.
+    void beginSegment(const VoiceKnobs& knobs, std::size_t done, bool atNoteOn) noexcept
+    {
+        const auto& context = contextOf(knobs);
+        compiler.update(patchOf(context));
+        for (std::size_t k = 0; k < modEnvelopeCount; ++k)
+        {
+            if (!sameSettings(context.modEnvelopes[k], appliedEnvelopes[k]))
+            {
+                applyEnvelopeSettings(k, context);
+            }
+            const auto e = modEnvSource(k);
+            if (!wanted(e))
+            {
+                live[index(e)] = false;
+            }
+            else if (!live[index(e)])
+            {
+                lateStartEnvelope(k, context);
+            }
+        }
+        for (std::size_t k = 0; k < lfoCount; ++k)
+        {
+            const auto l = lfoSource(k);
+            if (!wanted(l))
+            {
+                live[index(l)] = false;
+            }
+            else if (!live[index(l)])
+            {
+                lateStartLfo(k, context, knobs.offset + done);
+            }
+        }
+        segmentBegun = true;
+        updatePerSample();
+        if (compiled().empty())
+        {
+            gridSums = {}; // nothing reads a source: the exact 0s
+            return;
+        }
+        modulation::SourceValues now{};
+        valuesNow(knobs, context, done, now);
+        modulation::Sums sums{};
+        modulation::accumulate(compiled(), now, sums);
+        for (std::size_t k = 0; k < lfoCount; ++k)
+        {
+            if (!live[index(lfoSource(k))])
+            {
+                continue;
+            }
+            const auto& l = context.lfos[k];
+            lfos[k].setWaveform(l.waveform);
+            lfos[k].setFrequency(modulation::lfoRateHz(l.rate + sums.at(Target::lfoRate, k)));
+            const float g = std::clamp(l.gain + sums.at(Target::lfoGain, k), 0.0f, 10.0f) / 10.0f;
+            lfoGainBefore[k] = atNoteOn || lfoGainNow[k] < 0.0f ? g : lfoGainNow[k];
+            lfoGainNow[k] = g;
+            lfoOffsetNow[k] = lfoOffsetOf(l);
+            lfoAtSegmentStart[k] = lfos[k];
+            lfos[k].process(lfoWave[k]);
+        }
+        gridSums = sums;
+    }
+
+    /// The routes to the per-sample targets (Pitch, Mix), and the sources
+    /// they read.
+    void updatePerSample() noexcept
+    {
+        perSample = {};
+        std::size_t count = 0;
+        for (const auto& r : compiled().live())
+        {
+            if (r.target == Target::pitch || r.target == Target::mix)
+            {
+                perSample[index(r.source)] = true;
+                perSampleRoutes.routes[count] = r;
+                ++count;
+            }
+        }
+        perSampleRoutes.count = count;
+    }
+
+    /// Source s at sample i of the chunk starting at the block's sample
+    /// `done` (the envelopes from their buffers, once rendered).
+    [[nodiscard]] float valueAt(Source s, const VoiceKnobs& knobs, const SourceContext& context, std::size_t done,
+                                std::size_t i) const noexcept
+    {
+        switch (s)
+        {
+        case Source::velocity:
+            return velocityRamp.at(i);
+        case Source::keytrack:
+            return keytrackSource(keytrackPitch(knobs, done, i));
+        case Source::ampEnvA:
+            return envelopeBuffers[0][i];
+        case Source::ampEnvB:
+            return envelopeBuffers[1][i];
+        case Source::modEnv1:
+        case Source::modEnv2:
+        {
+            const std::size_t k = s == Source::modEnv1 ? 0 : 1;
+            return live[index(s)] ? modEnvelopeBuffers[k][i] : 0.0f;
+        }
+        case Source::lfo1:
+        case Source::lfo2:
+        {
+            const std::size_t k = s == Source::lfo1 ? 0 : 1;
+            return live[index(s)] ? lfoValueAt(k, gridPosition + i) : 0.0f;
+        }
+        case Source::modWheel:
+            return context.modWheel != nullptr ? context.modWheel->valueAt(knobs.time + done + i) : 0.0f;
+        case Source::aftertouch:
+            return context.aftertouch != nullptr ? context.aftertouch->valueAt(knobs.time + done + i) : 0.0f;
+        case Source::stepVelocity:
+            return context.stepVelocity;
+        case Source::none:
+        case Source::count:
+            break;
+        }
+        return 0.0f;
+    }
+
+    /// Whether source s is constant over the chunk starting at `done`, so
+    /// that its routes add one term each (velocity, keytrack, the
+    /// controllers and Step Velocity can be; the envelopes and LFOs are
+    /// read from their buffers).
+    [[nodiscard]] bool constantOver(Source s, const VoiceKnobs& knobs, const SourceContext& context,
+                                    std::size_t done) const noexcept
+    {
+        const auto t = knobs.time + done;
+        switch (s)
+        {
+        case Source::velocity:
+            return !velocityRamp.isGliding();
+        case Source::keytrack:
+            return !glide.isGliding() && (knobs.bend == nullptr || knobs.bend->isSteadyFrom(t));
+        case Source::modWheel:
+            return context.modWheel == nullptr || context.modWheel->isSteadyFrom(t);
+        case Source::aftertouch:
+            return context.aftertouch == nullptr || context.aftertouch->isSteadyFrom(t);
+        case Source::stepVelocity:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    [[nodiscard]] static constexpr std::size_t sumIndex(Target t) noexcept
+    {
+        return t == Target::pitch ? 0 : 1;
+    }
+
+    /// The sources over the chunk: the mod envelopes run, the per-sample
+    /// sums of Pitch and Mix, and the LFOs' values as they stand after it.
+    void renderSources(const VoiceKnobs& knobs, const SourceContext& context, std::size_t done,
+                       std::size_t length) noexcept
+    {
+        for (std::size_t k = 0; k < modEnvelopeCount; ++k)
+        {
+            if (live[index(modEnvSource(k))])
+            {
+                modEnvelopes[k].process(std::span{modEnvelopeBuffers[k]}.first(length));
+            }
+        }
+        for (const auto t : {Target::pitch, Target::mix})
+        {
+            for (std::size_t p = 0; p < partCount; ++p)
+            {
+                if (routesTo(t, p))
+                {
+                    std::fill_n(sampleSums[sumIndex(t)][p].begin(), length, 0.0f);
+                }
+            }
+        }
+        if (perSampleRoutes.count > 0)
+        {
+            sumFolded(knobs, context, done, length);
+        }
+        for (std::size_t k = 0; k < lfoCount; ++k)
+        {
+            if (live[index(lfoSource(k))])
+            {
+                lfoLast[k] = lfoValueAt(k, gridPosition + length - 1);
+            }
+        }
+    }
+
+    /// Folded delivery: each per-sample source into a chunk buffer (an
+    /// envelope's own), or, constant over the chunk, one value; then each
+    /// route's terms into its parts' sums, in slot order from 0.
+    void sumFolded(const VoiceKnobs& knobs, const SourceContext& context, std::size_t done, std::size_t length) noexcept
+    {
+        std::array<const float*, sourceCount> src{};
+        std::array<bool, sourceCount> constant{};
+        for (std::size_t s = 1; s < sourceCount; ++s)
+        {
+            if (!perSample[s])
+            {
+                continue;
+            }
+            const auto id = static_cast<Source>(s);
+            if (id == Source::ampEnvA || id == Source::ampEnvB)
+            {
+                src[s] = envelopeBuffers[id == Source::ampEnvA ? 0 : 1].data();
+                continue;
+            }
+            if ((id == Source::modEnv1 || id == Source::modEnv2) && live[s])
+            {
+                src[s] = modEnvelopeBuffers[id == Source::modEnv1 ? 0 : 1].data();
+                continue;
+            }
+            auto& b = sourceBuffers[s];
+            if (constantOver(id, knobs, context, done))
+            {
+                constant[s] = true;
+                b[0] = valueAt(id, knobs, context, done, 0);
+                src[s] = b.data();
+                continue;
+            }
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                b[i] = valueAt(id, knobs, context, done, i);
+            }
+            src[s] = b.data();
+        }
+        for (const auto& route : std::span{perSampleRoutes.routes}.first(perSampleRoutes.count))
+        {
+            const auto s = index(route.source);
+            const float* values = src[s];
+            for (std::size_t p = 0; p < partCount; ++p)
+            {
+                if (!modulation::includes(route.parts, p))
+                {
+                    continue;
+                }
+                auto& dst = sampleSums[sumIndex(route.target)][p];
+                if (constant[s])
+                {
+                    const float term = route.amount * values[0];
+                    for (std::size_t i = 0; i < length; ++i)
+                    {
+                        dst[i] += term;
+                    }
+                    continue;
+                }
+                for (std::size_t i = 0; i < length; ++i)
+                {
+                    // The product in a statement of its own, as accumulate()
+                    // forms it (no fused multiply-add).
+                    const float term = route.amount * values[i];
+                    dst[i] += term;
+                }
+            }
+        }
+    }
+
+    /// Source s's interval over the `length` samples from the block's
+    /// sample `done` (before the chunk is rendered), by its kind
+    /// (modulation::sourceBound()).
+    [[nodiscard]] modulation::Interval boundOf(Source s, const VoiceKnobs& knobs, const SourceContext& context,
+                                               std::size_t done, std::size_t length) const noexcept
+    {
+        const auto last = length - 1;
+        modulation::BoundInputs in{};
+        switch (s)
+        {
+        case Source::velocity:
+            in.ends = modulation::linearBound(velocityRamp.at(0), velocityRamp.at(last));
+            break;
+        case Source::keytrack:
+        {
+            // Its parts: the glide and the bend's ramp are each linear between
+            // events, but their sum isn't monotonic when they oppose.
+            const auto g = modulation::linearBound(glide.at(0), glide.at(last));
+            const auto b = modulation::linearBound(bendAt(knobs, done), bendAt(knobs, done + last));
+            const auto pitch = g + b;
+            in.ends = {
+                .lo = keytrackSource(pitch.lo + masterTuneOffset),
+                .hi = keytrackSource(pitch.hi + masterTuneOffset),
+            };
+            break;
+        }
+        case Source::ampEnvA:
+        case Source::ampEnvB:
+            in.envelope = modulation::envelopeState(envelopes[s == Source::ampEnvA ? 0 : 1]);
+            break;
+        case Source::modEnv1:
+        case Source::modEnv2:
+            if (live[index(s)])
+            {
+                in.envelope = modulation::envelopeState(modEnvelopes[s == Source::modEnv1 ? 0 : 1]);
+            }
+            break;
+        case Source::lfo1:
+        case Source::lfo2:
+        {
+            const std::size_t k = s == Source::lfo1 ? 0 : 1;
+            if (live[index(s)])
+            {
+                const auto wave =
+                    modulation::waveBound(std::span<const float>{lfoWave[k]}.subspan(gridPosition, length));
+                const auto gain = modulation::linearBound(lfoGainBefore[k], lfoGainNow[k]);
+                const float o = lfoOffsetNow[k];
+                in.lfo = modulation::lfoBound(wave, gain, {.lo = o, .hi = o});
+            }
+            break;
+        }
+        case Source::modWheel:
+        case Source::aftertouch:
+        case Source::stepVelocity:
+            in.ends =
+                modulation::linearBound(valueAt(s, knobs, context, done, 0), valueAt(s, knobs, context, done, last));
+            break;
+        case Source::none:
+        case Source::count:
+            break;
+        }
+        return modulation::sourceBound(s, in);
+    }
+
+    /// For the observer: every source's values over the chunk, and, where
+    /// the voice took them, every source's bounds.
+    void observe(const VoiceKnobs& knobs, const SourceContext& context, std::size_t done, std::size_t length,
+                 bool rebound, const modulation::SourceBounds& bounds) const noexcept
+    {
+        modulation::SourceObservation chunk{};
+        chunk.length = length;
+        chunk.time = knobs.time + done;
+        chunk.rebound = rebound;
+        chunk.bounds = bounds;
+        for (std::size_t s = 1; s < sourceCount; ++s)
+        {
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                chunk.values[s][i] = valueAt(static_cast<Source>(s), knobs, context, done, i);
+            }
+        }
+        observer->observe(chunk);
+    }
 
     void startPitch(float note, const NoteStart& start) noexcept
     {
@@ -666,14 +1370,20 @@ private:
     void feedFilter(std::size_t f, const VoiceKnobs& knobs, std::size_t ahead, float keytrack) noexcept
     {
         ahead += knobs.offset; // the ramps stand that many samples before this block
+        // The modulation: the grid sums, from the sources as they stood at
+        // the grid point (0 with no routes there).
         const float octaves = filterCutoffOctaves({
             .cutoff = read(knobs.cutoff[f], ahead),
+            .cutoffModulation = gridSums.at(Target::cutoff, f),
             .controlCutoff = read(knobs.controlCutoff, ahead),
+            .controlModulation = gridSums.at(Target::controlCutoff, 0),
             .keytrack = keytrack,
         });
         const float k = filterResonanceK({
             .resonance = read(knobs.resonance[f], ahead),
+            .resonanceModulation = gridSums.at(Target::resonance, f),
             .controlResonance = read(knobs.controlResonance, ahead),
+            .controlModulation = gridSums.at(Target::controlResonance, 0),
         });
         if (std::isfinite(octaves))
         {
@@ -724,23 +1434,33 @@ private:
     }
 
     /// An upper bound on the modulation of part p's Mix, in internal units,
-    /// over the `length` samples from the block's sample `done`: the seam
-    /// M1.5 fills. Each modulation route to Mix X adds one term, its amount
-    /// times its source's bound over those samples (an LFO's largest value
-    /// there, a mod envelope's 0 when idle or held at 0, otherwise the
-    /// source's range); the test below doesn't change. 0 until then: Mix has
-    /// no modulation.
-    [[nodiscard]] static float mixModulationBound(std::size_t /*part*/, const VoiceKnobs& /*knobs*/,
-                                                  std::size_t /*done*/, std::size_t /*length*/) noexcept
+    /// over the `length` samples from the block's sample `done`: each route
+    /// to Mix adds its amount times its source's interval there
+    /// (modulation::targetBound()). Exactly 0 with no route to it.
+    [[nodiscard]] float mixModulationBound(std::size_t part, const VoiceKnobs& knobs, std::size_t done,
+                                           std::size_t length) const noexcept
     {
-        return 0.0f;
+        if (!routesTo(Target::mix, part))
+        {
+            return 0.0f;
+        }
+        const auto& context = contextOf(knobs);
+        modulation::SourceBounds bounds{};
+        for (const auto& r : compiled().live())
+        {
+            if (r.target == Target::mix)
+            {
+                bounds[index(r.source)] = boundOf(r.source, knobs, context, done, length);
+            }
+        }
+        return modulation::targetBound(compiled(), Target::mix, part, bounds).hi;
     }
 
     /// Part p's Mix, knob plus modulation, can't be above the law's 0 over
     /// the `length` samples from the block's sample `done`: the ramp is
     /// linear, so its larger end bounds it.
-    [[nodiscard]] static bool mixSilent(std::size_t p, const VoiceKnobs& knobs, std::size_t done,
-                                        std::size_t length) noexcept
+    [[nodiscard]] bool mixSilent(std::size_t p, const VoiceKnobs& knobs, std::size_t done,
+                                 std::size_t length) const noexcept
     {
         const auto* ramp = knobs.mix[p];
         const auto at = knobs.offset + done;
@@ -836,20 +1556,48 @@ private:
         }
     }
 
-    void renderChunk(const AudioBlock& out, const VoiceKnobs& knobs, std::size_t done) noexcept
+    void renderChunk(const AudioBlock& out, const VoiceKnobs& knobs, std::size_t done, bool callStart) noexcept
     {
         const auto length = out.numSamples();
         leaveMonoIfMoved();
         const std::size_t channels = mono ? 1 : 2;
         const Plan plan = planChunk(knobs, done);
+        const auto& context = contextOf(knobs);
+
+        // For an observer: every source's bound, at a grid point or a call's
+        // start (where the skip test may test again), to the segment's end.
+        const bool rebound = observer != nullptr && (gridPosition == 0 || callStart);
+        modulation::SourceBounds bounds{};
+        for (std::size_t s = 1; rebound && s < sourceCount; ++s)
+        {
+            bounds[s] = boundOf(static_cast<Source>(s), knobs, context, done, gridSamples - gridPosition);
+        }
+
+        // 0. The amp envelopes (always; sources too, and nothing they compute
+        // depends on the slots), then the other sources and the per-sample
+        // sums of Pitch and Mix. With no routes, nothing.
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            envelopes[p].process(std::span{envelopeBuffers[p]}.first(length));
+        }
+        if (!compiled().empty())
+        {
+            renderSources(knobs, context, done, length);
+        }
+        if (observer != nullptr)
+        {
+            observe(knobs, context, done, length, rebound, bounds);
+        }
 
         // 1. The oscillators of each heard part, added into its buffer at the
         // pitch plus drift, in runs of constant drift. While the pitch moves
         // (a glide, a bend's ramp) the slots take it every sample; otherwise
         // once, which is the same to the bit at a constant pitch and cheaper.
-        // A slot no filter takes, or a silent one, is skipped where that is
-        // exact (no gain ramp moving in it); one that can't be is rendered
-        // into its part's buffer, which nothing reads this chunk.
+        // A part whose Pitch is routed takes its own note per sample, the
+        // pitch plus its sum. A slot no filter takes, or a silent one, is
+        // skipped where that is exact (no gain ramp moving in it); one that
+        // can't be is rendered into its part's buffer, which nothing reads
+        // this chunk.
         const bool moving =
             glide.isGliding() || (knobs.bend != nullptr && !knobs.bend->isSteadyFrom(knobs.time + done));
         const float steadyPitch = pitchAt(knobs, done, 0);
@@ -859,6 +1607,11 @@ private:
             {
                 pitches[i] = pitchAt(knobs, done, i);
             }
+        }
+        std::array<bool, partCount> pitchRouted{};
+        for (std::size_t p = 0; p < partCount; ++p)
+        {
+            pitchRouted[p] = routesTo(Target::pitch, p);
         }
         std::array<AudioBlock, partCount> parts{};
         for (std::size_t p = 0; p < partCount; ++p)
@@ -900,6 +1653,19 @@ private:
                                    {
                                        continue;
                                    }
+                                   const bool perSampleNotes = moving || pitchRouted[p];
+                                   auto partNotes = std::span<const float>{notes}.first(run);
+                                   if (pitchRouted[p])
+                                   {
+                                       auto& own = partNoteBuffers[p];
+                                       const auto& sums = sampleSums[0][p];
+                                       for (std::size_t i = 0; i < run; ++i)
+                                       {
+                                           const float base = moving ? notes[i] : steadyPitch + offset;
+                                           own[i] = base + sums[start + i];
+                                       }
+                                       partNotes = std::span<const float>{own}.first(run);
+                                   }
                                    const auto piece = parts[p].subBlock(start, run);
                                    for (std::size_t s = 0; s < slotsPerPart; ++s)
                                    {
@@ -910,9 +1676,9 @@ private:
                                        }
                                        if (slotSkipping[(p * slotsPerPart) + s])
                                        {
-                                           if (moving)
+                                           if (perSampleNotes)
                                            {
-                                               slot.skip(std::span<const float>{notes}.first(run));
+                                               slot.skip(partNotes);
                                            }
                                            else
                                            {
@@ -925,9 +1691,9 @@ private:
                                            parts[p].clear();
                                            cleared[p] = true;
                                        }
-                                       if (moving)
+                                       if (perSampleNotes)
                                        {
-                                           slot.process(piece, std::span<const float>{notes}.first(run));
+                                           slot.process(piece, partNotes);
                                        }
                                        else
                                        {
@@ -937,11 +1703,9 @@ private:
                                }
                            });
 
-        // 2. The amp envelopes (always), and each heard filter's part's Mix
-        // and Solo gains.
+        // 2. Each heard filter's part's Mix and Solo gains.
         for (std::size_t p = 0; p < partCount; ++p)
         {
-            envelopes[p].process(std::span{envelopeBuffers[p]}.first(length));
             if (routes[p].active && plan.output[p])
             {
                 fillMixGains(p, knobs, done, length);
@@ -1003,15 +1767,29 @@ private:
 
     /// Part p's Mix gain at each sample of the chunk that starts at the
     /// block's sample `done`: its knob ramp read at that sample (unity if
-    /// null), plus its modulation (0 until M1.5), through the law; then
-    /// times its Solo gain there (none if null). A linear ramp is monotonic,
-    /// so the same value at both ends of the chunk is a constant over it,
-    /// computed once (and a constant Solo of exactly 1 changes nothing).
+    /// null), plus its modulation's per-sample sum while a route reaches it,
+    /// through the law; then times its Solo gain there (none if null).
+    /// Unmodulated, a linear ramp is monotonic, so the same value at both
+    /// ends of the chunk is a constant over it, computed once (and a
+    /// constant Solo of exactly 1 changes nothing).
     void fillMixGains(std::size_t p, const VoiceKnobs& knobs, std::size_t done, std::size_t length) noexcept
     {
         auto& g = mixGains[p];
         const auto at = knobs.offset + done; // the ramps stand that many samples before this block
-        fillKnobGains(g, knobs.mix[p], at, length);
+        if (routesTo(Target::mix, p))
+        {
+            const auto* ramp = knobs.mix[p];
+            const auto& m = sampleSums[1][p];
+            for (std::size_t i = 0; i < length; ++i)
+            {
+                const float knob = ramp != nullptr ? ramp->valueAfter(at + i) : mixLaw.unity;
+                g[i] = mixGain({.mix = knob, .modulation = m[i]});
+            }
+        }
+        else
+        {
+            fillKnobGains(g, knobs.mix[p], at, length);
+        }
         const auto* solo = knobs.solo[p];
         if (solo == nullptr)
         {
@@ -1127,6 +1905,29 @@ private:
     bool mono = false;                           ///< on the mono path (channel 0 only)
     std::array<bool, partCount> segmentSilent{}; ///< each part's gain is 0 over this segment
     std::array<bool, slotCount> slotSkipping{};  ///< each slot is being skipped
+
+    // The modulation sources (M1.5 task 3).
+    modulation::RouteCompiler compiler;
+    std::array<Adsr, modEnvelopeCount> modEnvelopes{};
+    std::array<modulation::ModEnvelopeSettings, modEnvelopeCount> appliedEnvelopes{}; ///< each's last settings
+    std::array<Lfo, lfoCount> lfos{Lfo{}, Lfo{}};
+    std::array<Lfo, lfoCount> lfoAtSegmentStart{Lfo{}, Lfo{}}; ///< each as it stood at the grid point
+    std::array<Chunk, modEnvelopeCount> modEnvelopeBuffers{};
+    std::array<Chunk, lfoCount> lfoWave{}; ///< each LFO's wave for the segment, rendered ahead
+    std::array<float, lfoCount> lfoGainBefore{};
+    std::array<float, lfoCount> lfoGainNow{}; ///< -1: started at this grid point
+    std::array<float, lfoCount> lfoOffsetNow{};
+    std::array<float, lfoCount> lfoLast{}; ///< each LFO's latest value as a source
+    std::array<bool, sourceCount> live{};  ///< a mod envelope or LFO running
+    std::array<bool, sourceCount> perSample{};
+    modulation::CompiledRoutes perSampleRoutes{};             ///< the routes to Pitch and Mix
+    std::array<Chunk, sourceCount> sourceBuffers{};           ///< a moving source's values over the chunk
+    std::array<std::array<Chunk, partCount>, 2> sampleSums{}; ///< Pitch, Mix: each part's per-sample sum
+    std::array<Chunk, partCount> partNoteBuffers{};           ///< each part's notes while its Pitch is routed
+    modulation::Sums gridSums{};                              ///< the sums at the grid point
+    bool segmentBegun = false;
+    bool keyHeld = false;
+    modulation::SourceObserver* observer = nullptr;
 };
 
 } // namespace anoesis::dsp

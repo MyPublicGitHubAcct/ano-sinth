@@ -5,6 +5,7 @@ A modulation source is anything whose value a route reads: an envelope, an LFO, 
 - **Theory:** polyphonic and monophonic sources and what each costs; how a source's value reaches a destination that reads it every sample; running a source only while something reads it; smoothing a 7-bit controller; bounding a source over a stretch of samples, and why a sum of two monotonic parts isn't monotonic.
 - **Sylenth1:** what is known about each source (inventory §6, [The sources in detail](../reference/sylenth1-features.md#the-sources-in-detail), M14–M23).
 - **Stage 1:** the candidates, prototyped on the library's own classes and measured; the recommendations; what the library needs in stage 2, and what this pushes back on.
+- **The decision and stage 2:** every recommendation chosen; the sources as built in `dsp::Voice`, what differs from the prototype (a flaw in how it restarted an LFO, fixed), the tests, the deliberate breaks, and CPU.
 
 Read [modulation.md](modulation.md) first, then [envelopes.md](envelopes.md), [lfos.md](lfos.md), [keytracking.md](keytracking.md) and [legato-portamento.md](legato-portamento.md) (the velocity ramp and the bend, the model for a global ramp read at absolute samples), and [part-solo-and-skipping.md](part-solo-and-skipping.md) (why each source must bound its value).
 
@@ -397,6 +398,105 @@ Chosen by the project owner on 2026-11-22: every recommendation (Decisions log).
 
 **The inventory (M14–M23):** M14, M16–M19, M21 and M22 are now our working hypotheses, built in stage 2 and checked against the demo in M1.13. M15 and M20's smoothing are our own choices, made for CPU and for zipper, which the demo can only show to differ from Sylenth1. M20's CC 33 is open for M1.9, and M23 (what clocks Step Velocity, what a "-" and a hold step output, and whether a note restarts it) still needs the demo before M1.6 builds it.
 
+## As built
+
+Stage 2 (2026-11-23) built the decision into `dsp::Voice`, test-first, bit for bit the stage-1 prototype (`SourceVoice` with `SourceSettings`' defaults, which are the decided configuration) wherever the prototype agrees with the decision. Where it doesn't, the project owner chose the decision (below).
+
+- **[voice.hpp](../../libs/dsp/include/anoesis/dsp/voice/voice.hpp): the sources in the voice.**
+  - **One `modulation::RouteCompiler`.** `reset()` and `update()` at a note-on from silence, `update()` at each of the voice's own grid points. A note-on on a sounding voice keeps its routes and grid, so a patch change reaches every voice at its own next grid point, wherever the host's blocks fall.
+  - **Two mod envelopes** (`Adsr`), gated exactly as the amp envelopes are: `gateOn()` at every note-on (a retrigger attacks from the level), `legatoGateOn()` at a legato note, `gateOff()` at a note-off, ending at exactly 0, with no velocity input. They take the context's settings at each note-on, and a change reaches a sounding voice at its next grid point. They don't count in `isActive()`, so they don't keep a voice alive.
+  - **Two LFOs** (`Lfo`) in segment order. At each grid point a live LFO's waveform and rate are set (the Rate knob plus LFO Rate's sum, through `lfoRateHz()`), its gain is ramped from the previous grid point's value to the knob plus LFO Gain's sum, its offset is taken, and its wave is rendered for the segment ahead at gain 1. As a source it is 0.5 × gain × (wave + offset) (`lfoSourceValue()`), the gain ramp `before + (now − before) × t` with t < 1, so it stays between its two grid values. It is restarted at a note-on from silence and retriggered on a sounding voice (the rest of the segment rendered again from the copy taken at the grid point). A legato note leaves it alone. A free one is copied from the context's global instance at a note-on from silence, moved on by the voice's own offset into the call (`copyFree()`), and kept through a steal.
+  - **Run only what is read.** A mod envelope or an LFO runs only while `uses()` says a route reads it. Its gates are tracked either way. A route that appears mid-note starts its source at the voice's next grid point, from its note-on state: an envelope reset, gated on, and gated off at once if the key is already up; a non-free LFO restarted; a free LFO copied there, exactly where a running copy would be.
+  - **The other sources.** Velocity (the voice's `Glide` ramp over a glide) and keytrack (`keytrackSource()` of the glide, the bend and the master tune) are read per sample. Both amp envelopes always run, so an amp envelope as a source is there whatever the skip plan does, and the plan is unchanged. The mod wheel, channel pressure and Step Velocity are read from the context at absolute samples.
+  - **Folded delivery.** In each chunk, each source that a route to Pitch or Mix reads goes into a chunk buffer: an envelope's own; an LFO's values; velocity, keytrack or a controller from their closed forms, unless the source is constant over the chunk, when it is one value and each of its routes adds one term. Each route then adds amount × value into its parts' per-sample sums, the product in a statement of its own. A part whose Pitch is routed feeds its slots its own note per sample (the pitch plus the sum). Mix's sum goes into `mixGain({.mix, .modulation})`. Cutoff, Reso, the Filter Control's AB terms and the LFOs' Rate and Gain take `accumulate()` of the sources as they stand at the grid point.
+  - **Bounds.** `boundOf()` fills `BoundInputs` and takes `sourceBound()`: velocity and the controllers by their two ends; keytrack by its parts (the glide's interval plus the bend's, through `keytrackSource()`); the envelopes by stage; an LFO by `lfoBound()` of the segment rendered ahead, with the gain as the interval between its grid values. `mixModulationBound()` is `targetBound(routes, Mix, part, bounds).hi`, over the sources Mix's routes read.
+  - **No routes, no work.** With the compiled routes empty, nothing is rendered or summed, the grid sums are exact 0s, and every target keeps its unmodulated path. The init patch is the voice as it was, to the bit.
+  - **Volume, Pan and Phase** routes compile and are ignored until task 4.
+- **[source_context.hpp](../../libs/dsp/include/anoesis/dsp/modulation/source_context.hpp): what the voice reads from the engine**, through the new `VoiceKnobs::sources` (null is the init patch): the patch, the mod envelopes' settings (`ModEnvelopeSettings`, as `Adsr` takes them), the LFOs' (`LfoSettings`: waveform, Rate, Gain, Offset, Free), the two controllers, the free LFOs' global instances (standing where the knob ramps stand, `offset` samples before the voice's block), and Step Velocity's stand-in. `lfoRateHz()` is the LFO Rate knob's placeholder law (L6, stage 1's), in the library because the voice adds Rate's modulation in knob units before the law. `SourceObserver` is for measurement only: a voice given one reports every chunk's source values, and the bounds where it takes them.
+- **[controller_ramp.hpp](../../libs/dsp/include/anoesis/dsp/modulation/controller_ramp.hpp): the mod wheel and channel pressure.** `ControllerRamp` is `PitchBend`'s closed form generalised to a value 0–1: a linear ramp over 5 ms (`llround(5 ms × rate)`: 240 samples at 48 kHz, 221 at 44.1) from where it stands to each new value, set at the event's absolute sample (`setMidi()`: value / 127) and read by each voice at its own. The product is rounded in a statement of its own.
+
+### What differs from the prototype, and why
+
+- **The flaw found: an LFO's waveform is set before its restart.** The prototype restarts a voice's LFO at a note-on from silence and sets its waveform only at the grid point after. A voice's first note, and any note from silence after the LFO's Waveform knob changed while the voice was idle, therefore started the LFO at the previous waveform's start (a new voice's `Lfo` is a sine, which starts at a quarter cycle) and slewed into the configured wave. That LFO was out of phase for the whole note: a triangle a quarter cycle late (up to 1.0 off, on its ±1 scale, for a full second), a saw up to 1.5, a pulse up to 2.0. The decision says a non-free LFO restarts at the note ("always starts on the top peak"). **The project owner chose the decision**, so the library sets the waveform first (`restartLfo()`), at a note-on from silence and at a late start.
+  - Setting the waveform on a row that draws random values (S&H, Smooth) draws one value, which the restart then replaces. So from a voice's first note on, that voice's random stream is one draw apart from the prototype's.
+  - **How the tests still compare bit for bit:** the prototype is unchanged. Each comparison first primes every voice with one note with both LFOs read, after which the prototype's LFOs already hold the patch's waveforms. It also puts a non-free LFO's S&H on TriSaw (`comparable()`). The two then agree on every scenario at every block size. The S&H path is pinned against a standalone `Lfo` seeded as the voice's. Unprimed, the busy patch differs, which the comparison test also checks.
+- **Only the decided configuration.** No delivery, run, late-start, rate, bound-rule, free-copy or amp-envelope switches; no gate log, replay or bound statistics.
+- **Two branches the decision makes unreachable are left out.** After every grid point and every note-on from silence, a source is live exactly while a route reads it, and a note-on on a sounding voice doesn't recompile. So at such a note-on no source can need starting. The prototype's branches for that case (`renderRestOfSegment()`, kept for its "next note" candidate) can't run in its decided configuration. They also held a latent flaw: their snapshot for a later retrigger was taken mid-segment.
+- **A mod envelope's settings reach a sounding voice at its next grid point.** The prototype took them only at note-ons, so a knob change never reached a held note. The decision makes the mod envelopes the same as the amp envelopes in every way, and an amp envelope's knob reaches a held note. The output is the same wherever the settings don't change mid-note, as in every comparison.
+- **An LFO's Offset is taken at the grid point.** The prototype read the knob at every sample. That is the same while the knob is still, and taking it at the grid point keeps the bound taken there true for the segment if the knob moves.
+- **`ControllerRamp` holds its input:** a value is clamped to [0, 1], NaN is ignored, and `setMidi()` clamps to 0–127. The prototype trusted its inputs; nothing inside the range changes. **`PitchBend` isn't rebuilt on it.** `PitchBend`'s ramp is one expression, which Apple Clang contracts into a fused multiply-add, and its length is rounded from a float 5 ms (220 samples at 44.1 kHz, against 221), so rebuilding it would move the bend, and every voice with it, by an ulp.
+- **The context comes through `VoiceKnobs`**, not through a constructor argument, so `dsp::Voice`'s and `VoiceAllocator`'s constructors are unchanged, and the free LFOs' global instances stand with the knob ramps at `offset`.
+- **`reset()` also clears the key's state.** The prototype's stale "key held" after a reset would gate a late-started envelope on with no key.
+
+**Found in the build:**
+- **The LFO flaw above**, and that a bit-for-bit comparison with the prototype then needs every voice primed, with no random LFO rows.
+- **A source is live exactly while a route reads it**, after every grid point and every note-on from silence. It is what makes the sounding note-on simple, and the tests' late-route cases pin it.
+- **Tempo sync isn't in the voice.** The prototype had none, and `LfoSettings` carries the Rate knob. A synced, non-free LFO needs its exact increment (`notePhaseIncrement()`, tempo-sync.md) scaled by its Rate modulation: a requirement on M1.8 and M1.9.
+
+### Tests (stage 2)
+
+Under `[modulation]` in the default run: 14 test cases in [voice_sources_test.cpp](../../tests/dsp/modulation/voice_sources_test.cpp) and [controller_ramp_test.cpp](../../tests/dsp/modulation/controller_ramp_test.cpp), with [voice_sources_support.hpp](../../tests/dsp/modulation/voice_sources_support.hpp): `LibraryEngine`, the prototype's `SourceEngine` with `dsp::Voice`, and `BoundCollector`, an observer per voice. The prototype is unchanged.
+
+| Test | What it pins down | Tolerance and why |
+|---|---|---|
+| The prototype as decided | `dsp::Voice` through `VoiceAllocator` against `SourceVoice` in its decided configuration, both primed, at host blocks of 1, 37 and 4096, on 7 scenarios: stage 1's busy patch; free LFOs through steals with a keytracked rate and an S&H; routes that appear, change and go mid-note (a key already up, a free LFO); Mono Legato with glides; Cutoff, Reso, the Filter Control's AB, LFO Rate and Gain, and Volume, Pan and Phase routes; random scenarios at 44.1 and 96 kHz. Unprimed, the busy patch differs (the flaw) | bit for bit; 0 allocations |
+| The init patch | the library voice with no context, with an empty patch, and with routes that drop out (None, 0) against the prototype with no routes (dsp::Voice as it was, pinned by stage 1's `[sources-model]`), on 5 voicings (one saw; two parts; 4 × 8 unison resonant; AB crossing; Mono Legato with a glide), the bend, controllers and Step Velocity moving, at host blocks of 1, 37 and 4096 | bit for bit; 0 allocations |
+| Each source's definition | one voice, observed at every sample, against standalone references gated and set at the same samples: velocity and keytrack (a `Glide` pair and a `PitchBend` through a legato glide and two bends), both amp envelopes and both mod envelopes (`Adsr`s), both LFOs (`Lfo`s seeded as the voice's: sine and triangle, then S&H and saw, each starting at its own waveform's start), the wheel and pressure (`ControllerRamp`s), Step Velocity | bit for bit, 20,000 samples × 11 sources × 2 |
+| A source no route reads | Mod Env 1 and LFO 1 read 0 while unrouted; Mod Env 1 routed after its key went up starts at the next grid point (3008), gated on and off there, equal to a standalone `Adsr` | bit for bit |
+| Settings mid-note | a sustain change at 3000 reaches the held voice at 3008, as a standalone `Adsr` given it there | bit for bit |
+| No keeping alive | after the amp envelope's 10 ms release, `isActive()` is false while Mod Env 1, releasing over 5 s, is still above 0.9 | exact |
+| Mix's modulation and the skip test | Mix A's knob at 0, Velocity → Mix A at +5: heard, and the same to the bit as Mix A at 5 with no route; at −5 and 0: silent | bit for bit |
+| Each bound | random scenarios (stage 1's) at 44.1, 48 and 96 kHz and host blocks of 1, 37 and 4096: every source's value at every sample inside the bound the voice took at the last grid point or call start, the S&H included; primed with S&H on TriSaw, the same output as the prototype, the same samples checked and the same summed widths as its bound statistics for every source but the LFOs (whose widths include the priming phase, where the flaw shows); three small rules over the same stretches fail: keytrack's and each LFO's own ends, every source's first value | no sample outside; widths bit for bit; each small rule outside somewhere |
+| The free LFO's copy | an LFO free, routed from the note-on, through a steal at 12,345; then routed mid-note at 7001: 0 until the grid point at 7008, then the global instance's every value, at host blocks of 1, 37 and 4096 | bit for bit |
+| Running only what is read | against the prototype running every source: the same on the busy patch, the free LFOs and a free LFO routed mid-note; different for Mod Env 1 and a non-free LFO routed mid-note | bit for bit, or differs |
+| `ControllerRamp` | 240 / 480 / 221 samples at 48 / 96 / 44.1 kHz; from where it stands, landing exactly; monotonic, its ends bound it; MIDI / 127 and clamps; NaN ignored; against the prototype's `Controller` (linear, 5 ms) over 400 random events at three rates | bit for bit |
+
+**Red first.** Against headers with the API and inert bodies (`ControllerRamp` at 0, the observer never told, the voice ignoring its context), 12 of the 14 cases failed. The two that passed were the init patch (the voice was unchanged, as it must be) and "doesn't keep its voice alive", which passed for the wrong reason: a mod envelope that doesn't exist keeps nothing alive. It now also checks that Mod Env 1 is still releasing when the voice ends, and then it failed too: 13 of 14.
+
+**Deliberate breaks.** 23, each built and run on its own in a runner of just these tests. All 23 were caught by the tests (none only at compile time). Then a 24th, the inert stub's silent observer, confirms the strengthened keep-alive test fails against the stub.
+
+| Break | Caught by |
+|---|---|
+| Velocity held at the chunk's start | the prototype, each source's definition, the bounds' comparison, running only what is read |
+| Keytrack's bound from its own two ends | each bound (keytrack outside it) |
+| A free LFO's copy not moved on to the voice's sample (stage 1's 7 stale samples) | the free LFO's copy, the prototype, running only what is read |
+| A free LFO copied again at every note-on | the free LFO's copy, the prototype, running only what is read |
+| No LFO retrigger on a sounding voice | the prototype, the bounds' comparison, running only what is read |
+| A legato note retriggers the mod envelopes | the prototype, each source's definition |
+| A late start ignores a key already up | a source no route reads, the prototype |
+| A late-started LFO's gain ramps from a stale value | the free LFO's copy |
+| A moving wheel taken as constant over the chunk | the prototype, the bounds' comparison, running only what is read |
+| The controllers ramped over 10 ms | the four `ControllerRamp` tests, the prototype, the bounds' comparison, running only what is read |
+| Mix's modulation not passed to the law | Mix's modulation, the prototype, the bounds' comparison, running only what is read |
+| `mixModulationBound()` 0 | Mix's modulation and the skip test |
+| Amp Env A read from part B's envelope | each source's definition, the bounds' comparison |
+| Step Velocity read as 0 | the prototype, each source's definition, the bounds' comparison, running only what is read |
+| A route's product and sum in one statement (fused) | the prototype, the bounds' comparison, running only what is read |
+| Every mod envelope and LFO always run | the free LFO's copy, a source no route reads, the prototype, the bounds' comparison, running only what is read |
+| An LFO restarted before its waveform is set (the prototype's flaw) | the prototype (the unprimed busy patch then matches it), each source's definition |
+| A part's Pitch sum not added to its notes | the prototype, the bounds' comparison, running only what is read |
+| Cutoff's modulation not fed to the filter | the prototype, the bounds' comparison, running only what is read |
+| LFO Rate's modulation ignored | the prototype, the bounds' comparison, running only what is read |
+| An LFO's bound from its segment's first sample | each bound |
+| A mod envelope's settings not taken at grid points | settings mid-note |
+| A mod envelope keeps its voice alive | no keeping alive, the prototype |
+
+### CPU (stage 2)
+
+`tools/bench.sh "[voice-sources]"` ([voice_sources_benchmark.cpp](../../tests/dsp/benchmarks/voice_sources_benchmark.cpp)), `relwithdebinfo`, Apple M1 Ultra (virtualised), Apple Clang 21.0.0. One voice held at the init patch (A1 one saw, A3, past the attacks), stage 1's 4 and 16 routes, ns per sample; the median of three runs (spread 0.3–4.4%). The prototype in its decided configuration ran in the same runs. Full table: [baselines.md](../performance/baselines.md#2026-11-23-m15-the-sources-as-built).
+
+| One voice (ns / sample) | `dsp::Voice` | the prototype (folded, used only) | stage 1 |
+|---|---:|---:|---:|
+| no context (`VoiceKnobs::sources` null) | 123.9 | | |
+| 0 routes (an empty patch) | 123.6 | 123.7 | 128.7 |
+| 4 routes | 134.6 | 136.3 | 140.6 |
+| 16 routes | 154.8 | 159.5 | 162.2 |
+| 4 routes, the wheel and pressure moving | 136.1 | 137.7 | 141.7 |
+| 16 routes, the wheel and pressure moving | 158.0 | 162.6 | 167.4 |
+
+- **No routes costs nothing against today's voice.** Stage 1's own benchmark of `dsp::Voice` at the init patch, run by the binary built at 8fed2a5 (the voice before this stage) and by this one, interleaved, seven times each: 127.2 against 129.2 ns (medians; spreads 4.5% and 5.2%, this machine drifting by about 4 ns between sets). The paired differences run from −3.8 to +6.7 ns, median +0.8 (+0.6%): within the noise. With no routes the voice adds one comparison per grid point (`RouteCompiler::update()`) and a check per chunk.
+- **Routes cost what stage 1 measured, slightly less:** 4 routes add 11.0 ns per voice (stage 1: 11.9) and 16 routes 31.2 (33.5); with the controllers moving, 12.5 and 34.4. The library runs 1–3% under the prototype in the same runs: it has no candidate switches, gate log or bound statistics to test.
+
 ## Tests
 
 Stage 1's prototypes are checked in the default run under `[sources-model]` ([source_candidates_test.cpp](../../tests/dsp/modulation/source_candidates_test.cpp), 4 test cases):
@@ -406,7 +506,20 @@ Stage 1's prototypes are checked in the default run under `[sources-model]` ([so
 - **Every bound** holds over random scenarios at 44.1, 48 and 96 kHz and host blocks of 1, 37 and 4096 (over a million samples checked). Keytrack from its own ends, every source at its start value, and an LFO from its ends each fail.
 - **A source reconstructed** when its route appears mid-note, after a steal, is the always-run source to the bit, for a mod envelope, an LFO and a free LFO. Started at the next grid point instead, it is exact only for the free LFO.
 
-The measurements are the hidden `[sources-report]`; the CPU numbers are `[!benchmark][sources]` and [baselines.md](../performance/baselines.md#2026-11-22-m15-the-sources-stage-1-prototypes).
+The measurements are the hidden `[sources-report]`; the CPU numbers are `[!benchmark][sources]` and [baselines.md](../performance/baselines.md#2026-11-22-m15-the-sources-stage-1-prototypes). They run unchanged against the new `dsp::Voice`, and the report reproduces to the printed digit (but for the replay's wall-clock time).
+
+Stage 2 adds the library's tests under `[modulation]` in the default run, 14 test cases in [voice_sources_test.cpp](../../tests/dsp/modulation/voice_sources_test.cpp) and [controller_ramp_test.cpp](../../tests/dsp/modulation/controller_ramp_test.cpp) ([as built](#tests-stage-2)):
+
+- `dsp::Voice` is the prototype in its decided configuration to the bit, through the real `VoiceAllocator`, on 7 scenarios at host blocks of 1, 37 and 4096, with no allocation (every voice primed first, a non-free S&H on TriSaw, because of the flaw the library fixes);
+- the init patch is `dsp::Voice` as it was, with no context, an empty patch, or routes that drop out;
+- each source's value is its definition at every sample, against standalone `Adsr`, `Lfo`, `Glide`, `PitchBend` and `ControllerRamp` references;
+- each bound holds against its values over random scenarios at three rates and three host block sizes, its widths are the prototype's, and three small rules fail;
+- a free LFO's copy is the global instance exactly, through a steal and from a late route;
+- running only what is read is running everything wherever the prototype says it is, and differs where it says so;
+- a source no route reads reads 0 and starts at the next grid point from its note-on state; a mod envelope's settings reach a held note at its next grid point; a mod envelope keeps no voice alive; Mix's modulation lifts a part at Mix 0, and the skip test hears it;
+- `ControllerRamp`: 5 ms to the sample, exact ends, clamps, and the prototype's `Controller` to the bit.
+
+The CPU numbers are `[!benchmark][voice-sources]` and [baselines.md](../performance/baselines.md#2026-11-23-m15-the-sources-as-built).
 
 ## References
 

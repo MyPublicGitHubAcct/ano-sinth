@@ -14,7 +14,7 @@ Read [filters.md](filters.md) (the filter, its saturators, and its 32-sample gri
 
 ### What a voice composes
 
-A voice is the per-note copy of the synthesis path. Here it holds four `OscillatorSlot`s (each up to 8 unison voices, stereo), two `LadderFilter`s (stereo), two `Adsr`s (the amp envelopes), and one `PitchDrift` shared by the four slots (decided 2026-11-14). Two mod envelopes and two LFOs per voice join it in M1.5. Global state lives outside it: the knob ramps (the parameter layer, M1.9), the master effects, and Main Volume.
+A voice is the per-note copy of the synthesis path. Here it holds four `OscillatorSlot`s (each up to 8 unison voices, stereo), two `LadderFilter`s (stereo), two `Adsr`s (the amp envelopes), and one `PitchDrift` shared by the four slots (decided 2026-11-14). Two mod envelopes and two LFOs per voice joined it in M1.5 task 3 (built 2026-11-23, [modulation-sources.md](modulation-sources.md#as-built)), with the modulation routes compiled per voice; they run only while a route reads them. Global state lives outside it: the knob ramps (the parameter layer, M1.9), the master effects, and Main Volume.
 
 The voice's work for a block is a fixed order: render the oscillators, compute the envelopes, build each filter's input, run the filters, apply the amp envelopes, add the result to the output. The questions are what each filter's input and output connect to, where the gains sit, and how to lay that out in memory and time.
 
@@ -316,13 +316,13 @@ Two things were settled in the build:
 - **The voice feeds only running filters.** A bypassed or `--` filter isn't fed, and is fed for its starting sample when it comes on.
 
 What it leaves to later tasks:
-- the per-voice modulation terms of the Filter Control (Cutoff X / AB, Reso X / AB), until M1.5 supplies them;
+- the per-voice modulation terms of the Filter Control (Cutoff X / AB, Reso X / AB): supplied by M1.5 task 3 (built 2026-11-23, [modulation-sources.md](modulation-sources.md#as-built)), the sums of the sources as they stand at each grid point;
 - the note's glide, bend, and master tune (task 3; built 2026-11-21, [legato-portamento.md](legato-portamento.md#as-built));
 - Mix and the output bus (task 4; built 2026-11-22, [mixer.md](mixer.md#as-built): each filter's output times its part's envelope and its part's Mix, per sample, into the voice's stereo output; no bus);
 - skipping filters on silence, and the mono path (task 5; stage 1 measured both on the current voice, [part-solo-and-skipping.md](part-solo-and-skipping.md): a filter at rest on zeros skipped to the bit, the mono path exact in 72 of 72 renders once its output stage uses the stereo path's expression, 47.5% saved on the init patch; built 2026-11-22, [as built](part-solo-and-skipping.md#as-built): the skips planned per grid segment, a fed filter at gain 0 frozen, Solo's gains, and the mono path left with `LadderFilter::copyChannel()`);
 - voice allocation (task 2). What a retrigger of a sounding voice does, `stop()`, and `isActive()` are decided and built ([voice-allocation.md](voice-allocation.md#as-built-the-voices-part)).
 
-This completes M1.4's last bullet, the feed through the Filter Control, except for its modulation terms.
+This completes M1.4's last bullet, the feed through the Filter Control, except for its modulation terms, which M1.5 task 3 added.
 
 ### Tests
 

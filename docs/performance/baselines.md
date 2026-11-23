@@ -6,6 +6,36 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-23: M1.5 the sources, as built
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-sources]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.3–4.4%).
+- **What is measured** ([modulation-sources.md](../dsp/modulation-sources.md#cpu-stage-2)): one voice held at the init patch (A1 one saw, A3, past the attacks), `dsp::Voice` with its sources (libs/dsp voice/voice.hpp) and, in the same runs, the stage-1 prototype in its decided configuration (folded, sources run only while used). Stage 1's routes: 4 (Mod Env 1 → Pitch A, LFO 1 → Mix A, Velocity → Mix A, ModWheel → Pitch A) and 16 (every slot, every source, into Pitch, Mix, Cutoff and LFO 2 Gain). *Moving*: the wheel and pressure get a new value every block (a 5 ms ramp).
+
+| Benchmark: one voice (ns / sample) | `dsp::Voice` | prototype |
+|---|---:|---:|
+| no context (`VoiceKnobs::sources` null) | 123.9 | |
+| 0 routes (an empty patch) | 123.6 | 123.7 |
+| 4 routes | 134.6 | 136.3 |
+| 16 routes | 154.8 | 159.5 |
+| 4 routes, controllers moving | 136.1 | 137.7 |
+| 16 routes, controllers moving | 158.0 | 162.6 |
+
+**Against today's voice.** Stage 1's `[sources]` benchmarks, run by the binary built at 8fed2a5 (`dsp::Voice` before this stage) and by this one, interleaved, seven runs each; `dsp::Voice` at the init patch:
+
+| `sources: dsp::Voice, init` (ns / sample) | median | spread |
+|---|---:|---:|
+| 8fed2a5 (before the sources) | 127.2 | 4.5% |
+| this build, no context | 129.2 | 5.2% |
+
+The runs, in pairs (before, after): 123.5/130.1, 123.2/129.9, 122.8/123.3, 128.5/129.3, 127.9/126.3, 127.2/129.2, 127.6/123.8. The paired differences run from −3.8 to +6.7 ns, median +0.8 (+0.6%), with the machine drifting by about 4 ns between the first three pairs and the rest.
+
+### Observations
+
+- **No routes is today's voice**, within the noise: a paired median of +0.8 ns. The voice adds one comparison per grid point and a check per chunk.
+- **Routes cost what stage 1 measured, or slightly less**: +11.0 ns per voice for 4 routes (stage 1: +11.9), +31.2 for 16 (+33.5); moving controllers +12.5 and +34.4. The library runs 1–3% under the prototype in the same runs.
+
+---
+
 ## 2026-11-22: M1.5 the sources, stage 1 (prototypes)
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[sources]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread 0.8–6.6%; one run of "16 routes, buffered, moving" in an earlier set was 672 ns from a host stall and isn't used).
