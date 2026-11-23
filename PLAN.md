@@ -60,7 +60,9 @@ The project owner chose every recommendation (2026-11-23, Decisions log; [the de
 - **Cost:** no routes costs nothing measurable against the build before.
 - **Tests:** 17 deliberate breaks, all caught.
 
-515 tests pass on macOS in debug. **Next:** task 5, the global destinations and hand-offs.
+515 tests pass on macOS in debug.
+
+Task 5 (the global destinations and the hand-offs) is in progress (2026-11-23). Stage 1 gathered the evidence (inventory §6, new [Global destinations, parameters and CCs](docs/reference/sylenth1-features.md#global-destinations-parameters-and-ccs), M28–M30): the manual's default CC table has no modulation control, and the amounts are MIDI-learnable and automatable. It then measured what `dsp::Voice` does with a route to Phaser Frequency or Distortion Amount ([modulation-hand-offs.md](docs/dsp/modulation-hand-offs.md)). Found: such a route alone changes nothing (the init patch to the bit), but it makes a voice's sound depend on routes it never reads (a per-voice change held back by a global one's crossfade, −14.1 dBFS; a late route finding its LFO running, −21.6) and costs up to +3–7% per voice. Recommended: the voice compiles only its own routes; the amounts automatable, the menus preset state by key; no default CCs for modulation; and the hand-offs to M1.6, M1.7, M1.9, M1.10 and M1.11. 518 tests pass on macOS in debug. **Next:** the project owner's decision, then stage 2 and closing the milestone.
 
 **M1.6 (the arpeggiator): task 1 in progress** (2026-11-23). M1.6 is planned in five tasks with shared invariants. Task 1 (the evidence) is research only, so it runs alongside M1.5 task 5. Its sources are gathered (inventory §9, [The arpeggiator: what is known](docs/reference/sylenth1-features.md#the-arpeggiator-what-is-known), AR1–AR18; [arpeggiator.md](docs/dsp/arpeggiator.md)). Found:
 - **the 10 modes**, from the preset template M1.5 used, which contains every mode the manual names: Up, Down, Up/Down, Up/Down 2, Down/Up, Down/Up 2, Random, Ordered, Step Seq, Step Chord, probably in that order;
@@ -402,8 +404,29 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
   - Onto M1.10: presets save the stable IDs.
   - Onto M1.11: the grouped popups.
   - Close the milestone: the docs, PLAN.md, and the Decisions log.
+  - *Status (2026-11-23): stage 1 done; the recommendations await the project owner's decision* ([modulation-hand-offs.md](docs/dsp/modulation-hand-offs.md)).
+    - **The evidence** (inventory §6, new [Global destinations, parameters and CCs](docs/reference/sylenth1-features.md#global-destinations-parameters-and-ccs), M28–M30; §12 annotated):
+      - the manual's default CC table (pp. 31–32, 80 entries) has **no modulation control**: no amount, no source or destination selector, no Mod Envelope knob;
+      - the amounts are MIDI-learnable (a user) and automatable (the developer: "all its controls"); the menus probably are too (v3.050's "option controls", M28);
+      - a CC on an amount appears linear, with no exact centre (M30).
+    - **The registry already defines the global destinations** (task 2: Phaser Frequency and Distortion Amount, `Scope::global`, ramped on the absolute grid, `knob10`). What was open is what `dsp::Voice` does with a route to them. Measured, today's voice (a) against one that compiles only its own routes (b), over the real `VoiceAllocator` ([global_routes_test.cpp](tests/dsp/modulation/global_routes_test.cpp)):
+      - only global routes is the init patch to the bit either way, at host blocks 1/37/4096, with no allocation (a Noise slot and an S&H LFO show no random stream moved);
+      - with per-voice routes and no change mid-note, (a) and (b) agree to the bit;
+      - in (a) a voice's sound depends on routes it never reads: a global change holds back a per-voice change within its 10 ms crossfade (up to −14.1 dBFS of difference), and a late per-voice route finds its LFO already running (−21.6 to −26.0 dBFS);
+      - CPU per voice in (a): 4 global routes within the noise, 16 +4.0 ns (+3%), +8.7 (+7%) while changing ([baselines](docs/performance/baselines.md#2026-11-23-m15-global-routes-stage-1)).
+    - **Recommendations** ([modulation-hand-offs.md](docs/dsp/modulation-hand-offs.md#recommendations)):
+      1. (b): `compile()` takes a scope; the voice compiles `Scope::voice`, M1.7's engine `Scope::global` (the only library change);
+      2. M1.9: the 16 amounts host-automatable floats, −10 to +10, linear, MIDI-learnable;
+      3. M1.9: the 16 destination and 4 misc source menus preset state stored by key, not automatable, since a menu's host value moves when Phase 2 adds a row (alternative: automatable with a fixed capacity);
+      4. M1.9: no default CC for any modulation control, as the manual's map;
+      5. M1.9: one 7-bit law for every bipolar knob, decided there (M30);
+      6. M1.10: each slot as {source key, destination key, amount}, an unknown key loading as "-";
+      7. M1.11: the grouped popups as the demo's (M1, M2);
+      8. M1.7: the engine compiles, sums and crossfades the global routes over 10 ms as the voices do, each effect knob plus its modulation clamped before its law;
+      9. M1.6: no change (Step Velocity is already global);
+      10. M1.10: Copy to Part leaves the modulation slots alone (M29).
 
-**Docs:** modulation architecture ([modulation.md](docs/dsp/modulation.md)); polyphonic versus monophonic modulation; control-rate trade-offs; each source's bound (extending [part-solo-and-skipping.md](docs/dsp/part-solo-and-skipping.md)).
+**Docs:** modulation architecture ([modulation.md](docs/dsp/modulation.md)); polyphonic versus monophonic modulation; control-rate trade-offs; each source's bound (extending [part-solo-and-skipping.md](docs/dsp/part-solo-and-skipping.md)); global routes, the slots as parameters, and the hand-offs ([modulation-hand-offs.md](docs/dsp/modulation-hand-offs.md)).
 
 ### M1.6 Arpeggiator and step sequencer (§9)
 

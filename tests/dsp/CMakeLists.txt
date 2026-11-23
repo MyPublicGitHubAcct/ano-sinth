@@ -53,6 +53,7 @@ add_executable(anoesis_dsp_tests
     modulation/controller_ramp_test.cpp
     modulation/destination_candidates_test.cpp
     modulation/destination_report.cpp
+    modulation/global_routes_test.cpp
     modulation/modulation_report.cpp
     modulation/modulation_test.cpp
     modulation/registry_size_functions.cpp

@@ -6,6 +6,24 @@ Compare only rows from the same machine and build. Percentages are of one core, 
 
 ---
 
+## 2026-11-23: M1.5 global routes, stage 1
+
+- **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[global-routes]"`, 100 samples per benchmark, four runs; the table gives each row's median (the no-routes row spread 124.7–132.5).
+- **What is measured** ([modulation-hand-offs.md](../dsp/modulation-hand-offs.md#what-they-measured)): the destinations' held voice (the init patch, A1 one saw, A3, past the attacks) in `dsp::Voice` as it is (candidate (a)), with routes only to Phaser Frequency and Distortion Amount, which the voice never reads. Candidate (b) leaves them out of the voice, so it costs what no routes costs.
+
+| Benchmark: one voice (ns / sample) | `dsp::Voice` |
+|---|---:|
+| no routes ((b) with any global routes) | 130.3 |
+| (a) 4 global routes (an envelope, an LFO, velocity, the wheel) | 129.6 |
+| (a) 16 global routes | 134.3 |
+| (a) 16 global routes, a change at every grid point (always crossfading) | 139.0 |
+
+### Observations
+
+- **4 global routes are within the noise**; 16 cost +4.0 ns (+3%), and +8.7 (+7%) while they keep changing, per voice.
+
+---
+
 ## 2026-11-23: M1.5 the destinations, as built
 
 - **Machine, compiler, build:** as below (Apple M1 Ultra, virtualised; Apple clang 21.0.0; `relwithdebinfo`). `tools/bench.sh "[voice-destinations]"`, 100 samples per benchmark, three runs; the table gives each row's median (spread up to 8.6%; one prototype run of the crossfading row, 769.9 ns, was a host stall and is outside the median).
