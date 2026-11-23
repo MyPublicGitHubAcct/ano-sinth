@@ -10,7 +10,7 @@ The last task of M1.5 (task 5). [modulation.md](modulation.md) built the model, 
 
 - **Theory:** routes a consumer never reads; a modulation slot as parameters, and why a menu's host value depends on how many entries it has; persisting a choice by key; default CCs and MIDI learn.
 - **Sylenth1:** what is known (inventory §6, new [Global destinations, parameters and CCs](../reference/sylenth1-features.md#global-destinations-parameters-and-ccs), M28–M30). New for this task: the manual's default CC table (pp. 31–32) has no modulation control.
-- **Stage 1:** two candidates for global routes in the voice, measured; the recommendations, and the hand-offs. They await the project owner's decision.
+- **Stage 1:** two candidates for global routes in the voice, measured; the recommendations, and the hand-offs. Chosen by the project owner on 2026-11-23, every one ([The decision](#the-decision)).
 
 Read [modulation.md](modulation.md) first (scope, the registry, and [question 5](modulation.md#question-5-a-per-voice-source-on-a-global-destination), a per-voice source on a global destination).
 
@@ -99,7 +99,7 @@ That is per voice: 16 voices pay it 16 times, for nothing they read.
 
 ## Recommendations
 
-*Stage 1's recommendations. They await the project owner's decision.*
+*Stage 1's recommendations, as written. Chosen by the project owner on 2026-11-23, every one ([The decision](#the-decision)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -130,6 +130,23 @@ That is per voice: 16 voices pay it 16 times, for nothing they read.
 - **Task 3's late-route rule** (a source starts from its note-on state at the next grid point) now holds for every late route. Under (a), a global route reading the same LFO could exempt it.
 - **M1.9's open question** ("task 5 decides automation and CCs") is answered by recommendations 2–5.
 - **The inventory:** §12 annotated (no modulation control in the default map), and M28–M30 new.
+
+## The decision
+
+Chosen by the project owner on 2026-11-23: every recommendation (Decisions log).
+
+- **Global routes in the voice:** the voice compiles only its own routes. `compile()` takes a scope, and `RouteCompiler` compiles for one: `Scope::voice` in `dsp::Voice`, `Scope::global` in M1.7's engine, from the same 16 slots. Stage 2 builds this in `libs/dsp`.
+- **M1.9:**
+  - the 16 amounts are host-automatable floats from −10 to +10, linear, default 0, MIDI-learnable;
+  - the 16 destination menus and the 4 misc source menus are preset state, stored by key, not host-automatable and not MIDI-learnable;
+  - no modulation control has a default CC;
+  - one 7-bit CC law for every bipolar knob, decided in M1.9 (M30).
+- **M1.10:** each slot saved as {source key, destination key, amount}, the misc sources by key; a key a build doesn't know loads as "-" with its amount kept; Copy to Part leaves the modulation slots alone (M29).
+- **M1.11:** the destination popup "-" and the 27 in three headed columns (Oscillators 12, Filters 6, Misc 9), the same in every slot; the source popup "-" and the 11; the slot shows the short label; double-click resets an amount to 0.
+- **M1.7:** the engine compiles the global routes, sums them on the absolute 32-sample grid from the sources' global copies, crossfades any change of them over 10 ms as the voices do, and clamps each effect knob plus its modulation to its range before its law.
+- **M1.6:** no change.
+
+**The inventory (M28–M30):** M28's menus are our own choice, made for Phase 2's rows, whatever the demo shows; M29 is our working hypothesis; M30 goes to M1.9.
 
 ## Tests
 
