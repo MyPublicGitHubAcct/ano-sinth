@@ -64,13 +64,22 @@ The project owner chose every recommendation (2026-11-23, Decisions log; [the de
 
 Task 5 (the global destinations and the hand-offs) is in progress (2026-11-23). Stage 1 gathered the evidence (inventory §6, new [Global destinations, parameters and CCs](docs/reference/sylenth1-features.md#global-destinations-parameters-and-ccs), M28–M30): the manual's default CC table has no modulation control, and the amounts are MIDI-learnable and automatable. It then measured what `dsp::Voice` does with a route to Phaser Frequency or Distortion Amount ([modulation-hand-offs.md](docs/dsp/modulation-hand-offs.md)). Found: such a route alone changes nothing (the init patch to the bit), but it makes a voice's sound depend on routes it never reads (a per-voice change held back by a global one's crossfade, −14.1 dBFS; a late route finding its LFO running, −21.6) and costs up to +3–7% per voice. Recommended: the voice compiles only its own routes; the amounts automatable, the menus preset state by key; no default CCs for modulation; and the hand-offs to M1.6, M1.7, M1.9, M1.10 and M1.11. 518 tests pass on macOS in debug. The project owner chose every recommendation (2026-11-23, Decisions log; [the decision](docs/dsp/modulation-hand-offs.md#the-decision)). Stage 2 built them (2026-11-23), so task 5 is done, and with it M1.5 ([as built](docs/dsp/modulation-hand-offs.md#as-built)): `compile(slots, scope)`, a `RouteCompiler` per scope, and `dsp::Voice` compiling only its own routes. It also found a flaw: a recompile that gave the same routes still started a crossfade and held back the next change, fixed with `sameRoutes()`. The voice is now the patch without its global routes, to the bit, at host blocks 1/37/4096, and global routes cost nothing. The hand-offs are recorded on M1.6, M1.7, M1.9, M1.10 and M1.11. 522 tests pass on macOS in debug, and 520 under ASan/UBSan (which skips the plugin validators). **Next:** M1.6 (the arpeggiator), whose task 1 awaits the project owner's screenshots.
 
-**M1.6 (the arpeggiator): task 1 in progress** (2026-11-23). M1.6 is planned in five tasks with shared invariants. Task 1 (the evidence) is research only, so it ran alongside M1.5 task 5; M1.5 is now closed, so tasks 2–5 can follow it. Its sources are gathered (inventory §9, [The arpeggiator: what is known](docs/reference/sylenth1-features.md#the-arpeggiator-what-is-known), AR1–AR18; [arpeggiator.md](docs/dsp/arpeggiator.md)). Found:
+**M1.6 (the arpeggiator): task 1 done** (2026-11-23). M1.6 is planned in five tasks with shared invariants. Task 1 (the evidence) is research only, so it ran alongside M1.5 task 5; M1.5 is now closed, so tasks 2–5 can follow it. Its sources are gathered (inventory §9, [The arpeggiator: what is known](docs/reference/sylenth1-features.md#the-arpeggiator-what-is-known), AR1–AR20; [arpeggiator.md](docs/dsp/arpeggiator.md)). Found:
 - **the 10 modes**, from the preset template M1.5 used, which contains every mode the manual names: Up, Down, Up/Down, Up/Down 2, Down/Up, Down/Up 2, Random, Ordered, Step Seq, Step Chord, probably in that order;
 - **every control's range**: Gate 0–100, Octave 1–4, Time 1/1 to 1/64, and Wrap 0–16; 16 steps of ±24 semitones, velocity 0–127 and Hold; five velocity modes;
 - **from the developer**: the sequence runs while any key is held, restarts at a key after silence, and aligns key changes to its own steps;
 - **two conflicts with earlier hypotheses**: Step Velocity as a gate that drops between steps, which puts a "-" step at 0 against M23; and per-parameter sync ranges against S1's one list.
 
-**Next:** the project owner's screenshots of the demo's Mode and Velocity popups and the arpeggiator panel (AR1, AR13, AR14). No code changes.
+The project owner's screenshots of the demo (2026-11-23) settle AR1's menu, AR13's menu and AR14:
+- **The menus are as hypothesised.** Mode has the template's 10 in its order, labelled Up/Down2, Down/Up2, Step and Chord. Velocity has the five in the template's order.
+- **The panel** shows the steps 8 to a page with a page selector and no step-length control, so Wrap is the only length, and its bottom reads "-".
+- **Against the hypothesis:** there are no C and P buttons. A ▼ menu holds Copy, Paste, Init and Lock.
+- **Swing's knob** is marked 0–100–200, at 0 in both presets.
+- **Not captured:** the LCD at Wrap's and Swing's ends.
+
+AR19 (the pages) and AR20 (the panel menu) are new. Requirements went to tasks 2, 3 and 5. Task 1 is done.
+
+**Next:** M1.6 task 2 (the pattern), stage 1.
 
 **Phase 5 (VCV Rack modules) added to the plan** (2026-11-14). Not started. It starts after Phase 2 (D10, decided 2026-11-14). Its license and distribution are still open (D11).
 
@@ -444,8 +453,8 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
 - Random draws come from the seedable generator ([white-noise.md](docs/dsp/white-noise.md)), so the same MIDI renders the same audio.
 - `libs/dsp` rules: a fixed-capacity held-note set (no allocation after `prepare()`), no RTTI or exceptions, no JUCE. The pattern and the clock are separate plain-C++ pieces, and the pattern can be driven by an external clock and reset (R1's Rack module). The modes sit behind one interface, so Phase 2 can add modes (CLAUDE.md).
 
-- [~] **Task 1: The evidence (modes, controls, the step sequencer, velocity).** Research only, with no library code. §9 of the inventory gets a "what is known" table and new questions (AR1, AR2, …), each with a working hypothesis and a protocol for the demo (M1.13). Start [docs/dsp/arpeggiator.md](docs/dsp/arpeggiator.md): the theory and "Sylenth1: what is known".
-  - *Status (2026-11-23): the evidence is gathered* (inventory §9, new [The arpeggiator: what is known](docs/reference/sylenth1-features.md#the-arpeggiator-what-is-known), AR1–AR18; S1 and M23 annotated; [arpeggiator.md](docs/dsp/arpeggiator.md) started). Found:
+- [x] **Task 1: The evidence (modes, controls, the step sequencer, velocity).** Research only, with no library code. §9 of the inventory gets a "what is known" table and new questions (AR1, AR2, …), each with a working hypothesis and a protocol for the demo (M1.13). Start [docs/dsp/arpeggiator.md](docs/dsp/arpeggiator.md): the theory and "Sylenth1: what is known".
+  - *Status (2026-11-23): the evidence is gathered* (inventory §9, new [The arpeggiator: what is known](docs/reference/sylenth1-features.md#the-arpeggiator-what-is-known), AR1–AR18, and AR19–AR20 from the screenshots; S1 and M23 annotated; [arpeggiator.md](docs/dsp/arpeggiator.md) started). Found:
     - **The 10 modes**, from the third-party preset template that M1.5 used, which contains every mode the manual names: Up, Down, Up/Down, Up/Down 2, Down/Up, Down/Up 2, Random, Ordered, Step (Seq), (Step) Chord. Their host values are k/9 in that order, so that is probably the menu's order (AR1). Vintage Synth Explorer lists the same 9 without Random. Nothing says what the "2" variants change (AR2, hypothesis: they repeat the top and bottom notes).
     - **The ranges** (the template): Gate 0–100, Octave 1–4, Time 1/1 to 1/64 synced, and Wrap 0–16. There are 16 steps, each with a Transpose of ±24 semitones, a Velocity of 0–127 ("-" probably 0, AR12) and a Hold. Velocity modes Key, Hold, Step, Step+Key, Step+Hold. Swing came in v3.050, with nothing on its range (AR15). The template's Time, LFO Rate (to 1/256T) and Delay ranges differ, which is new evidence against S1's one list (for M1.9).
     - **The developer on the sequence** (2009, 2017, 2018): it runs while any key is held, a key after silence restarts it at the press, and key changes are "aligned to the arp's own sequence". There is no dry/wet. Wrap ≤ n held notes never reaches Up/Down's way down. Whether the pattern continues by index or by pitch is open (AR8).
@@ -453,6 +462,17 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
     - **Pages** in the step panel: the manual's text doesn't mention them, and the template has no page field (AR14, a UI question).
 
     *Owner action to finish task 1:* screenshots of the demo's Mode and Velocity popups (AR1, AR13), the arpeggiator panel (AR14: pages, copy and paste), and the LCD at Wrap's and Swing's ends. This is black-box observation, as M1 and M2 were.
+
+    *Settled (2026-11-23): the project owner's screenshots of the demo settle AR1's menu, AR13's menu and AR14* (recorded as text in the inventory, [The demo's popups and panel](docs/reference/sylenth1-features.md#the-arpeggiator-what-is-known)):
+    - **Mode** has the template's 10 in its order, labelled Up, Down, Up/Down, Up/Down2, Down/Up, Down/Up2, Random, Ordered, Step, Chord, as hypothesised. Mode's host values (k/9) stay a demo measurement.
+    - **Velocity** has Key, Hold, Step, Step + Key, Step + Hold, as hypothesised. The mix stays open.
+    - **The panel** shows the steps 8 to a page ("PAGE 1" and a ▼), with no step-length control. Wrap's bottom reads "-", which supports 0 as off. Gate reads "50.00 %" at its centre.
+    - **Against the hypothesis**, there are no C and P buttons: a ▼ menu holds Copy, Paste, Init and Lock.
+    - **Swing's knob** is marked 0–100–200, at 0 in both presets. Its LCD reading and law stay open.
+    - **New questions:** AR19 (the page menu) and AR20 (the panel menu).
+    - **Not captured:** the LCD at Wrap's and Swing's ends. They are now the first step of AR15's protocol, for M1.13 or a later screenshot.
+
+    Task 1 is done.
 - [ ] **Task 2: The pattern** (the modes, Octave, Wrap, the held-note set; AR1–AR9, AR16). Stage 1 prototypes and measures:
   - each mode as a pure function of the set and the step number, with the Up/Down variants' two readings and note-major against octave-major octaves;
   - Wrap's count;
@@ -463,17 +483,22 @@ Written: [filter theory](docs/dsp/filter-theory.md), [filters](docs/dsp/filters.
   - a loose chord.
 
   Each is rendered through the real `VoiceAllocator`, so the differences can be heard and diffed. Where it lives in `libs/dsp` (a new `sequencing` area?) and the mode interface are part of the decision.
-- [ ] **Task 3: The clock** (Time, Gate, Swing, the events; AR10, AR15, S1, S4, S7–S10). Steps and gate ends at exact samples from the sequence's start, under tempo steps and ramps (the phase within a step kept, S9). The swing's law and the gate under swing. Gate 100% (off before on) and Gate 0. The onset's fraction of a sample to `noteOn(since)`. An external clock and reset in place of the tempo (R1). Bit for bit at host blocks 1/37/4096, and three hours at 1/8T and 93 BPM on the right samples (tempo-sync's test).
+
+  *Requirements from task 1 (2026-11-23, the demo's screenshots):*
+  - **The modes** are exactly the 10, in the menu's order (Up, Down, Up/Down, Up/Down2, Down/Up, Down/Up2, Random, Ordered, Step, Chord). That is the registry's order and the parameter's value order (M1.9). The labels are ours (M1.11).
+  - **There is no step-length parameter.** Wrap (0–16) is the only length, in every mode, including the step modes. Its bottom value reads "-", so Wrap 0 means off: each mode's natural length, and 16 steps in the step modes. That is the candidate to build on, and AR4 still measures it.
+  - **The pages are a view** (8 steps each). They don't enter the pattern (AR19).
+- [ ] **Task 3: The clock** (Time, Gate, Swing, the events; AR10, AR15, S1, S4, S7–S10). Steps and gate ends at exact samples from the sequence's start, under tempo steps and ramps (the phase within a step kept, S9). The swing's law and the gate under swing. Gate 100% (off before on) and Gate 0. The onset's fraction of a sample to `noteOn(since)`. An external clock and reset in place of the tempo (R1). Bit for bit at host blocks 1/37/4096, and three hours at 1/8T and 93 BPM on the right samples (tempo-sync's test). *Requirement from task 1 (2026-11-23, the demo's panel): Swing is a 0–200 parameter (its knob's marks), with 0 straight (both presets shown sit at 0), so each candidate law maps 0–200 to the off-beat's delay. Candidates: 200 as a 75% pair (s/200 of half a step); 100 as a triplet feel and 200 as an 83% pair; or 100 as something else. The LCD at 0, 100 and 200 (AR15's first step) narrows them down. Gate's LCD reads "50.00 %" at its centre, to two decimals, so Gate is probably a continuous 0–100 %, not whole percents.*
 - [ ] **Task 4: The step sequencer, velocity and Step Velocity** (AR11–AR13, AR18, M23). Transpose, velocity and the rest, and Hold (a tie: no note-off, so the next note overlaps). The five velocity modes and the Step+Key and Step+Hold mixes. **Step Velocity replaces M1.5's stand-in.** *Requirement from M1.5 task 3 (decided 2026-11-22, [modulation-sources.md](docs/dsp/modulation-sources.md#the-decision)): the developer: "The gate is indeed always on", so **the step sequencer runs as a modulation source whether or not the arpeggiator is on** ("The arp does not need the step values"). Step Velocity is one global value, the current step's velocity (0–1), replacing M1.5's stand-in input (`modulation::SourceContext::stepVelocity`, [source_context.hpp](libs/dsp/include/anoesis/dsp/modulation/source_context.hpp); `SourceContext::stepVelocity` in the prototype). Each step's value arrives as an event at its sample and splits the block, so the value is constant between events and its bound from its two ends stays exact. M23 settles what clocks it, what a "-" step ("will skip the step") and a hold step output, and whether a note restarts the pattern.* *From M1.5 task 5 (decided 2026-11-23): no change. Step Velocity is a global source, so a route from it to a global destination (M1.7) reads the same value the voices read.*
-- [ ] **Task 5: Into the voices, and hand-offs** (AR16, AR17).
+- [ ] **Task 5: Into the voices, and hand-offs** (AR16, AR17; AR19 and AR20 as hand-offs).
   - The arp's notes go into `VoiceAllocator` as played notes, so Polyphony, stealing, Mono Legato, portamento, velocity and keytrack (F18) apply. A tie is a legato overlap.
   - The on/off switch while keys are held.
   - The hold pedal on the input keys, on the output notes, or ignored.
   - Then hand-offs:
     - onto M1.8: MIDI → arpeggiator → allocator in the engine, and the transport and tempo;
     - onto M1.9: the parameters (Mode, Time and its own value list, Gate, Wrap, Octave, Velocity, Swing, on/off, and the 48 step parameters, with which are automatable);
-    - onto M1.10: presets save the steps;
-    - onto M1.11: the panel, its steps, and C and P;
+    - onto M1.10: presets save the steps, and what the panel menu's Copy, Paste and Init carry (AR20). The page shown isn't saved unless AR19 finds otherwise;
+    - onto M1.11: the panel, its steps in two pages of 8 (AR19), and a panel menu with copy, paste, init and lock in place of the manual's C and P (AR20, task 1; Lock with v3's locking, AL7);
     - onto R1: the clock and reset inputs.
   - Close the milestone: the docs, PLAN.md, and the Decisions log.
 
