@@ -276,7 +276,7 @@ Every candidate gives the same output at host blocks of 1, 37 and 4096, with no 
 
 ## Recommendations
 
-*Stage 1's recommendations. Where only the demo can settle a question (M24–M27), the recommendation is the working hypothesis, and the measurement is what makes it the safer default.*
+*Stage 1's recommendations, as written. Where only the demo can settle a question (M24–M27), the recommendation is the working hypothesis, and the measurement is what makes it the safer default. Chosen by the project owner on 2026-11-23, every one ([The decision](#the-decision)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -321,6 +321,19 @@ Every candidate gives the same output at host blocks of 1, 37 and 4096, with no 
 - **The modulated Pan path and `StereoGain` differ while the Pan knob ramps** (the chord against the law, −20.4 dB at a switch then). This is accepted, since it needs a route change within 10 ms of a Pan knob move.
 - **The registry** is unchanged. Its rows already carry every rate, unit and range the prototype reads.
 - **The inventory:** M8 and M9 annotated, and M24–M27 new.
+
+## The decision
+
+Chosen by the project owner on 2026-11-23: every recommendation (Decisions log). Stage 2 builds them into `OscillatorSlot` and `dsp::Voice`, bit for bit the stage-1 prototype in its decided configuration at host blocks of 1, 37 and 4096, with no allocation.
+
+- **The knobs under modulation:** the slot's own 10 ms ramps in knob units, started where its gain ramps start. Its gain ramps move on while the modulated path renders (`StereoGain::skip()`), and a presence ramp per unison voice fades voices in and out there. The slot takes Volume and Pan in knob units, with the Volume law (linear, 10 = unity) in `libs/dsp` as `volumeLaw`. The new ramps are advanced lazily, so the init patch costs what it did.
+- **A change of the routes:** a crossfade of the sums over ⌈10 ms × fs / 32⌉ segments, from the grid point where the compiled routes change. It is per sample for Pitch, Mix, Volume and Phase, and at each grid point for the others. The old routes' sources run until it ends, a further change is taken at its end, and each bound is the larger of the old routes' and the new routes'. M1.9 sends amounts as they are.
+- **Volume and Pan on Noise:** the mix at unit volume from the pan positions at the grid points, interpolated, times the volume per sample, with two draws per sample on that path.
+- **The Volume skip test:** a slot is silent over a segment where the Volume knob's larger end plus the routes' bound can't lift the clamp above 0.
+- **Phase:** folded per sample, with a band-limited jump where the step leaves [0, Nyquist). A note from silence starts at Phase plus the Phase sum at the note-on, and a retrigger lands at Phase plus the offset in force. The offset returns to 0 through the sum when the routes go, and a skip carries it.
+- **The clamps:** Volume and Pan clamped to [0, 10] before their laws, Phase wrapping, Pitch unclamped.
+
+**The inventory (M24–M27):** M25–M27 are now our working hypotheses, built in stage 2 and checked against the demo in M1.13. M24's crossfade is our own choice, made for clicks, which the demo can only show to differ from Sylenth1.
 
 ## Tests
 
