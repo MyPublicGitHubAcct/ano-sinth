@@ -322,7 +322,7 @@ Every candidate gives the same output at host blocks of 1, 37 and 4096, with no 
 
 ## Recommendations
 
-*Stage 1's recommendations. Where only the demo can settle a question (M14–M23), the recommendation is the working hypothesis, and the measurement is what makes it the safer default. Awaiting the project owner's decision.*
+*Stage 1's recommendations, as written. Where only the demo can settle a question (M14–M23), the recommendation is the working hypothesis, and the measurement is what makes it the safer default. Chosen by the project owner on 2026-11-22, every one ([The decision](#the-decision)).*
 
 | # | Question | Recommendation | Why | Alternatives | Settled by |
 |---|---|---|---|---|---|
@@ -377,6 +377,25 @@ Every candidate gives the same output at host blocks of 1, 37 and 4096, with no 
   - **A route's amount steps when it changes** (−22.8 dB on a held note when a route appears at Mix −5): decide whether amounts ramp as knobs do (10 ms) or step as a menu choice does. That is a question for task 4 too.
 - **Task 4:** reads this task's per-sample sums and sources. The Volume skip test takes `targetBound()` with these bounds.
 - **The inventory:** E9, E10, L8, AL9, K3 and F20 are annotated, and M14–M23 are new.
+
+## The decision
+
+Chosen by the project owner on 2026-11-22: every recommendation (Decisions log). Stage 2 builds them into `dsp::Voice`, bit for bit the stage-1 prototype in its decided configuration at host blocks of 1, 37 and 4096, with no allocation.
+
+- **Delivery:** folded. At each chunk, each source a per-sample route reads goes into a chunk buffer (an envelope's own buffer; an LFO from its segment rendered ahead; a linear source or a controller from its closed form), or, if it is constant over the chunk, is added as one term. Each route then adds amount × value into its target's per-sample sum, the product in a statement of its own.
+- **Running only what is used:** a mod envelope or an LFO runs only while `uses()` says a route reads it, and its gates are tracked either way. A route that appears mid-note starts its source at the voice's next grid point, from its note-on state: an envelope gated on there (and off if the key is already up), a non-free LFO restarted, a free LFO copied from the global instance and moved on to the voice's own sample. The amp envelopes, velocity, keytrack and the global sources are always there.
+- **The mod wheel and channel pressure:** a 5 ms linear ramp from where the value stands to each new one, read at absolute samples as `PitchBend` is: one global object per controller, set at each event's sample with value / 127. CC 1 is 7-bit (whether CC 33 refines it is M1.9's); channel pressure only, polyphonic aftertouch ignored.
+- **Velocity and keytrack:** per sample, folded while still. Keytrack's bound comes from its parts (the glide's interval plus the bend's, plus the master tune), velocity's from its two ends.
+- **Mod envelopes:** two `Adsr`s per voice, the same as the amp envelopes in every way (E9): gated at each note-on, `legatoGateOn()` at a legato note, attacking from their level at a retrigger, released at a note-off, ending at exactly 0, no velocity input, the amp envelopes' knob laws (M1.9). They don't keep a voice alive. Their bound is by stage.
+- **LFOs:** two `Lfo`s per voice in segment order (task 2): restarted at a note-on from silence, retriggered (slewed) on a sounding voice, left alone by a legato note. Free: copied from the engine's global instance at a note-on from silence, moved on to the voice's own sample, and kept through a steal; a voice's rate modulation makes the copy its own. The global instances run at their knobs' rates, never synced. Their bound comes from the segment rendered ahead.
+- **AmpEnv A/B:** each part's own amp envelope, alone (0–1), read from the voice's envelope buffer. Both amp envelopes keep running whatever the skip plan does, so the plan doesn't change.
+- **Step Velocity:** a global stand-in input until M1.6, 0 by default, set by the engine at event samples; its bound is its two ends.
+- **Bounds:** task 2's kinds (an envelope by stage, an LFO from its segment rendered ahead, a linear source and a controller from their two ends, keytrack from its parts), computed only for the sources that a route to a factor the skip test reads uses, at the voice's grid points and call starts.
+- **No routes:** the init patch stays on `dsp::Voice`'s path. Nothing runs and nothing is summed while the compiled routes are empty, and a target with no routes keeps its unmodulated path.
+
+**Still open, for M1.9 and task 4:** whether a route's amount ramps when it changes (10 ms, as a knob) or steps (as a menu choice does). A route that appears at Mix −5 on a held note clicks at −22.8 dB whatever its source does. It is not part of this decision.
+
+**The inventory (M14–M23):** M14, M16–M19, M21 and M22 are now our working hypotheses, built in stage 2 and checked against the demo in M1.13. M15 and M20's smoothing are our own choices, made for CPU and for zipper, which the demo can only show to differ from Sylenth1. M20's CC 33 is open for M1.9, and M23 (what clocks Step Velocity, what a "-" and a hold step output, and whether a note restarts it) still needs the demo before M1.6 builds it.
 
 ## Tests
 
